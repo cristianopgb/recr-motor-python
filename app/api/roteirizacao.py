@@ -10,7 +10,7 @@ router = APIRouter()
 def roteirizar(request: RoteirizacaoRequest):
     erros = validation_service.validar(request.payload)
     if erros:
-        raise HTTPException(status_code=422, detail=erros)
+        raise HTTPException(status_code=422, detail={"errors": erros})
 
     resultado = pipeline_service.executar(request.payload)
     return RoteirizacaoResponse(sucesso=True, resultado=resultado)
