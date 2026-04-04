@@ -1,10 +1,16 @@
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
-# =========================
-# CARTEIRA (38 COLUNAS EXATAS)
-# =========================
+# ============================================================
+# CARTEIRA REC - CONTRATO OFICIAL (38 COLUNAS)
+# IMPORTANTE:
+# - aceitar exatamente o shape vindo do Sistema 1
+# - permitir campos extras sem quebrar
+# - não inventar renomeações fora do contrato
+# ============================================================
+
 class CarteiraItem(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
 
@@ -39,40 +45,43 @@ class CarteiraItem(BaseModel):
     Observacao_R: Optional[Any] = Field(default=None, alias="Observação R")
     Ref_Cliente: Optional[Any] = Field(default=None, alias="Ref Cliente")
     Cidade_Dest: Optional[Any] = Field(default=None, alias="Cidade Dest.")
-    Mesoregiao: Optional[Any] = Field(default=None, alias="Mesoregião")
+    Mesoregião: Optional[Any] = None
     Agenda: Optional[Any] = None
     Tipo_C: Optional[Any] = Field(default=None, alias="Tipo C")
-    Ultima: Optional[Any] = Field(default=None, alias="Última")
+    Última: Optional[Any] = None
     Status: Optional[Any] = None
     Lat: Optional[Any] = Field(default=None, alias="Lat.")
     Lon: Optional[Any] = Field(default=None, alias="Lon.")
 
 
-# =========================
-# VEÍCULOS
-# =========================
+# ============================================================
+# VEÍCULOS - CONTRATO OFICIAL DO PAYLOAD
+# IMPORTANTE:
+# - removido qualquer conceito antigo como "dedicado"
+# - aceitar somente o shape operacional do Sistema 1
+# ============================================================
+
 class Veiculo(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     id: Optional[Any] = None
     placa: Optional[Any] = None
     perfil: Optional[Any] = None
-    tipo_veiculo: Optional[Any] = None
+    qtd_eixos: Optional[Any] = None
     capacidade_peso_kg: Optional[Any] = None
     capacidade_vol_m3: Optional[Any] = None
-    qtd_eixos: Optional[Any] = None
     max_entregas: Optional[Any] = None
     max_km_distancia: Optional[Any] = None
     ocupacao_minima_perc: Optional[Any] = None
-    dedicado: Optional[Any] = None
-    tipo_frota: Optional[Any] = None
     filial_id: Optional[Any] = None
+    tipo_frota: Optional[Any] = None
     ativo: Optional[Any] = None
 
 
-# =========================
-# REGIONALIDADE
-# =========================
+# ============================================================
+# REGIONALIDADES - CONTRATO ENXUTO
+# ============================================================
+
 class Regionalidade(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
 
@@ -82,24 +91,46 @@ class Regionalidade(BaseModel):
     microrregiao: Optional[Any] = None
 
 
-# =========================
-# PARÂMETROS
-# =========================
+# ============================================================
+# CONFIGURAÇÃO DE FROTA
+# ============================================================
+
+class ConfiguracaoFrotaItem(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+
+    perfil: Optional[Any] = None
+    quantidade: Optional[Any] = None
+
+
+# ============================================================
+# PARÂMETROS - CONTRATO OFICIAL
+# IMPORTANTE:
+# - manter exatamente os campos acordados com o Sistema 1
+# - permitir extras sem quebrar
+# ============================================================
+
 class Parametros(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     usuario_id: Optional[Any] = None
+    usuario_nome: Optional[Any] = None
     filial_id: Optional[Any] = None
+    filial_nome: Optional[Any] = None
+    upload_id: Optional[Any] = None
+    rodada_id: Optional[Any] = None
     data_execucao: Optional[Any] = None
+    data_base_roteirizacao: Optional[Any] = None
+    origem_sistema: Optional[Any] = None
+    tipo_roteirizacao: Optional[Any] = None
     modelo_roteirizacao: Optional[Any] = None
     filtros_aplicados: Optional[Dict[str, Any]] = None
-    tipo_roteirizacao: Optional[Any] = None
-    configuracao_frota: Optional[Any] = None
+    configuracao_frota: Optional[List[ConfiguracaoFrotaItem]] = None
 
 
-# =========================
+# ============================================================
 # REQUEST COMPLETO
-# =========================
+# ============================================================
+
 class RoteirizacaoRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
 
@@ -109,9 +140,10 @@ class RoteirizacaoRequest(BaseModel):
     parametros: Parametros
 
 
-# =========================
-# LOG
-# =========================
+# ============================================================
+# LOG PADRÃO
+# ============================================================
+
 class LogItem(BaseModel):
     modulo: str
     status: str
@@ -120,9 +152,10 @@ class LogItem(BaseModel):
     quantidade_saida: Optional[int] = None
 
 
-# =========================
-# RESPOSTA FINAL
-# =========================
+# ============================================================
+# RESPONSE PADRÃO
+# ============================================================
+
 class RoteirizacaoResponse(BaseModel):
     status: str
     mensagem: str
