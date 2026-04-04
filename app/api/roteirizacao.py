@@ -1,41 +1,58 @@
 from fastapi import APIRouter, HTTPException
-from app.schemas import RoteirizacaoRequest, RoteirizacaoResponse
+from fastapi.responses import JSONResponse
+
+from app.schemas import RoteirizacaoRequest
 from app.services.validation_service import validar_payload
 from app.services.pipeline_service import executar_pipeline
-from app.services.response_service import montar_resposta_sucesso, montar_resposta_erro
 
 router = APIRouter()
 
 
-@router.post("/roteirizar", response_model=RoteirizacaoResponse)
+@router.post("/roteirizar")
 def roteirizar(payload: RoteirizacaoRequest):
     try:
-        # =========================
-        # 1. VALIDAÇÃO DO PAYLOAD
-        # =========================
+        # 1. validação do contrato de entrada
         validar_payload(payload)
 
-        # =========================
-        # 2. EXECUÇÃO DO PIPELINE
-        # =========================
+        # 2. execução/orquestração do pipeline
         resultado_pipeline = executar_pipeline(payload)
 
-        # =========================
-        # 3. MONTAGEM DA RESPOSTA
-        # =========================
-        response = montar_resposta_sucesso(resultado_pipeline)
-
-        return response
+        # 3. devolve resultado bruto estruturado
+        return JSONResponse(
+            status_code=200,
+            content=resultado_pipeline,
+        )
 
     except ValueError as ve:
-        # erro de validação controlado
-        return montar_resposta_erro(
-            mensagem=str(ve),
-            tipo_erro="VALIDACAO"
+        # erro funcional/controlado
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "erro",
+                "mensagem": str(ve),
+                "tipo_erro": "VALIDACAO",
+                "resumo": {
+                    "total_manifestos": 0,
+                    "total_manifestos_fechados": 0,
+                    "total_manifestos_compostos": 0,
+                    "total_nao_roteirizados": 0,
+                },
+                "manifestos_fechados": [],
+                "manifestos_compostos": [],
+                "nao_roteirizados": [],
+                "logs": [
+                    {
+                        "modulo": "api_roteirizacao",
+                        "status": "erro",
+                        "mensagem": f"VALIDACAO: {str(ve)}",
+                        "quantidade_entrada": None,
+                        "quantidade_saida": None,
+                    }
+                ],
+            },
         )
 
     except Exception as e:
-        # erro inesperado
         raise HTTPException(
             status_code=500,
             detail=f"Erro interno no motor de roteirização: {str(e)}"
