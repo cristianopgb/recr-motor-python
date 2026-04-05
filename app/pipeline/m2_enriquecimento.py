@@ -27,20 +27,12 @@ def executar_m2_enriquecimento(
     """
     M2 real adaptado ao Sistema 2 (API).
 
-    Objetivo:
-    - usar a base tratada do M1
-    - calcular distância haversine
-    - aplicar fator rodoviário
-    - calcular transit time com base em 50 km/h e 8h/dia (400 km/dia)
-    - definir data limite considerada
-    - calcular folga
-    - consolidar mesorregiao / microrregiao
-    - gerar ranking preliminar
-
-    Regras operacionais fechadas:
+    Regras:
     - origem = filial da rodada
-    - data base = data_base_roteirizacao da rodada
+    - data base = data_base_roteirizacao
     - transit time = ceil(km_rodoviario / 400)
+    - regionalidades NÃO precisam ter latitude/longitude
+    - latitude/longitude de destino vêm da carteira
     """
 
     carteira = df_carteira_tratada.copy()
@@ -57,12 +49,9 @@ def executar_m2_enriquecimento(
     ]:
         carteira[c] = pd.to_numeric(carteira[c], errors="coerce")
 
-    for c in ["latitude", "longitude"]:
-        geo[c] = pd.to_numeric(geo[c], errors="coerce")
-
     for c in ["data_agenda", "data_leadtime"]:
         if c in carteira.columns:
-            carteira[c] = pd.to_datetime(carteira[c], errors="coerce")
+            carteira[c] = pd.to_datetime(carteira[c], errors="coerce", dayfirst=True)
 
     data_base = pd.to_datetime(data_base_roteirizacao, errors="coerce")
     if pd.isna(data_base):
@@ -103,11 +92,9 @@ def executar_m2_enriquecimento(
     horas_direcao_dia = float(horas_direcao_dia)
     km_dia_operacional = float(km_dia_operacional)
 
-    # origem explícita da rodada = filial
     carteira["origem_latitude"] = carteira["latitude_filial"]
     carteira["origem_longitude"] = carteira["longitude_filial"]
 
-    # distância haversine
     carteira["distancia_km"] = carteira.apply(
         lambda row: _haversine_km(
             row["origem_latitude"],
@@ -143,7 +130,6 @@ def executar_m2_enriquecimento(
         axis=1,
     )
 
-    # data limite considerada
     carteira["data_limite_considerada"] = np.where(
         (carteira["agendada"] == True) & (carteira["data_agenda"].notna()),
         carteira["data_agenda"],
@@ -159,7 +145,6 @@ def executar_m2_enriquecimento(
         np.where(carteira["data_leadtime"].notna(), "leadtime", "sem_data"),
     )
 
-    # folga operacional com base na data da rodada
     carteira["data_base_roteirizacao"] = data_base
     carteira["dias_ate_data_alvo"] = (
         carteira["data_limite_considerada"].dt.normalize() - data_base.normalize()
@@ -168,7 +153,7 @@ def executar_m2_enriquecimento(
     carteira["folga_dias"] = carteira["dias_ate_data_alvo"] - carteira["transit_time_dias"]
     carteira["status_folga"] = carteira["folga_dias"].apply(_classificar_status_folga)
 
-    # geo
+    # regionalidades: só cidade/uf/meso/micro
     geo["_cidade_norm"] = geo["nome"].apply(_normalizar_texto)
     geo["_uf_norm"] = geo["uf"].apply(_normalizar_texto)
 
@@ -325,7 +310,8 @@ def _validar_colunas_minimas(carteira: pd.DataFrame, geo: pd.DataFrame) -> None:
             "\n- ".join(faltam_carteira)
         )
 
-    colunas_minimas_geo = ["nome", "uf", "mesorregiao", "microrregiao", "latitude", "longitude"]
+    # regionalidades no contrato atual NÃO têm latitude/longitude
+    colunas_minimas_geo = ["nome", "uf", "mesorregiao", "microrregiao"]
     faltam_geo = [c for c in colunas_minimas_geo if c not in geo.columns]
     if faltam_geo:
         raise Exception(
@@ -364,14 +350,13 @@ def _obter_valor_parametro(
     dfp = df_parametros.copy()
     dfp["_parametro_norm"] = dfp["parametro"].astype(str).str.strip().str.lower()
 
-    col_valor = "valor"
-    if col_valor not in dfp.columns:
+    if "valor" not in dfp.columns:
         return default
 
     for chave in chaves_possiveis:
         linha = dfp.loc[dfp["_parametro_norm"] == str(chave).strip().lower()]
         if len(linha) > 0:
-            valor = linha.iloc[0][col_valor]
+            valor = linha.iloc[0]["valor"]
             if pd.notna(valor):
                 try:
                     return float(valor)
