@@ -7,7 +7,6 @@ import pandas as pd
 from app.schemas import RoteirizacaoRequest
 from app.services.payload_service import PipelineContext, normalizar_payload_para_pipeline
 
-from app.pipeline.m0_leitura import executar_m0_adapter
 from app.pipeline.m1_padronizacao import executar_m1_padronizacao
 from app.pipeline.m2_enriquecimento import executar_m2_enriquecimento
 from app.pipeline.m3_triagem import executar_m3_triagem
@@ -42,19 +41,55 @@ def _snapshot_dataframe(df: pd.DataFrame, nome: str, max_colunas: int = 20) -> D
     }
 
 
+def _executar_m0_adapter(contexto: PipelineContext) -> Dict[str, Any]:
+    """
+    M0 adaptado para API:
+    - não lê Excel
+    - recebe DataFrames já montados pela camada adaptadora
+    - inventaria a rodada
+    """
+    df_carteira_raw = contexto.df_carteira_raw
+    df_geo_raw = contexto.df_geo_raw
+    df_parametros_raw = contexto.df_parametros_raw
+    df_veiculos_raw = contexto.df_veiculos_raw
+
+    inventario = {
+        "rodada_id": contexto.rodada_id,
+        "upload_id": contexto.upload_id,
+        "usuario_id": contexto.usuario_id,
+        "filial_id": contexto.filial_id,
+        "tipo_roteirizacao": contexto.tipo_roteirizacao,
+        "data_execucao": contexto.data_execucao.isoformat(),
+        "data_base": contexto.data_base.isoformat(),
+        "inputs": {
+            "carteira": _snapshot_dataframe(df_carteira_raw, "df_carteira_raw"),
+            "regionalidades": _snapshot_dataframe(df_geo_raw, "df_geo_raw"),
+            "parametros": _snapshot_dataframe(df_parametros_raw, "df_parametros_raw"),
+            "veiculos": _snapshot_dataframe(df_veiculos_raw, "df_veiculos_raw"),
+        },
+        "caminhos_pipeline": contexto.caminhos_pipeline,
+    }
+
+    return {
+        "inventario": inventario,
+        "df_carteira_raw": df_carteira_raw,
+        "df_geo_raw": df_geo_raw,
+        "df_parametros_raw": df_parametros_raw,
+        "df_veiculos_raw": df_veiculos_raw,
+        "DATA_BASE": contexto.data_base,
+        "caminhos_pipeline": contexto.caminhos_pipeline,
+        "metadados_rodada": contexto.metadados_rodada,
+    }
+
+
 def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     """
-    Orquestra a execução real do pipeline no Sistema 2.
-
-    Fluxo atual:
+    Fluxo real atual:
     - normalização do payload
-    - M0 adaptado
+    - M0 adaptado (interno ao service)
     - M1 real
     - M2 real
     - M3 real
-
-    Observação:
-    - modo 'frota' ainda não foi implementado no pipeline real
     """
 
     logs: list[Dict[str, Any]] = []
@@ -97,7 +132,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             )
         )
 
-        resultado_m0 = executar_m0_adapter(contexto)
+        resultado_m0 = _executar_m0_adapter(contexto)
 
         df_carteira_raw = resultado_m0["df_carteira_raw"]
         df_geo_raw = resultado_m0["df_geo_raw"]
@@ -138,9 +173,16 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             caminhos_pipeline=caminhos_pipeline,
         )
 
-        df_geo_tratado = meta_m1["outputs_m1"]["df_geo_tratado"]
-        df_parametros_tratados = meta_m1["outputs_m1"]["df_parametros_tratados"]
-        df_veiculos_tratados = meta_m1["outputs_m1"]["df_veiculos_tratados"]
+        outputs_m1 = meta_m1.get("outputs_m1", {})
+        df_geo_tratado = outputs_m1.get("df_geo_tratado")
+        df_parametros_tratados = outputs_m1.get("df_parametros_tratados")
+        df_veiculos_tratados = outputs_m1.get("df_veiculos_tratados")
+
+        if df_geo_tratado is None or df_parametros_tratados is None or df_veiculos_tratados is None:
+            raise Exception(
+                "O M1 não retornou outputs_m1 completos com df_geo_tratado, "
+                "df_parametros_tratados e df_veiculos_tratados."
+            )
 
         logs.append(
             _log(
@@ -233,9 +275,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             )
         )
 
-        # ============================================================
-        # RESPOSTA FINAL ATÉ M3
-        # ============================================================
         resumo = {
             "pipeline_real_ate": "M3",
             "rodada_id": contexto.rodada_id,
