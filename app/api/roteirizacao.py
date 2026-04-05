@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
 
 from app.schemas import RoteirizacaoRequest
 from app.services.validation_service import validar_payload
@@ -17,17 +18,16 @@ def roteirizar(payload: RoteirizacaoRequest):
         # 2. execução/orquestração do pipeline
         resultado_pipeline = executar_pipeline(payload)
 
-        # 3. devolve resultado bruto estruturado
+        # 3. serialização segura para JSON
         return JSONResponse(
             status_code=200,
-            content=resultado_pipeline,
+            content=jsonable_encoder(resultado_pipeline),
         )
 
     except ValueError as ve:
-        # erro funcional/controlado
         return JSONResponse(
             status_code=200,
-            content={
+            content=jsonable_encoder({
                 "status": "erro",
                 "mensagem": str(ve),
                 "tipo_erro": "VALIDACAO",
@@ -49,7 +49,7 @@ def roteirizar(payload: RoteirizacaoRequest):
                         "quantidade_saida": None,
                     }
                 ],
-            },
+            }),
         )
 
     except Exception as e:
