@@ -30,7 +30,7 @@ def executar_m2_enriquecimento(
     Regras:
     - origem = filial da rodada
     - data base = data_base_roteirizacao
-    - transit time = ceil(km_rodoviario / 400)
+    - transit time = ceil(km_rodoviario / km_dia_operacional)
     - regionalidades NÃO precisam ter latitude/longitude
     - latitude/longitude de destino vêm da carteira
     """
@@ -53,7 +53,7 @@ def executar_m2_enriquecimento(
         if c in carteira.columns:
             carteira[c] = pd.to_datetime(carteira[c], errors="coerce", dayfirst=True)
 
-    data_base = pd.to_datetime(data_base_roteirizacao, errors="coerce")
+    data_base = _normalizar_datetime_sem_timezone(data_base_roteirizacao)
     if pd.isna(data_base):
         raise Exception("data_base_roteirizacao inválida no M2.")
 
@@ -139,6 +139,17 @@ def executar_m2_enriquecimento(
         carteira["data_limite_considerada"], errors="coerce"
     )
 
+    # garante que também fique tz-naive
+    carteira["data_limite_considerada"] = carteira["data_limite_considerada"].apply(
+        _normalizar_datetime_sem_timezone
+    )
+
+    if "data_agenda" in carteira.columns:
+        carteira["data_agenda"] = carteira["data_agenda"].apply(_normalizar_datetime_sem_timezone)
+
+    if "data_leadtime" in carteira.columns:
+        carteira["data_leadtime"] = carteira["data_leadtime"].apply(_normalizar_datetime_sem_timezone)
+
     carteira["tipo_data_limite"] = np.where(
         (carteira["agendada"] == True) & (carteira["data_agenda"].notna()),
         "agenda",
@@ -146,14 +157,15 @@ def executar_m2_enriquecimento(
     )
 
     carteira["data_base_roteirizacao"] = data_base
+
     carteira["dias_ate_data_alvo"] = (
-        carteira["data_limite_considerada"].dt.normalize() - data_base.normalize()
+        pd.to_datetime(carteira["data_limite_considerada"]).dt.normalize()
+        - pd.to_datetime(data_base).normalize()
     ).dt.days
 
     carteira["folga_dias"] = carteira["dias_ate_data_alvo"] - carteira["transit_time_dias"]
     carteira["status_folga"] = carteira["folga_dias"].apply(_classificar_status_folga)
 
-    # regionalidades: só cidade/uf/meso/micro
     geo["_cidade_norm"] = geo["nome"].apply(_normalizar_texto)
     geo["_uf_norm"] = geo["uf"].apply(_normalizar_texto)
 
@@ -291,6 +303,26 @@ def executar_m2_enriquecimento(
     return df_carteira_enriquecida, resumo
 
 
+def _normalizar_datetime_sem_timezone(value: Any) -> Any:
+    if pd.isna(value):
+        return pd.NaT
+
+    ts = pd.to_datetime(value, errors="coerce")
+    if pd.isna(ts):
+        return pd.NaT
+
+    if getattr(ts, "tzinfo", None) is not None:
+        try:
+            return ts.tz_localize(None)
+        except TypeError:
+            try:
+                return ts.tz_convert(None)
+            except Exception:
+                return pd.Timestamp(ts).tz_localize(None)
+
+    return ts
+
+
 def _validar_colunas_minimas(carteira: pd.DataFrame, geo: pd.DataFrame) -> None:
     colunas_minimas_carteira = [
         "cidade",
@@ -310,7 +342,6 @@ def _validar_colunas_minimas(carteira: pd.DataFrame, geo: pd.DataFrame) -> None:
             "\n- ".join(faltam_carteira)
         )
 
-    # regionalidades no contrato atual NÃO têm latitude/longitude
     colunas_minimas_geo = ["nome", "uf", "mesorregiao", "microrregiao"]
     faltam_geo = [c for c in colunas_minimas_geo if c not in geo.columns]
     if faltam_geo:
