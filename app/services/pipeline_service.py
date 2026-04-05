@@ -4,6 +4,7 @@ from typing import Any, Dict, List
 
 import pandas as pd
 
+from app.pipeline.m2_enriquecimento import executar_m2_enriquecimento
 from app.schemas import RoteirizacaoRequest
 from app.services.payload_service import PipelineContext, normalizar_payload_para_pipeline
 
@@ -83,45 +84,95 @@ def _executar_m0_adapter(contexto: PipelineContext) -> Dict[str, Any]:
     }
 
 
-def _executar_stub_pipeline(contexto: PipelineContext, resultado_m0: Dict[str, Any]) -> Dict[str, Any]:
-    df_carteira_raw = resultado_m0["df_carteira_raw"]
-    df_veiculos_raw = resultado_m0["df_veiculos_raw"]
-    df_geo_raw = resultado_m0["df_geo_raw"]
-    df_parametros_raw = resultado_m0["df_parametros_raw"]
+def _executar_m1_minimo(resultado_m0: Dict[str, Any]) -> pd.DataFrame:
+    """
+    M1 mínimo adaptado para a API.
+    Padroniza somente o necessário para o M2 usando o contrato do Sistema 1.
+    """
+    df = resultado_m0["df_carteira_raw"].copy()
+    parametros_rodada = resultado_m0["parametros_rodada"]
 
-    return {
-        "status": "ok",
-        "mensagem": "Motor recebeu o novo contrato da rodada e preparou o contexto até antes do M2.",
-        "pipeline_real_ate": "M0_adapter",
-        "resumo": {
-            "total_carteira": int(len(df_carteira_raw)),
-            "total_veiculos": int(len(df_veiculos_raw)),
-            "total_regionalidades": int(len(df_geo_raw)),
-            "total_parametros": int(len(df_parametros_raw)),
-            "filial_id": contexto.filial_id,
-            "tipo_roteirizacao": contexto.tipo_roteirizacao,
-            "data_base_roteirizacao": contexto.data_base.isoformat(),
-        },
-        "contexto_rodada": {
-            "filial": contexto.filial,
-            "parametros_rodada": contexto.parametros_rodada,
-        },
-        "snapshots": {
-            "carteira": _snapshot_dataframe(df_carteira_raw, "df_carteira_raw"),
-            "regionalidades": _snapshot_dataframe(df_geo_raw, "df_geo_raw"),
-            "parametros": _snapshot_dataframe(df_parametros_raw, "df_parametros_raw"),
-            "veiculos": _snapshot_dataframe(df_veiculos_raw, "df_veiculos_raw"),
-        },
-        "amostras": {
-            "carteira": _df_to_records(df_carteira_raw, limit=5),
-            "regionalidades": _df_to_records(df_geo_raw, limit=5),
-            "parametros": _df_to_records(df_parametros_raw, limit=15),
-            "veiculos": _df_to_records(df_veiculos_raw, limit=5),
-        },
-        "manifestos_fechados": [],
-        "manifestos_compostos": [],
-        "nao_roteirizados": [],
+    mapa = {
+        "Filial": "filial_roteirizacao",
+        "Romane": "romaneio",
+        "Filial (origem)": "filial_origem",
+        "Série": "serie_romaneio",
+        "Nro Doc.": "nro_documento",
+        "Data Des": "data_descarga",
+        "Data NF": "data_emissao_nf",
+        "D.L.E.": "data_leadtime",
+        "Agendam.": "data_agenda",
+        "Palet": "qtd_pallet",
+        "Conf": "conferencia",
+        "Peso": "peso_kg",
+        "Vlr.Merc.": "valor_nf",
+        "Qtd.": "qtd_volumes",
+        "Peso C": "vol_m3",
+        "Classifi": "tipo_servico",
+        "Tomador": "embarcador",
+        "Destinatário": "destinatario",
+        "Bairro": "bairro",
+        "Cida": "cidade",
+        "UF": "uf",
+        "NF / Serie": "nf_serie",
+        "Tipo Carga": "tipo_carga",
+        "Qtd.NF": "qtd_nf",
+        "Região": "regiao",
+        "Sub-Região": "subregiao",
+        "Ocorrências NFs": "ocorrencias_nfs",
+        "Remetente": "remetente",
+        "Observação R": "observacao_r",
+        "Ref Cliente": "ref_cliente",
+        "Cidade Dest.": "cidade_destino",
+        "Mesoregião": "mesorregiao",
+        "Agenda": "agendada",
+        "Tipo C": "tipo_veiculo_carga",
+        "Última": "ultima_ocorrencia",
+        "Status": "status_operacional",
+        "Lat.": "latitude_destinatario",
+        "Lon.": "longitude_destinatario",
     }
+
+    df = df.rename(columns={k: v for k, v in mapa.items() if k in df.columns})
+
+    colunas_numericas = [
+        "filial_roteirizacao",
+        "romaneio",
+        "filial_origem",
+        "serie_romaneio",
+        "nro_documento",
+        "qtd_pallet",
+        "peso_kg",
+        "valor_nf",
+        "qtd_volumes",
+        "vol_m3",
+        "qtd_nf",
+        "latitude_destinatario",
+        "longitude_destinatario",
+    ]
+    for c in colunas_numericas:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    colunas_datas = ["data_descarga", "data_emissao_nf", "data_leadtime", "data_agenda"]
+    for c in colunas_datas:
+        if c in df.columns:
+            df[c] = pd.to_datetime(df[c], errors="coerce", dayfirst=True)
+
+    if "agendada" in df.columns:
+        df["agendada"] = (
+            df["agendada"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .map({"sim": True, "nao": False, "não": False, "true": True, "false": False})
+            .fillna(False)
+        )
+
+    df["latitude_filial"] = pd.to_numeric(parametros_rodada["filial_latitude"], errors="coerce")
+    df["longitude_filial"] = pd.to_numeric(parametros_rodada["filial_longitude"], errors="coerce")
+
+    return df
 
 
 def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
@@ -156,14 +207,76 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         )
     )
 
-    resultado = _executar_stub_pipeline(contexto, resultado_m0)
+    df_carteira_tratada = _executar_m1_minimo(resultado_m0)
     logs.append(
         _log(
-            modulo="pipeline_service",
+            modulo="m1_minimo",
             status="ok",
-            mensagem="Contexto pronto para encaixe do M1/M2 com contrato atualizado",
+            mensagem="M1 mínimo executado com sucesso para preparar o M2",
+            quantidade_entrada=int(len(contexto.df_carteira_raw)),
+            quantidade_saida=int(len(df_carteira_tratada)),
         )
     )
 
-    resultado["logs"] = logs
-    return resultado
+    df_geo_tratado = contexto.df_geo_raw.rename(
+        columns={
+            "cidade": "nome",
+        }
+    ).copy()
+
+    df_parametros_tratados = contexto.df_parametros_raw.copy()
+
+    df_carteira_enriquecida, resumo_m2 = executar_m2_enriquecimento(
+        df_carteira_tratada=df_carteira_tratada,
+        df_geo_tratado=df_geo_tratado,
+        df_parametros_tratados=df_parametros_tratados,
+        data_base_roteirizacao=contexto.data_base,
+        caminhos_pipeline=contexto.caminhos_pipeline,
+    )
+
+    logs.append(
+        _log(
+            modulo="m2_enriquecimento",
+            status="ok",
+            mensagem="M2 executado com sucesso",
+            quantidade_entrada=int(len(df_carteira_tratada)),
+            quantidade_saida=int(len(df_carteira_enriquecida)),
+            extra=resumo_m2,
+        )
+    )
+
+    return {
+        "status": "ok",
+        "mensagem": "Motor executou com sucesso até o M2.",
+        "pipeline_real_ate": "M2",
+        "resumo": {
+            "total_carteira": int(len(contexto.df_carteira_raw)),
+            "total_veiculos": int(len(contexto.df_veiculos_raw)),
+            "total_regionalidades": int(len(contexto.df_geo_raw)),
+            "total_parametros": int(len(contexto.df_parametros_raw)),
+            "filial_id": contexto.filial_id,
+            "tipo_roteirizacao": contexto.tipo_roteirizacao,
+            "data_base_roteirizacao": contexto.data_base.isoformat(),
+            "resumo_m2": resumo_m2,
+        },
+        "contexto_rodada": {
+            "filial": contexto.filial,
+            "parametros_rodada": contexto.parametros_rodada,
+        },
+        "snapshots": {
+            "carteira_raw": _snapshot_dataframe(contexto.df_carteira_raw, "df_carteira_raw"),
+            "carteira_tratada": _snapshot_dataframe(df_carteira_tratada, "df_carteira_tratada"),
+            "carteira_enriquecida": _snapshot_dataframe(df_carteira_enriquecida, "df_carteira_enriquecida"),
+            "regionalidades": _snapshot_dataframe(contexto.df_geo_raw, "df_geo_raw"),
+            "parametros": _snapshot_dataframe(contexto.df_parametros_raw, "df_parametros_raw"),
+            "veiculos": _snapshot_dataframe(contexto.df_veiculos_raw, "df_veiculos_raw"),
+        },
+        "amostras": {
+            "carteira_tratada": _df_to_records(df_carteira_tratada, limit=5),
+            "carteira_enriquecida": _df_to_records(df_carteira_enriquecida, limit=5),
+        },
+        "manifestos_fechados": [],
+        "manifestos_compostos": [],
+        "nao_roteirizados": [],
+        "logs": logs,
+    }
