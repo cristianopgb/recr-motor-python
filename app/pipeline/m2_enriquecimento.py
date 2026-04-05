@@ -31,8 +31,9 @@ def executar_m2_enriquecimento(
     - origem = filial da rodada
     - data base = data_base_roteirizacao
     - transit time = ceil(km_rodoviario / km_dia_operacional)
-    - regionalidades NÃO precisam ter latitude/longitude
+    - regionalidades são FALLBACK
     - latitude/longitude de destino vêm da carteira
+    - não pode multiplicar linhas da carteira
     """
 
     carteira = df_carteira_tratada.copy()
@@ -40,6 +41,8 @@ def executar_m2_enriquecimento(
     parametros = df_parametros_tratados.copy()
 
     _validar_colunas_minimas(carteira, geo)
+
+    qtd_linhas_entrada = len(carteira)
 
     for c in [
         "latitude_filial",
@@ -139,7 +142,6 @@ def executar_m2_enriquecimento(
         carteira["data_limite_considerada"], errors="coerce"
     )
 
-    # garante que também fique tz-naive
     carteira["data_limite_considerada"] = carteira["data_limite_considerada"].apply(
         _normalizar_datetime_sem_timezone
     )
@@ -166,53 +168,112 @@ def executar_m2_enriquecimento(
     carteira["folga_dias"] = carteira["dias_ate_data_alvo"] - carteira["transit_time_dias"]
     carteira["status_folga"] = carteira["folga_dias"].apply(_classificar_status_folga)
 
-    geo["_cidade_norm"] = geo["nome"].apply(_normalizar_texto)
-    geo["_uf_norm"] = geo["uf"].apply(_normalizar_texto)
+    # ============================================================
+    # FALLBACK DE REGIONALIDADES SEM DUPLICAR LINHAS
+    # de/para:
+    # cidade      -> cidade
+    # regiao      -> microrregiao
+    # subregiao   -> microrregiao
+    # mesorregiao -> mesorregiao
+    # ============================================================
 
+    # garante colunas-base na carteira
+    if "regiao" not in carteira.columns:
+        carteira["regiao"] = np.nan
+    if "subregiao" not in carteira.columns:
+        carteira["subregiao"] = np.nan
+    if "mesorregiao" not in carteira.columns:
+        carteira["mesorregiao"] = np.nan
+
+    # normaliza carteira
     carteira["_cidade_norm"] = carteira["cidade"].apply(_normalizar_texto)
     carteira["_uf_norm"] = carteira["uf"].apply(_normalizar_texto)
 
-    geo_chaves = geo[
-        ["_cidade_norm", "_uf_norm", "mesorregiao", "microrregiao"]
-    ].drop_duplicates()
+    # normaliza geo
+    geo = geo.copy()
 
-    if "mesorregiao" not in carteira.columns:
-        carteira["mesorregiao"] = np.nan
-    if "microrregiao" not in carteira.columns:
-        carteira["microrregiao"] = np.nan
+    if "nome" in geo.columns:
+        geo["cidade_fallback"] = geo["nome"]
+    elif "cidade" in geo.columns:
+        geo["cidade_fallback"] = geo["cidade"]
+    else:
+        raise Exception("A base de regionalidades não possui coluna 'nome' nem 'cidade'.")
+
+    geo["_cidade_norm"] = geo["cidade_fallback"].apply(_normalizar_texto)
+    geo["_uf_norm"] = geo["uf"].apply(_normalizar_texto)
+
+    # saneia colunas fallback
+    for c in ["mesorregiao", "microrregiao"]:
+        if c not in geo.columns:
+            geo[c] = np.nan
+
+    geo["mesorregiao"] = geo["mesorregiao"].apply(_limpar_vazio)
+    geo["microrregiao"] = geo["microrregiao"].apply(_limpar_vazio)
+
+    # score para escolher a melhor linha por cidade+uf
+    # prioridade:
+    # 1) tem meso e micro
+    # 2) tem meso
+    # 3) tem micro
+    # 4) resto
+    geo["_score_geo"] = (
+        geo["mesorregiao"].notna().astype(int) * 2
+        + geo["microrregiao"].notna().astype(int) * 1
+    )
+
+    # deduplicação 1:1 pela chave do merge
+    geo_chaves = (
+        geo.sort_values(
+            by=["_cidade_norm", "_uf_norm", "_score_geo"],
+            ascending=[True, True, False]
+        )
+        .drop_duplicates(subset=["_cidade_norm", "_uf_norm"], keep="first")
+        [[" _cidade_norm".strip(), "_uf_norm", "mesorregiao", "microrregiao"]]
+        .rename(
+            columns={
+                "mesorregiao": "mesorregiao_fallback",
+                "microrregiao": "microrregiao_fallback",
+            }
+        )
+        .copy()
+    )
 
     carteira = carteira.merge(
         geo_chaves,
         how="left",
         on=["_cidade_norm", "_uf_norm"],
-        suffixes=("_carteira", "_geo"),
+        validate="m:1",
     )
 
-    col_meso_carteira = "mesorregiao_carteira" if "mesorregiao_carteira" in carteira.columns else None
-    col_meso_geo = "mesorregiao_geo" if "mesorregiao_geo" in carteira.columns else None
-    col_micro_carteira = "microrregiao_carteira" if "microrregiao_carteira" in carteira.columns else None
-    col_micro_geo = "microrregiao_geo" if "microrregiao_geo" in carteira.columns else None
+    # fallback controlado: só preenche se estiver vazio na carteira
+    carteira["mesorregiao"] = carteira.apply(
+        lambda row: _preencher_somente_se_vazio(
+            row.get("mesorregiao"),
+            row.get("mesorregiao_fallback"),
+        ),
+        axis=1,
+    )
 
-    if col_meso_carteira is not None or col_meso_geo is not None:
-        carteira["mesorregiao"] = carteira.apply(
-            lambda row: _primeira_nao_nula(
-                row[col_meso_carteira] if col_meso_carteira else np.nan,
-                row[col_meso_geo] if col_meso_geo else np.nan,
-            ),
-            axis=1,
-        )
+    # subregiao fallback = microrregiao
+    carteira["subregiao"] = carteira.apply(
+        lambda row: _preencher_somente_se_vazio(
+            row.get("subregiao"),
+            row.get("microrregiao_fallback"),
+        ),
+        axis=1,
+    )
 
-    if col_micro_carteira is not None or col_micro_geo is not None:
-        carteira["microrregiao"] = carteira.apply(
-            lambda row: _primeira_nao_nula(
-                row[col_micro_carteira] if col_micro_carteira else np.nan,
-                row[col_micro_geo] if col_micro_geo else np.nan,
-            ),
-            axis=1,
-        )
+    # regiao fallback = microrregiao
+    carteira["regiao"] = carteira.apply(
+        lambda row: _preencher_somente_se_vazio(
+            row.get("regiao"),
+            row.get("microrregiao_fallback"),
+        ),
+        axis=1,
+    )
 
     carteira["status_geo"] = np.where(
-        carteira["mesorregiao"].notna() & carteira["microrregiao"].notna(),
+        carteira["mesorregiao"].notna() & carteira["subregiao"].notna(),
         "ok",
         "pendencia_geo",
     )
@@ -231,12 +292,14 @@ def executar_m2_enriquecimento(
     colunas_descartar = [
         "_cidade_norm",
         "_uf_norm",
-        "mesorregiao_carteira",
-        "mesorregiao_geo",
-        "microrregiao_carteira",
-        "microrregiao_geo",
+        "mesorregiao_fallback",
+        "microrregiao_fallback",
     ]
-    carteira.drop(columns=[c for c in colunas_descartar if c in carteira.columns], inplace=True, errors="ignore")
+    carteira.drop(
+        columns=[c for c in colunas_descartar if c in carteira.columns],
+        inplace=True,
+        errors="ignore",
+    )
 
     colunas_ordem_preferencial = [
         "ranking_preliminar",
@@ -250,8 +313,9 @@ def executar_m2_enriquecimento(
         "destinatario",
         "cidade",
         "uf",
+        "regiao",
+        "subregiao",
         "mesorregiao",
-        "microrregiao",
         "latitude_filial",
         "longitude_filial",
         "latitude_destinatario",
@@ -282,10 +346,19 @@ def executar_m2_enriquecimento(
 
     df_carteira_enriquecida = carteira[colunas_existentes + colunas_restantes].copy()
 
+    # blindagem cardinalidade
+    if len(df_carteira_enriquecida) != qtd_linhas_entrada:
+        raise Exception(
+            "O M2 alterou a cardinalidade da carteira, o que não é permitido.\n"
+            f"Linhas entrada: {qtd_linhas_entrada}\n"
+            f"Linhas saída: {len(df_carteira_enriquecida)}"
+        )
+
     _validar_saida_m2(df_carteira_enriquecida)
 
     resumo = {
-        "linhas_carteira": int(len(df_carteira_enriquecida)),
+        "linhas_carteira_entrada": int(qtd_linhas_entrada),
+        "linhas_carteira_saida": int(len(df_carteira_enriquecida)),
         "colunas_carteira": int(len(df_carteira_enriquecida.columns)),
         "fator_km_rodoviario": fator_km_rodoviario,
         "velocidade_media_km_h": velocidade_media_km_h,
@@ -294,10 +367,29 @@ def executar_m2_enriquecimento(
         "distancia_km_nulos": int(df_carteira_enriquecida["distancia_km"].isna().sum()),
         "transit_time_nulos": int(df_carteira_enriquecida["transit_time_dias"].isna().sum()),
         "folga_nulos": int(df_carteira_enriquecida["folga_dias"].isna().sum()),
+        "regiao_nulos": int(df_carteira_enriquecida["regiao"].isna().sum()),
+        "subregiao_nulos": int(df_carteira_enriquecida["subregiao"].isna().sum()),
         "mesorregiao_nulos": int(df_carteira_enriquecida["mesorregiao"].isna().sum()),
-        "microrregiao_nulos": int(df_carteira_enriquecida["microrregiao"].isna().sum()),
         "status_geo_ok": int((df_carteira_enriquecida["status_geo"] == "ok").sum()),
         "status_geo_pendencia": int((df_carteira_enriquecida["status_geo"] == "pendencia_geo").sum()),
+        "linhas_enriquecidas_por_fallback_regiao": int(
+            (
+                df_carteira_enriquecida["regiao"].notna()
+                & df_carteira_tratada.reindex(df_carteira_enriquecida.index)["regiao"].isna()
+            ).sum()
+        ) if "regiao" in df_carteira_tratada.columns else None,
+        "linhas_enriquecidas_por_fallback_subregiao": int(
+            (
+                df_carteira_enriquecida["subregiao"].notna()
+                & df_carteira_tratada.reindex(df_carteira_enriquecida.index)["subregiao"].isna()
+            ).sum()
+        ) if "subregiao" in df_carteira_tratada.columns else None,
+        "linhas_enriquecidas_por_fallback_mesorregiao": int(
+            (
+                df_carteira_enriquecida["mesorregiao"].notna()
+                & df_carteira_tratada.reindex(df_carteira_enriquecida.index)["mesorregiao"].isna()
+            ).sum()
+        ) if "mesorregiao" in df_carteira_tratada.columns else None,
     }
 
     return df_carteira_enriquecida, resumo
@@ -342,19 +434,25 @@ def _validar_colunas_minimas(carteira: pd.DataFrame, geo: pd.DataFrame) -> None:
             "\n- ".join(faltam_carteira)
         )
 
-    colunas_minimas_geo = ["nome", "uf", "mesorregiao", "microrregiao"]
-    faltam_geo = [c for c in colunas_minimas_geo if c not in geo.columns]
-    if faltam_geo:
+    colunas_minimas_geo_opcao_1 = ["nome", "uf", "mesorregiao", "microrregiao"]
+    colunas_minimas_geo_opcao_2 = ["cidade", "uf", "mesorregiao", "microrregiao"]
+
+    tem_opcao_1 = all(c in geo.columns for c in colunas_minimas_geo_opcao_1)
+    tem_opcao_2 = all(c in geo.columns for c in colunas_minimas_geo_opcao_2)
+
+    if not (tem_opcao_1 or tem_opcao_2):
         raise Exception(
-            "Faltam colunas mínimas na base geográfica tratada para o M2:\n- " +
-            "\n- ".join(faltam_geo)
+            "Faltam colunas mínimas na base geográfica tratada para o M2.\n"
+            "Aceito: ['nome','uf','mesorregiao','microrregiao'] "
+            "ou ['cidade','uf','mesorregiao','microrregiao']"
         )
 
 
 def _validar_saida_m2(df: pd.DataFrame) -> None:
     colunas_obrigatorias_saida = [
+        "regiao",
+        "subregiao",
         "mesorregiao",
-        "microrregiao",
         "distancia_km",
         "distancia_rodoviaria_est_km",
         "transit_time_dias",
@@ -534,7 +632,21 @@ def _normalizar_texto(valor: Any) -> Any:
     return valor.upper()
 
 
-def _primeira_nao_nula(a: Any, b: Any) -> Any:
-    if pd.notna(a):
-        return a
-    return b
+def _limpar_vazio(valor: Any) -> Any:
+    if pd.isna(valor):
+        return np.nan
+    texto = str(valor).strip()
+    if texto == "":
+        return np.nan
+    if texto.lower() in {"nan", "none", "null", "<na>"}:
+        return np.nan
+    return texto
+
+
+def _preencher_somente_se_vazio(valor_atual: Any, fallback: Any) -> Any:
+    valor_atual = _limpar_vazio(valor_atual)
+    fallback = _limpar_vazio(fallback)
+
+    if pd.notna(valor_atual):
+        return valor_atual
+    return fallback
