@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import pandas as pd
 
@@ -12,189 +12,129 @@ from app.schemas import RoteirizacaoRequest
 
 @dataclass
 class PipelineContext:
-    """
-    Contexto interno que será entregue ao pipeline.
-    Equivale ao ambiente que o notebook tinha após a leitura dos arquivos.
-    """
     rodada_id: str
     upload_id: str
     usuario_id: str
     filial_id: str
     tipo_roteirizacao: str
     data_execucao: datetime
-    data_base: pd.Timestamp
+    data_base: datetime
+
+    filial: Dict[str, Any]
+    parametros_rodada: Dict[str, Any]
+    metadados_rodada: Dict[str, Any]
+    caminhos_pipeline: Dict[str, str]
 
     df_carteira_raw: pd.DataFrame
-    df_veiculos_raw: pd.DataFrame
     df_geo_raw: pd.DataFrame
     df_parametros_raw: pd.DataFrame
-
-    caminhos_pipeline: Dict[str, str]
-    metadados_rodada: Dict[str, Any]
+    df_veiculos_raw: pd.DataFrame
 
 
-def _to_dataframe_list(items: Any) -> pd.DataFrame:
-    """
-    Converte lista de modelos Pydantic/dicts em DataFrame.
-    """
-    if items is None:
-        return pd.DataFrame()
+def _parse_iso_datetime(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
-    registros = []
 
+def _to_dataframe(items: List[Any]) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
     for item in items:
         if hasattr(item, "model_dump"):
-            # Pydantic v2
-            registros.append(item.model_dump(by_alias=True))
+            rows.append(item.model_dump(by_alias=True, exclude_none=False))
         elif isinstance(item, dict):
-            registros.append(item)
+            rows.append(item)
         else:
-            registros.append(vars(item))
-
-    if not registros:
-        return pd.DataFrame()
-
-    return pd.DataFrame(registros)
+            rows.append(dict(item))
+    return pd.DataFrame(rows)
 
 
-def _parse_data_base(parametros: Any) -> tuple[datetime, pd.Timestamp]:
-    """
-    Extrai data_execucao e data_base_roteirizacao do payload validado.
-    """
-    data_execucao = parametros.data_execucao
-    data_base_roteirizacao = parametros.data_base_roteirizacao
+def _normalizar_parametros(payload: RoteirizacaoRequest) -> Dict[str, Any]:
+    parametros = dict(payload.parametros or {})
 
-    if isinstance(data_execucao, str):
-        texto = data_execucao.strip()
-        if texto.endswith("Z"):
-            texto = texto[:-1] + "+00:00"
-        data_execucao_dt = datetime.fromisoformat(texto)
-    else:
-        data_execucao_dt = data_execucao
+    parametros["filial_id"] = payload.filial.id
+    parametros["filial_nome"] = payload.filial.nome
+    parametros["filial_cidade"] = payload.filial.cidade
+    parametros["filial_uf"] = payload.filial.uf
+    parametros["filial_latitude"] = float(payload.filial.latitude)
+    parametros["filial_longitude"] = float(payload.filial.longitude)
+    parametros["data_base_roteirizacao"] = payload.data_base_roteirizacao
 
-    if isinstance(data_base_roteirizacao, str):
-        texto = data_base_roteirizacao.strip()
-        if texto.endswith("Z"):
-            texto = texto[:-1] + "+00:00"
-        data_base_dt = datetime.fromisoformat(texto)
-    else:
-        data_base_dt = data_base_roteirizacao
+    # compatibilidade temporária com módulos legados do notebook
+    parametros["origem_cidade"] = payload.filial.cidade
+    parametros["origem_uf"] = payload.filial.uf
+    parametros["origem_latitude"] = float(payload.filial.latitude)
+    parametros["origem_longitude"] = float(payload.filial.longitude)
+    parametros["data_corte_referencia"] = payload.data_base_roteirizacao
 
-    return data_execucao_dt, pd.Timestamp(data_base_dt)
+    # regra operacional fechada
+    parametros["velocidade_media_km_h"] = 50
+    parametros["horas_direcao_dia"] = 8
+    parametros["km_dia_operacional"] = 400
+
+    return parametros
 
 
-def _montar_df_parametros_raw(payload: RoteirizacaoRequest) -> pd.DataFrame:
-    """
-    Converte parametros do payload para formato tabular simples:
-    parametro | valor
-
-    Isso facilita adaptar o notebook existente, que lê parâmetros assim.
-    """
-    parametros = payload.parametros
-
-    registros = [
-        {"parametro": "usuario_id", "valor": getattr(parametros, "usuario_id", None)},
-        {"parametro": "usuario_nome", "valor": getattr(parametros, "usuario_nome", None)},
-        {"parametro": "filial_id", "valor": getattr(parametros, "filial_id", None)},
-        {"parametro": "filial_nome", "valor": getattr(parametros, "filial_nome", None)},
-        {"parametro": "upload_id", "valor": getattr(parametros, "upload_id", None)},
-        {"parametro": "rodada_id", "valor": getattr(parametros, "rodada_id", None)},
-        {"parametro": "data_execucao", "valor": getattr(parametros, "data_execucao", None)},
-        {"parametro": "data_base_roteirizacao", "valor": getattr(parametros, "data_base_roteirizacao", None)},
-        {"parametro": "origem_sistema", "valor": getattr(parametros, "origem_sistema", None)},
-        {"parametro": "tipo_roteirizacao", "valor": getattr(parametros, "tipo_roteirizacao", None)},
-        {"parametro": "modelo_roteirizacao", "valor": getattr(parametros, "modelo_roteirizacao", None)},
-    ]
-
-    filtros_aplicados = getattr(parametros, "filtros_aplicados", None) or {}
-    for chave, valor in filtros_aplicados.items():
-        registros.append(
-            {"parametro": f"filtro__{chave}", "valor": valor}
-        )
-
-    configuracao_frota = getattr(parametros, "configuracao_frota", None) or []
-    for i, item in enumerate(configuracao_frota, start=1):
-        if hasattr(item, "model_dump"):
-            item_dict = item.model_dump()
-        elif isinstance(item, dict):
-            item_dict = item
-        else:
-            item_dict = vars(item)
-
-        registros.append(
-            {"parametro": f"configuracao_frota__{i}__perfil", "valor": item_dict.get("perfil")}
-        )
-        registros.append(
-            {"parametro": f"configuracao_frota__{i}__quantidade", "valor": item_dict.get("quantidade")}
-        )
-
-    return pd.DataFrame(registros)
+def _parametros_dict_para_dataframe(parametros: Dict[str, Any]) -> pd.DataFrame:
+    rows = [{"parametro": k, "valor": v} for k, v in parametros.items()]
+    return pd.DataFrame(rows)
 
 
 def _montar_caminhos_pipeline(rodada_id: str) -> Dict[str, str]:
-    """
-    No notebook existia estrutura de pastas física.
-    Aqui deixamos um contexto lógico.
-    Se depois você quiser salvar artefatos locais, essa estrutura já está pronta.
-    """
-    pasta_base = Path("/tmp/rec_roteirizador") / rodada_id
-
+    pasta_base = Path("/tmp") / "rec_roteirizador" / rodada_id
     return {
         "pasta_saida_base": str(pasta_base),
-        "pasta_rodada": str(pasta_base),
         "rodada_id": rodada_id,
     }
 
 
 def normalizar_payload_para_pipeline(payload: RoteirizacaoRequest) -> PipelineContext:
-    """
-    Camada adaptadora entre a API e o pipeline.
-    Recebe o contrato do Sistema 1 e entrega um contexto compatível
-    com a lógica que nasceu no Jupyter.
-    """
-    parametros = payload.parametros
+    data_base = _parse_iso_datetime(payload.data_base_roteirizacao)
+    data_execucao = datetime.utcnow()
 
-    data_execucao_dt, data_base = _parse_data_base(parametros)
+    df_carteira_raw = _to_dataframe(payload.carteira)
+    df_geo_raw = _to_dataframe(payload.regionalidades)
+    df_veiculos_raw = _to_dataframe(payload.veiculos)
 
-    df_carteira_raw = _to_dataframe_list(payload.carteira)
-    df_veiculos_raw = _to_dataframe_list(payload.veiculos)
-    df_geo_raw = _to_dataframe_list(payload.regionalidades)
-    df_parametros_raw = _montar_df_parametros_raw(payload)
+    parametros_rodada = _normalizar_parametros(payload)
+    df_parametros_raw = _parametros_dict_para_dataframe(parametros_rodada)
 
-    rodada_id = str(parametros.rodada_id)
-    upload_id = str(parametros.upload_id)
-    usuario_id = str(parametros.usuario_id)
-    filial_id = str(parametros.filial_id)
-    tipo_roteirizacao = str(parametros.tipo_roteirizacao).strip().lower()
+    filial = {
+        "id": payload.filial.id,
+        "nome": payload.filial.nome,
+        "cidade": payload.filial.cidade,
+        "uf": payload.filial.uf,
+        "latitude": float(payload.filial.latitude),
+        "longitude": float(payload.filial.longitude),
+    }
 
-    caminhos_pipeline = _montar_caminhos_pipeline(rodada_id)
+    caminhos_pipeline = _montar_caminhos_pipeline(payload.rodada_id)
 
     metadados_rodada = {
-        "rodada_id": rodada_id,
-        "upload_id": upload_id,
-        "usuario_id": usuario_id,
-        "filial_id": filial_id,
-        "tipo_roteirizacao": tipo_roteirizacao,
-        "data_execucao": data_execucao_dt.isoformat(),
-        "data_base_roteirizacao": data_base.isoformat(),
-        "qtd_carteira": int(len(df_carteira_raw)),
-        "qtd_veiculos": int(len(df_veiculos_raw)),
-        "qtd_regionalidades": int(len(df_geo_raw)),
-        "qtd_parametros": int(len(df_parametros_raw)),
+        "rodada_id": payload.rodada_id,
+        "upload_id": payload.upload_id,
+        "usuario_id": payload.usuario_id,
+        "filial_id": payload.filial_id,
+        "tipo_roteirizacao": payload.tipo_roteirizacao,
+        "data_base_roteirizacao": payload.data_base_roteirizacao,
+        "filial": filial,
+        "configuracao_frota": [
+            item.model_dump(exclude_none=False) for item in payload.configuracao_frota
+        ],
     }
 
     return PipelineContext(
-        rodada_id=rodada_id,
-        upload_id=upload_id,
-        usuario_id=usuario_id,
-        filial_id=filial_id,
-        tipo_roteirizacao=tipo_roteirizacao,
-        data_execucao=data_execucao_dt,
+        rodada_id=payload.rodada_id,
+        upload_id=payload.upload_id,
+        usuario_id=payload.usuario_id,
+        filial_id=payload.filial_id,
+        tipo_roteirizacao=payload.tipo_roteirizacao,
+        data_execucao=data_execucao,
         data_base=data_base,
+        filial=filial,
+        parametros_rodada=parametros_rodada,
+        metadados_rodada=metadados_rodada,
+        caminhos_pipeline=caminhos_pipeline,
         df_carteira_raw=df_carteira_raw,
-        df_veiculos_raw=df_veiculos_raw,
         df_geo_raw=df_geo_raw,
         df_parametros_raw=df_parametros_raw,
-        caminhos_pipeline=caminhos_pipeline,
-        metadados_rodada=metadados_rodada,
+        df_veiculos_raw=df_veiculos_raw,
     )
