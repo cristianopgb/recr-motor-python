@@ -8,6 +8,7 @@ from app.pipeline.m1_padronizacao import executar_m1_padronizacao
 from app.pipeline.m2_enriquecimento import executar_m2_enriquecimento
 from app.pipeline.m3_triagem import executar_m3_triagem
 from app.pipeline.m3_1_validacao_fronteira import executar_m3_1_validacao_fronteira
+from app.pipeline.m4_manifestos_fechados import executar_m4_manifestos_fechados
 from app.schemas import RoteirizacaoRequest
 from app.services.payload_service import PipelineContext, normalizar_payload_para_pipeline
 
@@ -32,7 +33,6 @@ def _log(
     return registro
 
 
-
 def _snapshot_dataframe(df: pd.DataFrame, nome: str, max_colunas: int = 30) -> Dict[str, Any]:
     return {
         "nome": nome,
@@ -40,7 +40,6 @@ def _snapshot_dataframe(df: pd.DataFrame, nome: str, max_colunas: int = 30) -> D
         "colunas": list(df.columns[:max_colunas]),
         "qtd_colunas_total": int(len(df.columns)),
     }
-
 
 
 def _df_to_records(df: pd.DataFrame, limit: int | None = None) -> List[Dict[str, Any]]:
@@ -54,7 +53,6 @@ def _df_to_records(df: pd.DataFrame, limit: int | None = None) -> List[Dict[str,
 
     df2 = df2.where(pd.notnull(df2), None)
     return df2.to_dict(orient="records")
-
 
 
 def _executar_m0_adapter(contexto: PipelineContext) -> Dict[str, Any]:
@@ -88,7 +86,6 @@ def _executar_m0_adapter(contexto: PipelineContext) -> Dict[str, Any]:
         "caminhos_pipeline": contexto.caminhos_pipeline,
         "metadados_rodada": contexto.metadados_rodada,
     }
-
 
 
 def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
@@ -213,10 +210,35 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         )
     )
 
+    outputs_m4, meta_m4 = executar_m4_manifestos_fechados(
+        df_input_oficial_bloco_4=df_input_oficial_bloco_4,
+        df_veiculos_tratados=df_veiculos_tratados,
+        rodada_id=contexto.rodada_id,
+        data_base_roteirizacao=contexto.data_base,
+        caminhos_pipeline=contexto.caminhos_pipeline,
+    )
+    resumo_m4 = meta_m4["resumo_m4"]
+
+    df_manifestos_fechados_bloco_4 = outputs_m4["df_manifestos_fechados_bloco_4"]
+    df_itens_manifestos_fechados_bloco_4 = outputs_m4["df_itens_manifestos_fechados_bloco_4"]
+    df_tentativas_fechamento_bloco_4 = outputs_m4["df_tentativas_fechamento_bloco_4"]
+    df_remanescente_roteirizavel_bloco_4 = outputs_m4["df_remanescente_roteirizavel_bloco_4"]
+
+    logs.append(
+        _log(
+            modulo="m4_manifestos_fechados",
+            status="ok",
+            mensagem="M4 executado com sucesso",
+            quantidade_entrada=int(len(df_input_oficial_bloco_4)),
+            quantidade_saida=int(len(df_remanescente_roteirizavel_bloco_4)),
+            extra=resumo_m4,
+        )
+    )
+
     return {
         "status": "ok",
-        "mensagem": "Motor executou com sucesso até o M3.1.",
-        "pipeline_real_ate": "M3.1",
+        "mensagem": "Motor executou com sucesso até o M4.",
+        "pipeline_real_ate": "M4",
         "resumo": {
             "total_carteira": int(len(contexto.df_carteira_raw)),
             "total_veiculos": int(len(contexto.df_veiculos_raw)),
@@ -228,6 +250,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "resumo_m2": resumo_m2,
             "resumo_m3": resumo_m3,
             "resumo_m31": resumo_m31,
+            "resumo_m4": resumo_m4,
         },
         "contexto_rodada": {
             "filial": contexto.filial,
@@ -247,6 +270,18 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "carteira_excecoes_triagem": _snapshot_dataframe(
                 df_carteira_excecoes_triagem, "df_carteira_excecoes_triagem"
             ),
+            "manifestos_fechados_bloco_4": _snapshot_dataframe(
+                df_manifestos_fechados_bloco_4, "df_manifestos_fechados_bloco_4"
+            ),
+            "itens_manifestos_fechados_bloco_4": _snapshot_dataframe(
+                df_itens_manifestos_fechados_bloco_4, "df_itens_manifestos_fechados_bloco_4"
+            ),
+            "tentativas_fechamento_bloco_4": _snapshot_dataframe(
+                df_tentativas_fechamento_bloco_4, "df_tentativas_fechamento_bloco_4"
+            ),
+            "remanescente_roteirizavel_bloco_4": _snapshot_dataframe(
+                df_remanescente_roteirizavel_bloco_4, "df_remanescente_roteirizavel_bloco_4"
+            ),
             "regionalidades": _snapshot_dataframe(contexto.df_geo_raw, "df_geo_raw"),
             "parametros": _snapshot_dataframe(contexto.df_parametros_raw, "df_parametros_raw"),
             "veiculos": _snapshot_dataframe(contexto.df_veiculos_raw, "df_veiculos_raw"),
@@ -259,13 +294,19 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "entrega_futura": _df_to_records(df_carteira_entrega_futura, limit=5),
             "aguardando_agendamento": _df_to_records(df_carteira_aguardando_agendamento, limit=5),
             "excecoes_triagem": _df_to_records(df_carteira_excecoes_triagem, limit=5),
+            "manifestos_fechados_bloco_4": _df_to_records(df_manifestos_fechados_bloco_4, limit=10),
+            "itens_manifestos_fechados_bloco_4": _df_to_records(df_itens_manifestos_fechados_bloco_4, limit=10),
+            "remanescente_roteirizavel_bloco_4": _df_to_records(df_remanescente_roteirizavel_bloco_4, limit=10),
         },
         "outputs_intermediarios": {
             "df_input_oficial_bloco_4": _df_to_records(df_input_oficial_bloco_4),
+            "df_manifestos_fechados_bloco_4": _df_to_records(df_manifestos_fechados_bloco_4),
+            "df_itens_manifestos_fechados_bloco_4": _df_to_records(df_itens_manifestos_fechados_bloco_4),
+            "df_tentativas_fechamento_bloco_4": _df_to_records(df_tentativas_fechamento_bloco_4),
+            "df_remanescente_roteirizavel_bloco_4": _df_to_records(df_remanescente_roteirizavel_bloco_4),
         },
-        "manifestos_fechados": [],
+        "manifestos_fechados": _df_to_records(df_manifestos_fechados_bloco_4),
         "manifestos_compostos": [],
         "nao_roteirizados": [],
         "logs": logs,
     }
-
