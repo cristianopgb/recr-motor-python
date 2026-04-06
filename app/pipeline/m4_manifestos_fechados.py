@@ -1,6 +1,4 @@
-from pathlib import Path
-
-code = r'''from __future__ import annotations
+from __future__ import annotations
 
 import json
 from datetime import datetime
@@ -1255,4 +1253,3 @@ def executar_m4_manifestos_fechados(
     }
 
     return outputs, meta_m4
-
