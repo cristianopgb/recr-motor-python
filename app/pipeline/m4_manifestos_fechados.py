@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Dict, List, Tuple
 
-import numpy as np
 import pandas as pd
 
 
@@ -30,10 +29,25 @@ def _to_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
     return df2.to_dict(orient="records")
 
 
+def _resolver_coluna_tipo_veiculo(df_veiculos_tratados: pd.DataFrame) -> str:
+    """
+    No projeto real, a base de veículos vem com 'perfil'.
+    Se existir 'tipo', também aceitamos.
+    """
+    if "perfil" in df_veiculos_tratados.columns:
+        return "perfil"
+    if "tipo" in df_veiculos_tratados.columns:
+        return "tipo"
+
+    raise Exception(
+        "Faltam colunas mínimas na base de veículos tratados:\n- perfil ou tipo"
+    )
+
+
 def _validar_input(
     df_input_oficial_bloco_4: pd.DataFrame,
     df_veiculos_tratados: pd.DataFrame,
-) -> None:
+) -> str:
     colunas_minimas_fila = [
         "id_linha_pipeline",
         "destinatario",
@@ -46,8 +60,10 @@ def _validar_input(
         "grupo_saida",
     ]
 
+    coluna_tipo_veiculo = _resolver_coluna_tipo_veiculo(df_veiculos_tratados)
+
     colunas_minimas_veiculos = [
-        "tipo",
+        coluna_tipo_veiculo,
         "capacidade_peso_kg",
         "capacidade_vol_m3",
         "max_entregas",
@@ -83,10 +99,13 @@ def _validar_input(
         qtd_dup = int(df_input_oficial_bloco_4["id_linha_pipeline"].astype(str).duplicated().sum())
         raise Exception(f"O input oficial do Bloco 4 possui id_linha_pipeline duplicado: {qtd_dup}")
 
+    return coluna_tipo_veiculo
+
 
 def _padronizar_bases(
     df_input_oficial_bloco_4: pd.DataFrame,
     df_veiculos_tratados: pd.DataFrame,
+    coluna_tipo_veiculo: str,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     fila = df_input_oficial_bloco_4.copy().reset_index(drop=True)
     veiculos = df_veiculos_tratados.copy().reset_index(drop=True)
@@ -126,6 +145,8 @@ def _padronizar_bases(
     else:
         fila["agendada"] = False
 
+    veiculos[coluna_tipo_veiculo] = veiculos[coluna_tipo_veiculo].apply(_normalizar_texto)
+
     if "ordem_porte" in veiculos.columns:
         veiculos = veiculos.sort_values(
             by=["ordem_porte", "capacidade_peso_kg", "capacidade_vol_m3", "max_entregas", "max_km_distancia"],
@@ -141,12 +162,6 @@ def _padronizar_bases(
 
 
 def _criar_bucket_temporal(df: pd.DataFrame) -> pd.Series:
-    """
-    Bucket temporal para o 4A:
-    - agendada -> AGENDA_YYYY-MM-DD
-    - não agendada com leadtime -> LEADTIME_YYYY-MM-DD
-    - sem data -> SEM_DATA
-    """
     bucket = pd.Series(index=df.index, dtype="object")
 
     mask_agendada = df["agendada"].fillna(False)
@@ -163,8 +178,7 @@ def _criar_bucket_temporal(df: pd.DataFrame) -> pd.Series:
     else:
         bucket.loc[mask_nao_agendada] = "SEM_DATA"
 
-    bucket = bucket.fillna("SEM_DATA")
-    return bucket
+    return bucket.fillna("SEM_DATA")
 
 
 def _calcular_metricas_grupo(df_grupo: pd.DataFrame, veiculo: pd.Series) -> Dict[str, Any]:
@@ -211,7 +225,10 @@ def _calcular_metricas_grupo(df_grupo: pd.DataFrame, veiculo: pd.Series) -> Dict
     }
 
 
-def _escolher_menor_veiculo_viavel(df_grupo: pd.DataFrame, veiculos: pd.DataFrame) -> Tuple[pd.Series | None, Dict[str, Any] | None]:
+def _escolher_menor_veiculo_viavel(
+    df_grupo: pd.DataFrame,
+    veiculos: pd.DataFrame,
+) -> Tuple[pd.Series | None, Dict[str, Any] | None]:
     for _, veiculo in veiculos.iterrows():
         metricas = _calcular_metricas_grupo(df_grupo, veiculo)
 
@@ -232,7 +249,14 @@ def _gerar_manifesto_id(rodada_id: str, origem_etapa: str, seq: int) -> str:
     return f"M4-{seq:05d}-{token}"
 
 
-def _selecionar_campos_manifesto(df_grupo: pd.DataFrame, veiculo: pd.Series, metricas: Dict[str, Any], manifesto_id: str, origem_etapa: str) -> Dict[str, Any]:
+def _selecionar_campos_manifesto(
+    df_grupo: pd.DataFrame,
+    veiculo: pd.Series,
+    metricas: Dict[str, Any],
+    manifesto_id: str,
+    origem_etapa: str,
+    coluna_tipo_veiculo: str,
+) -> Dict[str, Any]:
     primeira = df_grupo.iloc[0]
 
     qtd_itens = int(len(df_grupo))
@@ -244,7 +268,7 @@ def _selecionar_campos_manifesto(df_grupo: pd.DataFrame, veiculo: pd.Series, met
     return {
         "manifesto_id": manifesto_id,
         "origem_etapa": origem_etapa,
-        "veiculo_tipo": veiculo["tipo"],
+        "veiculo_tipo": veiculo[coluna_tipo_veiculo],
         "qtd_itens": qtd_itens,
         "qtd_paradas": qtd_paradas,
         "destinatario_referencia": primeira.get("destinatario"),
@@ -269,7 +293,12 @@ def _selecionar_campos_manifesto(df_grupo: pd.DataFrame, veiculo: pd.Series, met
     }
 
 
-def _gerar_itens_manifesto(df_grupo: pd.DataFrame, manifesto_id: str, origem_etapa: str, veiculo_tipo: str) -> pd.DataFrame:
+def _gerar_itens_manifesto(
+    df_grupo: pd.DataFrame,
+    manifesto_id: str,
+    origem_etapa: str,
+    veiculo_tipo: str,
+) -> pd.DataFrame:
     itens = df_grupo.copy()
     itens["manifesto_id"] = manifesto_id
     itens["origem_etapa"] = origem_etapa
@@ -306,15 +335,11 @@ def _processar_grupos(
     colunas_groupby: List[str],
     rodada_id: str,
     seq_manifesto_inicio: int,
+    coluna_tipo_veiculo: str,
     somente_multiplos: bool = True,
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, int]:
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, int, pd.DataFrame]:
     if len(fila) == 0:
-        return (
-            pd.DataFrame(),
-            pd.DataFrame(),
-            pd.DataFrame(),
-            seq_manifesto_inicio,
-        )
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), seq_manifesto_inicio, fila.copy()
 
     manifestos: List[Dict[str, Any]] = []
     itens_manifestos: List[pd.DataFrame] = []
@@ -322,7 +347,6 @@ def _processar_grupos(
     ids_aprovados: set[str] = set()
 
     seq_manifesto = seq_manifesto_inicio
-
     grupos = fila.groupby(colunas_groupby, dropna=False, sort=False)
 
     for chave, df_grupo in grupos:
@@ -359,6 +383,7 @@ def _processar_grupos(
             metricas=metricas,
             manifesto_id=manifesto_id,
             origem_etapa=origem_etapa,
+            coluna_tipo_veiculo=coluna_tipo_veiculo,
         )
         manifestos.append(linha_manifesto)
 
@@ -366,7 +391,7 @@ def _processar_grupos(
             df_grupo=df_grupo,
             manifesto_id=manifesto_id,
             origem_etapa=origem_etapa,
-            veiculo_tipo=str(veiculo["tipo"]),
+            veiculo_tipo=str(veiculo[coluna_tipo_veiculo]),
         )
         itens_manifestos.append(itens_df)
 
@@ -377,19 +402,16 @@ def _processar_grupos(
                 origem_etapa=origem_etapa,
                 chave_grupo=chave_str,
                 qtd_itens=len(df_grupo),
-                veiculo_testado=str(veiculo["tipo"]),
+                veiculo_testado=str(veiculo[coluna_tipo_veiculo]),
                 aprovado=True,
                 motivo="grupo_fechado_com_sucesso",
                 metricas=metricas,
             )
         )
 
-    if len(ids_aprovados) > 0:
-        fila_remanescente = fila.loc[
-            ~fila["id_linha_pipeline"].astype(str).isin(ids_aprovados)
-        ].copy().reset_index(drop=True)
-    else:
-        fila_remanescente = fila.copy().reset_index(drop=True)
+    fila_remanescente = fila.loc[
+        ~fila["id_linha_pipeline"].astype(str).isin(ids_aprovados)
+    ].copy().reset_index(drop=True)
 
     df_manifestos = pd.DataFrame(manifestos)
     df_itens = pd.concat(itens_manifestos, ignore_index=True) if itens_manifestos else pd.DataFrame()
@@ -405,18 +427,15 @@ def executar_m4_manifestos_fechados(
     data_base_roteirizacao: pd.Timestamp,
     caminhos_pipeline: Dict[str, Any] | None = None,
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, Any]]:
-    """
-    M4 - Geração de manifestos fechados
-    Regra:
-    - Recebe SOMENTE o df_input_oficial_bloco_4
-    - Tenta esgotar fechamentos naturais antes do M5
-    """
-    _validar_input(df_input_oficial_bloco_4, df_veiculos_tratados)
-    fila, veiculos = _padronizar_bases(df_input_oficial_bloco_4, df_veiculos_tratados)
+    coluna_tipo_veiculo = _validar_input(df_input_oficial_bloco_4, df_veiculos_tratados)
+    fila, veiculos = _padronizar_bases(
+        df_input_oficial_bloco_4=df_input_oficial_bloco_4,
+        df_veiculos_tratados=df_veiculos_tratados,
+        coluna_tipo_veiculo=coluna_tipo_veiculo,
+    )
 
     fila["bucket_temporal_4a"] = _criar_bucket_temporal(fila)
 
-    # 4A - mesmo cliente + bucket temporal
     df_manifestos_4a, df_itens_4a, df_tentativas_4a, seq_manifesto, fila_apos_4a = _processar_grupos(
         fila=fila,
         veiculos=veiculos,
@@ -424,10 +443,10 @@ def executar_m4_manifestos_fechados(
         colunas_groupby=[CHAVE_CLIENTE, "bucket_temporal_4a"],
         rodada_id=rodada_id,
         seq_manifesto_inicio=1,
+        coluna_tipo_veiculo=coluna_tipo_veiculo,
         somente_multiplos=True,
     )
 
-    # 4B - mesma parada natural no saldo remanescente
     df_manifestos_4b, df_itens_4b, df_tentativas_4b, seq_manifesto, fila_apos_4b = _processar_grupos(
         fila=fila_apos_4a,
         veiculos=veiculos,
@@ -435,10 +454,10 @@ def executar_m4_manifestos_fechados(
         colunas_groupby=CHAVES_PARADA,
         rodada_id=rodada_id,
         seq_manifesto_inicio=seq_manifesto,
+        coluna_tipo_veiculo=coluna_tipo_veiculo,
         somente_multiplos=True,
     )
 
-    # 4C - varredura final do remanescente
     fila_varredura = fila_apos_4b.copy()
     manifestos_4c: List[pd.DataFrame] = []
     itens_4c: List[pd.DataFrame] = []
@@ -447,6 +466,7 @@ def executar_m4_manifestos_fechados(
 
     while iteracoes_4c < MAX_ITERACOES_VARREDURA_4C:
         iteracoes_4c += 1
+
         df_manifestos_loop, df_itens_loop, df_tentativas_loop, seq_manifesto, fila_pos_loop = _processar_grupos(
             fila=fila_varredura,
             veiculos=veiculos,
@@ -454,10 +474,12 @@ def executar_m4_manifestos_fechados(
             colunas_groupby=[CHAVE_CLIENTE],
             rodada_id=rodada_id,
             seq_manifesto_inicio=seq_manifesto,
+            coluna_tipo_veiculo=coluna_tipo_veiculo,
             somente_multiplos=True,
         )
 
-        tentativas_4c.append(df_tentativas_loop)
+        if len(df_tentativas_loop) > 0:
+            tentativas_4c.append(df_tentativas_loop)
 
         if len(df_manifestos_loop) == 0:
             fila_varredura = fila_pos_loop
@@ -475,15 +497,9 @@ def executar_m4_manifestos_fechados(
     frames_itens.extend([df for df in itens_4c if len(df) > 0])
     frames_tentativas.extend([df for df in tentativas_4c if len(df) > 0])
 
-    df_manifestos_fechados_bloco_4 = (
-        pd.concat(frames_manifestos, ignore_index=True) if frames_manifestos else pd.DataFrame()
-    )
-    df_itens_manifestos_fechados_bloco_4 = (
-        pd.concat(frames_itens, ignore_index=True) if frames_itens else pd.DataFrame()
-    )
-    df_tentativas_fechamento_bloco_4 = (
-        pd.concat(frames_tentativas, ignore_index=True) if frames_tentativas else pd.DataFrame()
-    )
+    df_manifestos_fechados_bloco_4 = pd.concat(frames_manifestos, ignore_index=True) if frames_manifestos else pd.DataFrame()
+    df_itens_manifestos_fechados_bloco_4 = pd.concat(frames_itens, ignore_index=True) if frames_itens else pd.DataFrame()
+    df_tentativas_fechamento_bloco_4 = pd.concat(frames_tentativas, ignore_index=True) if frames_tentativas else pd.DataFrame()
     df_remanescente_roteirizavel_bloco_4 = fila_varredura.copy().reset_index(drop=True)
 
     if len(df_manifestos_fechados_bloco_4) > 0:
@@ -492,10 +508,12 @@ def executar_m4_manifestos_fechados(
         ).reset_index(drop=True)
 
     if len(df_itens_manifestos_fechados_bloco_4) > 0:
-        df_itens_manifestos_fechados_bloco_4 = df_itens_manifestos_fechados_bloco_4.sort_values(
-            by=["manifesto_id", "ranking_prioridade_operacional", "ranking_preliminar"],
-            ascending=[True, True, True],
-        ).reset_index(drop=True)
+        colunas_ordem = [c for c in ["manifesto_id", "ranking_prioridade_operacional", "ranking_preliminar"] if c in df_itens_manifestos_fechados_bloco_4.columns]
+        if colunas_ordem:
+            df_itens_manifestos_fechados_bloco_4 = df_itens_manifestos_fechados_bloco_4.sort_values(
+                by=colunas_ordem,
+                ascending=[True] * len(colunas_ordem),
+            ).reset_index(drop=True)
 
     resumo_por_veiculo = pd.DataFrame()
     if len(df_manifestos_fechados_bloco_4) > 0:
@@ -527,6 +545,7 @@ def executar_m4_manifestos_fechados(
     resumo_m4 = {
         "modulo": "M4",
         "data_base_roteirizacao": pd.Timestamp(data_base_roteirizacao).isoformat(),
+        "coluna_tipo_veiculo_utilizada": coluna_tipo_veiculo,
         "roteirizavel_entrada_m4": int(len(df_input_oficial_bloco_4)),
         "manifestos_fechados_gerados_m4": int(df_manifestos_fechados_bloco_4["manifesto_id"].nunique()) if len(df_manifestos_fechados_bloco_4) > 0 else 0,
         "itens_manifestados_m4": int(len(df_itens_manifestos_fechados_bloco_4)),
