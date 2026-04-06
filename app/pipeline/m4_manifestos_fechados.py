@@ -1,4 +1,6 @@
-from __future__ import annotations
+from pathlib import Path
+
+code = r'''from __future__ import annotations
 
 import json
 from datetime import datetime
@@ -12,6 +14,7 @@ import pandas as pd
 # ============================================================
 # MÓDULO 4 - GERAÇÃO DE MANIFESTOS FECHADOS
 # ADAPTAÇÃO FIEL DO NOTEBOOK PARA O SISTEMA 2
+# CORREÇÃO ESTRUTURAL ROBUSTA (SEM MEXER NA LÓGICA DE NEGÓCIO)
 # ============================================================
 
 OCUPACAO_DOMINANTE_MIN = 0.70
@@ -47,6 +50,108 @@ def _txt_norm(x: Any) -> str:
     return str(x).strip().upper()
 
 
+def _scalar_safe(x: Any) -> Any:
+    """
+    Garante que leituras vindas de row.get(...) ou colunas duplicadas
+    resultem em um escalar, e não em Series/array/list.
+    """
+    if isinstance(x, pd.Series):
+        if len(x) == 0:
+            return np.nan
+        return x.iloc[0]
+
+    if isinstance(x, np.ndarray):
+        if len(x) == 0:
+            return np.nan
+        return x[0]
+
+    if isinstance(x, list):
+        if len(x) == 0:
+            return np.nan
+        return x[0]
+
+    if isinstance(x, tuple):
+        if len(x) == 0:
+            return np.nan
+        return x[0]
+
+    return x
+
+
+def _bool_safe(x: Any) -> bool:
+    """
+    Conversão booleana robusta para evitar:
+    The truth value of a Series is ambiguous
+    """
+    x = _scalar_safe(x)
+
+    if pd.isna(x):
+        return False
+
+    if isinstance(x, (bool, np.bool_)):
+        return bool(x)
+
+    if isinstance(x, (int, float, np.integer, np.floating)):
+        if pd.isna(x):
+            return False
+        return bool(int(x))
+
+    txt = str(x).strip().lower()
+    return txt in {"true", "1", "sim", "s", "yes", "y"}
+
+
+def _num_safe(x: Any, default: float = np.nan) -> float:
+    x = _scalar_safe(x)
+    val = pd.to_numeric(x, errors="coerce")
+    return float(val) if pd.notna(val) else default
+
+
+def _deduplicar_colunas(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Remove colunas duplicadas mantendo a primeira ocorrência.
+    Isso evita que row.get(...) devolva Series em vez de escalar.
+    """
+    if df is None or len(df.columns) == 0:
+        return df.copy()
+
+    if not df.columns.duplicated().any():
+        return df.copy()
+
+    return df.loc[:, ~df.columns.duplicated()].copy()
+
+
+def _garantir_coluna_por_alias(
+    df: pd.DataFrame,
+    coluna_destino: str,
+    aliases: List[str],
+    default: Any = None,
+) -> pd.DataFrame:
+    """
+    Garante uma coluna canônica a partir de aliases possíveis.
+    Mantém a lógica do módulo, só resolve variações estruturais.
+    """
+    if coluna_destino in df.columns:
+        return df
+
+    for alias in aliases:
+        if alias in df.columns:
+            df[coluna_destino] = df[alias]
+            return df
+
+    df[coluna_destino] = default
+    return df
+
+
+def _normalizar_flag_agendada(serie: pd.Series) -> pd.Series:
+    if serie is None:
+        return pd.Series(dtype=bool)
+
+    def _conv(x: Any) -> bool:
+        return _bool_safe(x)
+
+    return serie.apply(_conv).astype(bool)
+
+
 def _chave_parada_df(df_: pd.DataFrame) -> pd.Series:
     return (
         df_["destinatario"].astype(str).fillna("").str.strip().str.upper()
@@ -71,20 +176,21 @@ def _calcular_ocupacoes(
 
 
 def _bucket_temporal(row: pd.Series) -> str:
-    ag = bool(row.get("agendada", False))
-    dt_ag = row.get("data_agenda", pd.NaT)
+    ag = _bool_safe(row.get("agendada", False))
+    dt_ag = _scalar_safe(row.get("data_agenda", pd.NaT))
     if ag and pd.notna(dt_ag):
         return f"AGENDA_{pd.Timestamp(dt_ag).strftime('%Y-%m-%d')}"
     return "LEADTIME"
 
 
 def _score_linha(row: pd.Series) -> Tuple[Any, ...]:
-    ranking = row.get("ranking_prioridade", 999999)
-    score = row.get("score_prioridade_preliminar", 0)
-    peso = row.get("peso_kg", 0)
-    vol = row.get("vol_m3", 0)
+    ranking = _num_safe(row.get("ranking_prioridade", 999999), default=999999)
+    score = _num_safe(row.get("score_prioridade_preliminar", 0), default=0)
+    peso = _num_safe(row.get("peso_kg", 0), default=0)
+    vol = _num_safe(row.get("vol_m3", 0), default=0)
+
     return (
-        -1 if bool(row.get("agendada", False)) else 0,
+        -1 if _bool_safe(row.get("agendada", False)) else 0,
         ranking if pd.notna(ranking) else 999999,
         -(score if pd.notna(score) else 0),
         -(vol if pd.notna(vol) else 0),
@@ -187,7 +293,10 @@ def _avaliar_combo_no_veiculo(df_combo: pd.DataFrame, veic: pd.Series) -> Dict[s
     peso_total = float(pd.to_numeric(df_combo["peso_kg"], errors="coerce").sum())
     vol_total = float(pd.to_numeric(df_combo["vol_m3"], errors="coerce").sum())
     km_combo = float(pd.to_numeric(df_combo["distancia_rodoviaria_est_km"], errors="coerce").max())
-    qtd_ctes = int(df_combo["cte"].astype(str).nunique())
+
+    col_cte = "cte" if "cte" in df_combo.columns else "id_linha_pipeline"
+    qtd_ctes = int(df_combo[col_cte].astype(str).nunique())
+
     qtd_itens = int(len(df_combo))
     qtd_paradas = int(_chave_parada_df(df_combo).nunique())
 
@@ -380,14 +489,114 @@ def executar_m4_manifestos_fechados(
     caminhos_pipeline: Dict[str, Any] | None = None,
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, Any]]:
     # ------------------------------------------------------------
-    # 1) CÓPIAS
+    # 1) CÓPIAS + BLINDAGEM ESTRUTURAL
     # ------------------------------------------------------------
-    fila = df_input_oficial_bloco_4.copy().reset_index(drop=True)
-    veiculos = df_veiculos_tratados.copy().reset_index(drop=True)
+    fila = _deduplicar_colunas(df_input_oficial_bloco_4.copy().reset_index(drop=True))
+    veiculos = _deduplicar_colunas(df_veiculos_tratados.copy().reset_index(drop=True))
     caminhos_pipeline = caminhos_pipeline or {}
 
     # ------------------------------------------------------------
-    # 2) VALIDAR ESTRUTURA
+    # 2) ALIASES ESTRUTURAIS ROBUSTOS
+    # ------------------------------------------------------------
+    fila = _garantir_coluna_por_alias(
+        fila,
+        "destinatario",
+        ["Destinatário", "cliente", "destinatario_referencia"],
+        default=np.nan,
+    )
+    fila = _garantir_coluna_por_alias(
+        fila,
+        "cidade",
+        ["Cida", "cidade_dest", "cidade_destino", "cidade_referencia"],
+        default=np.nan,
+    )
+    fila = _garantir_coluna_por_alias(
+        fila,
+        "uf",
+        ["UF", "uf_referencia"],
+        default=np.nan,
+    )
+    fila = _garantir_coluna_por_alias(
+        fila,
+        "peso_kg",
+        ["Peso", "peso"],
+        default=np.nan,
+    )
+    fila = _garantir_coluna_por_alias(
+        fila,
+        "vol_m3",
+        ["Peso C", "peso_c", "cubagem_m3"],
+        default=np.nan,
+    )
+    fila = _garantir_coluna_por_alias(
+        fila,
+        "distancia_rodoviaria_est_km",
+        ["km_referencia", "distancia_km", "km_rota_referencia"],
+        default=np.nan,
+    )
+    fila = _garantir_coluna_por_alias(
+        fila,
+        "status_triagem",
+        ["status_roteirizacao", "status_fila"],
+        default=np.nan,
+    )
+    fila = _garantir_coluna_por_alias(
+        fila,
+        "grupo_saida",
+        ["grupo_pipeline", "grupo_status"],
+        default=np.nan,
+    )
+    fila = _garantir_coluna_por_alias(
+        fila,
+        "agendada",
+        ["Agenda", "agenda", "Agendam.", "flag_agendada", "agendada_flag"],
+        default=False,
+    )
+    fila = _garantir_coluna_por_alias(
+        fila,
+        "data_agenda",
+        ["Agendam.", "agenda_data", "data_agendamento"],
+        default=pd.NaT,
+    )
+    fila = _garantir_coluna_por_alias(
+        fila,
+        "data_leadtime",
+        ["D.L.E.", "dle", "leadtime_data_limite_entrega"],
+        default=pd.NaT,
+    )
+    fila = _garantir_coluna_por_alias(
+        fila,
+        "data_limite_considerada",
+        ["menor_data_limite_considerada"],
+        default=pd.NaT,
+    )
+    fila = _garantir_coluna_por_alias(
+        fila,
+        "ranking_prioridade",
+        ["ranking_prioridade_operacional", "ranking_preliminar"],
+        default=999999,
+    )
+    fila = _garantir_coluna_por_alias(
+        fila,
+        "score_prioridade_preliminar",
+        ["score_prioridade", "score_operacional"],
+        default=0.0,
+    )
+    fila = _garantir_coluna_por_alias(
+        fila,
+        "id_linha_pipeline",
+        ["id", "id_linha", "hash_linha_pipeline"],
+        default=np.nan,
+    )
+    fila = _garantir_coluna_por_alias(
+        fila,
+        "cte",
+        ["nro_documento", "romaneio", "nro_doc"],
+        default=np.nan,
+    )
+
+    # ------------------------------------------------------------
+    # 3) VALIDAR ESTRUTURA
     # ------------------------------------------------------------
     coluna_tipo_veiculo = _resolver_coluna_tipo_veiculo(veiculos)
 
@@ -421,7 +630,7 @@ def executar_m4_manifestos_fechados(
         raise Exception("Faltam colunas mínimas na base de veículos:\n- " + "\n- ".join(faltam_veiculos))
 
     # ------------------------------------------------------------
-    # 3) GARANTIA DURA DE INPUT CORRETO
+    # 4) GARANTIA DURA DE INPUT CORRETO
     # ------------------------------------------------------------
     linhas_input_invalido = fila.loc[
         (fila["status_triagem"].astype(str) != "roteirizavel")
@@ -434,12 +643,16 @@ def executar_m4_manifestos_fechados(
             "Há registros com status_triagem != 'roteirizavel' ou grupo_saida inválido."
         )
 
+    if fila["id_linha_pipeline"].isna().any():
+        qtd_nulos = int(fila["id_linha_pipeline"].isna().sum())
+        raise Exception(f"O input oficial do Bloco 4 possui id_linha_pipeline nulo: {qtd_nulos}")
+
     if fila["id_linha_pipeline"].astype(str).duplicated().any():
         qtd_dup = int(fila["id_linha_pipeline"].astype(str).duplicated().sum())
         raise Exception(f"O input oficial do Bloco 4 possui id_linha_pipeline duplicado: {qtd_dup}")
 
     # ------------------------------------------------------------
-    # 4) PADRONIZAÇÕES
+    # 5) PADRONIZAÇÕES
     # ------------------------------------------------------------
     for col in [
         "peso_kg",
@@ -447,6 +660,7 @@ def executar_m4_manifestos_fechados(
         "distancia_rodoviaria_est_km",
         "ranking_prioridade",
         "ranking_prioridade_operacional",
+        "ranking_preliminar",
         "score_prioridade_preliminar",
         "folga_dias",
     ]:
@@ -460,25 +674,23 @@ def executar_m4_manifestos_fechados(
         if col in fila.columns:
             fila[col] = pd.to_datetime(fila[col], errors="coerce")
 
-    if "agendada" in fila.columns:
-        fila["agendada"] = fila["agendada"].fillna(False).astype(bool)
-    else:
-        fila["agendada"] = False
+    fila["agendada"] = _normalizar_flag_agendada(fila["agendada"])
 
-    if "cte" not in fila.columns:
+    if fila["cte"].isna().all():
         fila["cte"] = fila["id_linha_pipeline"].astype(str)
-
-    if "ranking_prioridade" not in fila.columns:
-        if "ranking_prioridade_operacional" in fila.columns:
-            fila["ranking_prioridade"] = fila["ranking_prioridade_operacional"]
-        else:
-            fila["ranking_prioridade"] = 999999
+    else:
+        fila["cte"] = fila["cte"].fillna(fila["id_linha_pipeline"].astype(str))
 
     if "score_prioridade_preliminar" not in fila.columns:
         fila["score_prioridade_preliminar"] = 0.0
+    fila["score_prioridade_preliminar"] = pd.to_numeric(fila["score_prioridade_preliminar"], errors="coerce").fillna(0.0)
+
+    if "ranking_prioridade" not in fila.columns:
+        fila["ranking_prioridade"] = 999999
+    fila["ranking_prioridade"] = pd.to_numeric(fila["ranking_prioridade"], errors="coerce").fillna(999999)
 
     # ------------------------------------------------------------
-    # 5) PASTA DE SAÍDA INTERNA
+    # 6) PASTA DE SAÍDA INTERNA
     # ------------------------------------------------------------
     pasta_saida_base_str = caminhos_pipeline.get("pasta_saida_base")
     if pasta_saida_base_str:
@@ -497,12 +709,12 @@ def executar_m4_manifestos_fechados(
     arq_metadata_json = pasta_modulo_4 / "metadata_modulo_4.json"
 
     # ------------------------------------------------------------
-    # 6) CATÁLOGO DE VEÍCULOS
+    # 7) CATÁLOGO DE VEÍCULOS
     # ------------------------------------------------------------
     catalogo_veiculos = _preparar_catalogo_veiculos(veiculos, coluna_tipo_veiculo)
 
     # ------------------------------------------------------------
-    # 7) ESTRUTURAS DE SAÍDA
+    # 8) ESTRUTURAS DE SAÍDA
     # ------------------------------------------------------------
     manifestos_fechados: List[Dict[str, Any]] = []
     itens_manifestos_fechados: List[pd.DataFrame] = []
@@ -552,7 +764,7 @@ def executar_m4_manifestos_fechados(
         ids_alocados.update(df_combo["id_linha_pipeline"].astype(str).tolist())
 
     # ------------------------------------------------------------
-    # 8) 4A - FECHAMENTO MACRO POR MESMO CLIENTE + BUCKET TEMPORAL
+    # 9) 4A - FECHAMENTO MACRO POR MESMO CLIENTE + BUCKET TEMPORAL
     # ------------------------------------------------------------
     fila["bucket_temporal_4a"] = fila.apply(_bucket_temporal, axis=1)
 
@@ -630,7 +842,7 @@ def executar_m4_manifestos_fechados(
             ].copy().reset_index(drop=True)
 
     # ------------------------------------------------------------
-    # 9) 4B - FECHAMENTO POR PARADA NATURAL NO SALDO
+    # 10) 4B - FECHAMENTO POR PARADA NATURAL NO SALDO
     # ------------------------------------------------------------
     fila_saldo_4b = fila.loc[
         ~fila["id_linha_pipeline"].astype(str).isin(ids_alocados)
@@ -678,7 +890,7 @@ def executar_m4_manifestos_fechados(
             registrar_manifesto(df_grupo, avaliacao, "4B_parada_natural", "NA")
 
     # ------------------------------------------------------------
-    # 10) 4C - VARREDURA FINAL DO REMANESCENTE
+    # 11) 4C - VARREDURA FINAL DO REMANESCENTE
     # ------------------------------------------------------------
     iteracao_4c = 0
     novos_manifestos_4c = 0
@@ -791,7 +1003,7 @@ def executar_m4_manifestos_fechados(
             break
 
     # ------------------------------------------------------------
-    # 11) DATAFRAMES FINAIS
+    # 12) DATAFRAMES FINAIS
     # ------------------------------------------------------------
     df_manifestos_fechados_bloco_4 = pd.DataFrame(manifestos_fechados)
 
@@ -833,7 +1045,7 @@ def executar_m4_manifestos_fechados(
     )
 
     # ------------------------------------------------------------
-    # 12) FECHAMENTO CONTÁBIL OBRIGATÓRIO
+    # 13) FECHAMENTO CONTÁBIL OBRIGATÓRIO
     # ------------------------------------------------------------
     roteirizavel_entrada_m4 = len(fila)
     itens_manifestados_m4 = (
@@ -863,7 +1075,7 @@ def executar_m4_manifestos_fechados(
         )
 
     # ------------------------------------------------------------
-    # 13) RESUMOS
+    # 14) RESUMOS
     # ------------------------------------------------------------
     grupos_naturais_testados_4b = int(
         fila_saldo_4b.groupby(CHAVES_PARADA, dropna=False).ngroups
@@ -935,7 +1147,7 @@ def executar_m4_manifestos_fechados(
         )
 
     # ------------------------------------------------------------
-    # 14) SALVAR OUTPUTS INTERNOS
+    # 15) SALVAR OUTPUTS INTERNOS
     # ------------------------------------------------------------
     try:
         with pd.ExcelWriter(arq_manifestos_xlsx, engine="openpyxl") as writer:
@@ -1007,7 +1219,7 @@ def executar_m4_manifestos_fechados(
         pass
 
     # ------------------------------------------------------------
-    # 15) META E OUTPUTS
+    # 16) META E OUTPUTS
     # ------------------------------------------------------------
     resumo_m4 = {
         "modulo": "M4",
@@ -1043,3 +1255,7 @@ def executar_m4_manifestos_fechados(
     }
 
     return outputs, meta_m4
+'''
+path = Path('/mnt/data/m4_manifestos_fechados_corrigido.py')
+path.write_text(code, encoding='utf-8')
+print(path)
