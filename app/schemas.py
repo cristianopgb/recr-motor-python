@@ -46,6 +46,9 @@ class CarteiraItem(BaseModel):
     Status: Optional[Any] = None
     Lat: Optional[Any] = Field(default=None, alias="Lat.")
     Lon: Optional[Any] = Field(default=None, alias="Lon.")
+    Veiculo_Exclusivo: Optional[Any] = Field(default=None, alias="Veiculo Exclusivo")
+    Peso_Calculado: Optional[Any] = Field(default=None, alias="Peso Calculado")
+    Prioridade: Optional[Any] = None
 
 
 class Veiculo(BaseModel):
