@@ -1255,7 +1255,4 @@ def executar_m4_manifestos_fechados(
     }
 
     return outputs, meta_m4
-'''
-path = Path('/mnt/data/m4_manifestos_fechados_corrigido.py')
-path.write_text(code, encoding='utf-8')
-print(path)
+
