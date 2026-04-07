@@ -15,28 +15,37 @@ def executar_m3_triagem(
     """
     M3 real adaptado ao Sistema 2 (API).
 
-    Regras de triagem:
-    - agendada sem data_agenda -> aguardando_agendamento
-    - nao agendada -> roteirizavel
-    - agendada com folga entre 0 e 1 -> roteirizavel
-    - agendada com folga >= 2 -> entrega_futura
-    - demais cenários -> excecao_triagem
+    Regras oficiais de triagem:
+    1) roteirizavel
+       - sem data_agenda e com data_leadtime preenchida
+       - com data_agenda e folga_dias >= 0 e < 2
 
-    Regra crítica ajustada:
-    - folga_dias == 2 entra em entrega_futura
+    2) agendamento_futuro
+       - com data_agenda e folga_dias >= 2
+
+    3) agenda_vencida
+       - com data_agenda e folga_dias < 0
+
+    Observações:
+    - A coluna de verdade para agenda é somente data_agenda (Agendam.)
+    - A coluna textual Agenda não participa da regra
+    - Não existe mais categoria aguardando_agendamento
+    - folga_dias == 2 entra em agendamento_futuro
     """
 
     carteira = df_carteira_enriquecida.copy()
 
     _validar_colunas_minimas(carteira)
 
-    carteira["agendada"] = carteira["agendada"].fillna(False).astype(bool)
     carteira["data_agenda"] = pd.to_datetime(carteira["data_agenda"], errors="coerce")
     carteira["data_leadtime"] = pd.to_datetime(carteira["data_leadtime"], errors="coerce")
     carteira["data_limite_considerada"] = pd.to_datetime(carteira["data_limite_considerada"], errors="coerce")
     carteira["folga_dias"] = pd.to_numeric(carteira["folga_dias"], errors="coerce")
     carteira["transit_time_dias"] = pd.to_numeric(carteira["transit_time_dias"], errors="coerce")
     carteira["dias_ate_data_alvo"] = pd.to_numeric(carteira["dias_ate_data_alvo"], errors="coerce")
+
+    # Verdade operacional de agenda = existe data_agenda
+    carteira["agendada"] = carteira["data_agenda"].notna()
 
     if "score_prioridade_preliminar" not in carteira.columns:
         carteira["score_prioridade_preliminar"] = 0
@@ -62,9 +71,8 @@ def executar_m3_triagem(
     carteira["ranking_prioridade_operacional"] = carteira.apply(_definir_ranking_operacional, axis=1)
 
     carteira["flag_roteirizavel"] = carteira["status_triagem"].eq("roteirizavel")
-    carteira["flag_entrega_futura"] = carteira["status_triagem"].eq("entrega_futura")
-    carteira["flag_aguardando_agendamento"] = carteira["status_triagem"].eq("aguardando_agendamento")
-    carteira["flag_excecao_triagem"] = carteira["status_triagem"].eq("excecao_triagem")
+    carteira["flag_agendamento_futuro"] = carteira["status_triagem"].eq("agendamento_futuro")
+    carteira["flag_agenda_vencida"] = carteira["status_triagem"].eq("agenda_vencida")
 
     df_carteira_triagem = carteira.copy()
 
@@ -82,8 +90,8 @@ def executar_m3_triagem(
         .reset_index(drop=True)
     )
 
-    df_carteira_entrega_futura = (
-        carteira.loc[carteira["status_triagem"] == "entrega_futura"]
+    df_carteira_agendamento_futuro = (
+        carteira.loc[carteira["status_triagem"] == "agendamento_futuro"]
         .sort_values(
             by=["data_limite_considerada", "score_prioridade_preliminar"],
             ascending=[True, False],
@@ -92,21 +100,11 @@ def executar_m3_triagem(
         .reset_index(drop=True)
     )
 
-    df_carteira_aguardando_agendamento = (
-        carteira.loc[carteira["status_triagem"] == "aguardando_agendamento"]
+    df_carteira_agendas_vencidas = (
+        carteira.loc[carteira["status_triagem"] == "agenda_vencida"]
         .sort_values(
-            by=["score_prioridade_preliminar", "distancia_rodoviaria_est_km"],
-            ascending=[False, True],
-            na_position="last",
-        )
-        .reset_index(drop=True)
-    )
-
-    df_carteira_excecoes_triagem = (
-        carteira.loc[carteira["status_triagem"] == "excecao_triagem"]
-        .sort_values(
-            by=["score_prioridade_preliminar", "distancia_rodoviaria_est_km"],
-            ascending=[False, True],
+            by=["data_limite_considerada", "score_prioridade_preliminar"],
+            ascending=[True, False],
             na_position="last",
         )
         .reset_index(drop=True)
@@ -115,17 +113,15 @@ def executar_m3_triagem(
     _validar_integridade_fechamento(
         df_entrada=carteira,
         df_carteira_roteirizavel=df_carteira_roteirizavel,
-        df_carteira_entrega_futura=df_carteira_entrega_futura,
-        df_carteira_aguardando_agendamento=df_carteira_aguardando_agendamento,
-        df_carteira_excecoes_triagem=df_carteira_excecoes_triagem,
+        df_carteira_agendamento_futuro=df_carteira_agendamento_futuro,
+        df_carteira_agendas_vencidas=df_carteira_agendas_vencidas,
     )
 
     resumo = _montar_resumo_m3(
         df_carteira_triagem=df_carteira_triagem,
         df_carteira_roteirizavel=df_carteira_roteirizavel,
-        df_carteira_entrega_futura=df_carteira_entrega_futura,
-        df_carteira_aguardando_agendamento=df_carteira_aguardando_agendamento,
-        df_carteira_excecoes_triagem=df_carteira_excecoes_triagem,
+        df_carteira_agendamento_futuro=df_carteira_agendamento_futuro,
+        df_carteira_agendas_vencidas=df_carteira_agendas_vencidas,
         data_base_roteirizacao=data_base_roteirizacao,
         caminhos_pipeline=caminhos_pipeline or {},
     )
@@ -133,9 +129,8 @@ def executar_m3_triagem(
     resultado = {
         "df_carteira_triagem": df_carteira_triagem,
         "df_carteira_roteirizavel": df_carteira_roteirizavel,
-        "df_carteira_entrega_futura": df_carteira_entrega_futura,
-        "df_carteira_aguardando_agendamento": df_carteira_aguardando_agendamento,
-        "df_carteira_excecoes_triagem": df_carteira_excecoes_triagem,
+        "df_carteira_agendamento_futuro": df_carteira_agendamento_futuro,
+        "df_carteira_agendas_vencidas": df_carteira_agendas_vencidas,
     }
 
     return df_carteira_triagem, {
@@ -146,7 +141,6 @@ def executar_m3_triagem(
 
 def _validar_colunas_minimas(df: pd.DataFrame) -> None:
     colunas_minimas = [
-        "agendada",
         "data_agenda",
         "data_leadtime",
         "data_limite_considerada",
@@ -166,49 +160,53 @@ def _validar_colunas_minimas(df: pd.DataFrame) -> None:
 
 
 def _classificar_status_triagem(row: pd.Series) -> str:
-    agendada = bool(row["agendada"])
     data_agenda = row["data_agenda"]
+    data_leadtime = row["data_leadtime"]
     folga = row["folga_dias"]
 
-    if agendada and pd.isna(data_agenda):
-        return "aguardando_agendamento"
+    # Sem data_agenda: entra pela DLE, se existir
+    if pd.isna(data_agenda):
+        if pd.notna(data_leadtime):
+            return "roteirizavel"
+        return "excecao_triagem"
 
-    if not agendada:
+    # Com data_agenda: classifica pela folga
+    if pd.notna(folga) and 0 <= folga < 2:
         return "roteirizavel"
 
-    if agendada and pd.notna(folga) and 0 <= folga <= 1:
-        return "roteirizavel"
+    if pd.notna(folga) and folga >= 2:
+        return "agendamento_futuro"
 
-    if agendada and pd.notna(folga) and folga >= 2:
-        return "entrega_futura"
+    if pd.notna(folga) and folga < 0:
+        return "agenda_vencida"
 
     return "excecao_triagem"
 
 
 def _definir_motivo_triagem(row: pd.Series) -> str:
     status = row["status_triagem"]
-    agendada = bool(row["agendada"])
+    data_agenda = row["data_agenda"]
+    data_leadtime = row["data_leadtime"]
     folga = row["folga_dias"]
 
-    if status == "roteirizavel" and not agendada:
-        return "nao_agendada_entra_na_carteira_roteirizavel"
+    if status == "roteirizavel":
+        if pd.isna(data_agenda) and pd.notna(data_leadtime):
+            return "leadtime_preenchido_sem_data_agenda"
+        return "agendada_com_folga_positiva_menor_que_2"
 
-    if status == "roteirizavel" and agendada:
-        return "agendada_com_folga_entre_0_e_1"
-
-    if status == "entrega_futura":
+    if status == "agendamento_futuro":
         if pd.notna(folga) and folga == 2:
             return "agendada_com_folga_igual_a_2"
         return "agendada_com_folga_maior_ou_igual_a_2"
 
-    if status == "aguardando_agendamento":
-        return "marcada_como_agendada_sem_data_agenda"
+    if status == "agenda_vencida":
+        return "agendada_com_folga_negativa"
 
     if status == "excecao_triagem":
-        if agendada and pd.isna(folga):
+        if pd.isna(data_agenda) and pd.isna(data_leadtime):
+            return "sem_data_agenda_e_sem_dle"
+        if pd.notna(data_agenda) and pd.isna(folga):
             return "agendada_sem_folga_calculada"
-        if agendada and pd.notna(folga) and folga < 0:
-            return "agendada_inviavel_para_agenda_atual"
         return "cenario_nao_mapeado_pela_regra_atual"
 
     return "sem_motivo"
@@ -217,22 +215,22 @@ def _definir_motivo_triagem(row: pd.Series) -> str:
 def _definir_grupo_saida(status: str) -> str:
     if status == "roteirizavel":
         return "df_carteira_roteirizavel"
-    if status == "entrega_futura":
-        return "df_carteira_entrega_futura"
-    if status == "aguardando_agendamento":
-        return "df_carteira_aguardando_agendamento"
+    if status == "agendamento_futuro":
+        return "df_carteira_agendamento_futuro"
+    if status == "agenda_vencida":
+        return "df_carteira_agendas_vencidas"
     return "df_carteira_excecoes_triagem"
 
 
 def _definir_prioridade_label(row: pd.Series) -> str:
     status = row["status_triagem"]
-    agendada = bool(row["agendada"])
+    data_agenda = row["data_agenda"]
     folga = row["folga_dias"]
 
     if status != "roteirizavel":
         return "fora_da_carteira_roteirizavel"
 
-    if agendada:
+    if pd.notna(data_agenda):
         return "prioridade_1_agendada"
 
     if pd.notna(folga) and folga <= 0:
@@ -246,12 +244,12 @@ def _definir_prioridade_label(row: pd.Series) -> str:
 
 def _definir_ranking_operacional(row: pd.Series) -> int:
     status = row["status_triagem"]
-    agendada = bool(row["agendada"])
+    data_agenda = row["data_agenda"]
     folga = row["folga_dias"]
 
     if status != "roteirizavel":
         return 9
-    if agendada:
+    if pd.notna(data_agenda):
         return 1
     if pd.notna(folga) and folga <= 0:
         return 2
@@ -263,16 +261,15 @@ def _definir_ranking_operacional(row: pd.Series) -> int:
 def _validar_integridade_fechamento(
     df_entrada: pd.DataFrame,
     df_carteira_roteirizavel: pd.DataFrame,
-    df_carteira_entrega_futura: pd.DataFrame,
-    df_carteira_aguardando_agendamento: pd.DataFrame,
-    df_carteira_excecoes_triagem: pd.DataFrame,
+    df_carteira_agendamento_futuro: pd.DataFrame,
+    df_carteira_agendas_vencidas: pd.DataFrame,
 ) -> None:
     qtd_entrada = len(df_entrada)
     qtd_saida = (
         len(df_carteira_roteirizavel)
-        + len(df_carteira_entrega_futura)
-        + len(df_carteira_aguardando_agendamento)
-        + len(df_carteira_excecoes_triagem)
+        + len(df_carteira_agendamento_futuro)
+        + len(df_carteira_agendas_vencidas)
+        + len(df_entrada.loc[df_entrada["status_triagem"] == "excecao_triagem"])
     )
 
     if qtd_entrada != qtd_saida:
@@ -280,39 +277,56 @@ def _validar_integridade_fechamento(
             f"Falha de integridade do M3: entrada={qtd_entrada} e saída={qtd_saida}."
         )
 
-    violacoes_roteirizavel = df_carteira_roteirizavel.loc[
-        (df_carteira_roteirizavel["agendada"] == True)
+    violacoes_roteirizavel_agendadas = df_carteira_roteirizavel.loc[
+        df_carteira_roteirizavel["data_agenda"].notna()
         & (
             df_carteira_roteirizavel["folga_dias"].isna()
             | (df_carteira_roteirizavel["folga_dias"] < 0)
-            | (df_carteira_roteirizavel["folga_dias"] > 1)
+            | (df_carteira_roteirizavel["folga_dias"] >= 2)
         )
     ]
-
-    if len(violacoes_roteirizavel) > 0:
+    if len(violacoes_roteirizavel_agendadas) > 0:
         raise Exception(
-            "A carteira roteirizável ficou contaminada com linhas agendadas fora da faixa permitida (0 a 1)."
+            "A carteira roteirizável ficou contaminada com linhas agendadas fora da faixa permitida (0 <= folga < 2)."
         )
 
-    violacoes_entrega_futura = df_carteira_entrega_futura.loc[
+    violacoes_roteirizavel_leadtime = df_carteira_roteirizavel.loc[
+        df_carteira_roteirizavel["data_agenda"].isna()
+        & df_carteira_roteirizavel["data_leadtime"].isna()
+    ]
+    if len(violacoes_roteirizavel_leadtime) > 0:
+        raise Exception(
+            "A carteira roteirizável ficou contaminada com linhas sem data_agenda e sem DLE."
+        )
+
+    violacoes_futuro = df_carteira_agendamento_futuro.loc[
         ~(
-            (df_carteira_entrega_futura["agendada"] == True)
-            & (df_carteira_entrega_futura["folga_dias"] >= 2)
+            df_carteira_agendamento_futuro["data_agenda"].notna()
+            & (df_carteira_agendamento_futuro["folga_dias"] >= 2)
         )
     ]
-
-    if len(violacoes_entrega_futura) > 0:
+    if len(violacoes_futuro) > 0:
         raise Exception(
-            "A carteira de entrega futura ficou com linhas incompatíveis com a regra (agendada com folga >= 2)."
+            "A carteira de agendamento futuro ficou com linhas incompatíveis com a regra (data_agenda preenchida e folga >= 2)."
+        )
+
+    violacoes_vencidas = df_carteira_agendas_vencidas.loc[
+        ~(
+            df_carteira_agendas_vencidas["data_agenda"].notna()
+            & (df_carteira_agendas_vencidas["folga_dias"] < 0)
+        )
+    ]
+    if len(violacoes_vencidas) > 0:
+        raise Exception(
+            "A carteira de agendas vencidas ficou com linhas incompatíveis com a regra (data_agenda preenchida e folga < 0)."
         )
 
 
 def _montar_resumo_m3(
     df_carteira_triagem: pd.DataFrame,
     df_carteira_roteirizavel: pd.DataFrame,
-    df_carteira_entrega_futura: pd.DataFrame,
-    df_carteira_aguardando_agendamento: pd.DataFrame,
-    df_carteira_excecoes_triagem: pd.DataFrame,
+    df_carteira_agendamento_futuro: pd.DataFrame,
+    df_carteira_agendas_vencidas: pd.DataFrame,
     data_base_roteirizacao: datetime,
     caminhos_pipeline: Dict[str, Any],
 ) -> Dict[str, Any]:
@@ -330,10 +344,10 @@ def _montar_resumo_m3(
         .to_dict()
     )
 
-    qtd_folga_2_futura = int(
+    qtd_folga_2_futuro = int(
         (
-            (df_carteira_entrega_futura["agendada"] == True)
-            & (pd.to_numeric(df_carteira_entrega_futura["folga_dias"], errors="coerce") == 2)
+            df_carteira_agendamento_futuro["data_agenda"].notna()
+            & (pd.to_numeric(df_carteira_agendamento_futuro["folga_dias"], errors="coerce") == 2)
         ).sum()
     )
 
@@ -343,14 +357,16 @@ def _montar_resumo_m3(
         "linhas_entrada": int(len(df_carteira_triagem)),
         "linhas_saida_total": int(len(df_carteira_triagem)),
         "carteira_roteirizavel": int(len(df_carteira_roteirizavel)),
-        "carteira_entrega_futura": int(len(df_carteira_entrega_futura)),
-        "carteira_aguardando_agendamento": int(len(df_carteira_aguardando_agendamento)),
-        "carteira_excecoes_triagem": int(len(df_carteira_excecoes_triagem)),
-        "agendadas_na_roteirizavel": int((df_carteira_roteirizavel["agendada"] == True).sum()),
-        "nao_agendadas_na_roteirizavel": int((df_carteira_roteirizavel["agendada"] == False).sum()),
-        "agendadas_folga_igual_2_em_entrega_futura": qtd_folga_2_futura,
+        "carteira_agendamento_futuro": int(len(df_carteira_agendamento_futuro)),
+        "carteira_agendas_vencidas": int(len(df_carteira_agendas_vencidas)),
+        "carteira_excecoes_triagem": int((df_carteira_triagem["status_triagem"] == "excecao_triagem").sum()),
+        "agendadas_na_roteirizavel": int(df_carteira_roteirizavel["data_agenda"].notna().sum()),
+        "leadtime_na_roteirizavel": int(df_carteira_roteirizavel["data_agenda"].isna().sum()),
+        "agendadas_folga_igual_2_em_agendamento_futuro": qtd_folga_2_futuro,
         "status_triagem_counts": status_counts,
         "prioridade_roteirizavel_counts": prioridade_counts,
-        "regra_folga_agendada_entrega_futura": "folga_dias >= 2",
+        "regra_agendada_roteirizavel": "0 <= folga_dias < 2",
+        "regra_agendamento_futuro": "folga_dias >= 2",
+        "regra_agenda_vencida": "folga_dias < 0",
         "caminhos_pipeline": caminhos_pipeline,
     }
