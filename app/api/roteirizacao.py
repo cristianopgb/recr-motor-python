@@ -22,6 +22,7 @@ def _sanitize_for_json(value: Any) -> Any:
     - pd.NaT -> None
     - inf / -inf -> None
     - tipos numpy -> tipos Python nativos
+    - Series / Index / ndarray -> listas Python
     """
     if value is None:
         return None
@@ -29,19 +30,22 @@ def _sanitize_for_json(value: Any) -> Any:
     if value is pd.NaT:
         return None
 
-    if isinstance(value, (np.floating,)):
-        value = float(value)
-
-    if isinstance(value, (np.integer,)):
-        value = int(value)
-
-    if isinstance(value, (np.bool_,)):
-        value = bool(value)
-
     if isinstance(value, pd.Timestamp):
         if pd.isna(value):
             return None
         return value.isoformat()
+
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+
+    if isinstance(value, (np.integer,)):
+        return int(value)
+
+    if isinstance(value, (np.floating,)):
+        value = float(value)
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
 
     if isinstance(value, float):
         if math.isnan(value) or math.isinf(value):
@@ -60,10 +64,21 @@ def _sanitize_for_json(value: Any) -> Any:
     if isinstance(value, tuple):
         return [_sanitize_for_json(v) for v in value]
 
-    # fallback para objetos pandas/numpy estranhos
+    if isinstance(value, np.ndarray):
+        return [_sanitize_for_json(v) for v in value.tolist()]
+
+    if isinstance(value, pd.Series):
+        return [_sanitize_for_json(v) for v in value.tolist()]
+
+    if isinstance(value, pd.Index):
+        return [_sanitize_for_json(v) for v in value.tolist()]
+
+    # fallback seguro apenas para escalares
     try:
-        if pd.isna(value):
-            return None
+        resultado_isna = pd.isna(value)
+        if isinstance(resultado_isna, (bool, np.bool_)):
+            if bool(resultado_isna):
+                return None
     except Exception:
         pass
 
@@ -73,16 +88,12 @@ def _sanitize_for_json(value: Any) -> Any:
 @router.post("/roteirizar")
 def roteirizar(payload: RoteirizacaoRequest):
     try:
-        # 1) validação do contrato de entrada
         validar_payload(payload)
 
-        # 2) execução/orquestração do pipeline
         resultado_pipeline = executar_pipeline(payload)
 
-        # 3) sanitização para JSON
         resultado_pipeline = _sanitize_for_json(resultado_pipeline)
 
-        # 4) devolve resultado bruto estruturado
         return JSONResponse(
             status_code=200,
             content=resultado_pipeline,
