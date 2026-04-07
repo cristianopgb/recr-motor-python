@@ -101,6 +101,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                 "rodada_id": contexto.rodada_id,
                 "filial_id": contexto.filial_id,
                 "data_base_roteirizacao": contexto.data_base.isoformat(),
+                "tipo_roteirizacao": contexto.tipo_roteirizacao,
             },
         )
     )
@@ -116,6 +117,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             extra={
                 "filial": contexto.filial,
                 "data_base_roteirizacao": contexto.data_base.isoformat(),
+                "tipo_roteirizacao": contexto.tipo_roteirizacao,
             },
         )
     )
@@ -177,9 +179,12 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     resumo_m3 = meta_m3["resumo_m3"]
 
     df_carteira_roteirizavel = outputs_m3["df_carteira_roteirizavel"]
-    df_carteira_entrega_futura = outputs_m3["df_carteira_entrega_futura"]
-    df_carteira_aguardando_agendamento = outputs_m3["df_carteira_aguardando_agendamento"]
-    df_carteira_excecoes_triagem = outputs_m3["df_carteira_excecoes_triagem"]
+    df_carteira_agendamento_futuro = outputs_m3["df_carteira_agendamento_futuro"]
+    df_carteira_agendas_vencidas = outputs_m3["df_carteira_agendas_vencidas"]
+    df_carteira_excecoes_triagem = outputs_m3.get(
+        "df_carteira_excecoes_triagem",
+        pd.DataFrame(),
+    )
 
     logs.append(
         _log(
@@ -215,6 +220,8 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         df_veiculos_tratados=df_veiculos_tratados,
         rodada_id=contexto.rodada_id,
         data_base_roteirizacao=contexto.data_base,
+        tipo_roteirizacao=contexto.tipo_roteirizacao,
+        configuracao_frota=payload.configuracao_frota,
         caminhos_pipeline=contexto.caminhos_pipeline,
     )
     resumo_m4 = meta_m4["resumo_m4"]
@@ -223,6 +230,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     df_itens_manifestos_fechados_bloco_4 = outputs_m4["df_itens_manifestos_fechados_bloco_4"]
     df_tentativas_fechamento_bloco_4 = outputs_m4["df_tentativas_fechamento_bloco_4"]
     df_remanescente_roteirizavel_bloco_4 = outputs_m4["df_remanescente_roteirizavel_bloco_4"]
+    df_uso_frota_m4 = outputs_m4.get("df_uso_frota_m4", pd.DataFrame())
 
     logs.append(
         _log(
@@ -263,9 +271,11 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "carteira_triagem": _snapshot_dataframe(df_carteira_triagem, "df_carteira_triagem"),
             "carteira_roteirizavel": _snapshot_dataframe(df_carteira_roteirizavel, "df_carteira_roteirizavel"),
             "input_oficial_bloco_4": _snapshot_dataframe(df_input_oficial_bloco_4, "df_input_oficial_bloco_4"),
-            "carteira_entrega_futura": _snapshot_dataframe(df_carteira_entrega_futura, "df_carteira_entrega_futura"),
-            "carteira_aguardando_agendamento": _snapshot_dataframe(
-                df_carteira_aguardando_agendamento, "df_carteira_aguardando_agendamento"
+            "carteira_agendamento_futuro": _snapshot_dataframe(
+                df_carteira_agendamento_futuro, "df_carteira_agendamento_futuro"
+            ),
+            "carteira_agendas_vencidas": _snapshot_dataframe(
+                df_carteira_agendas_vencidas, "df_carteira_agendas_vencidas"
             ),
             "carteira_excecoes_triagem": _snapshot_dataframe(
                 df_carteira_excecoes_triagem, "df_carteira_excecoes_triagem"
@@ -282,6 +292,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "remanescente_roteirizavel_bloco_4": _snapshot_dataframe(
                 df_remanescente_roteirizavel_bloco_4, "df_remanescente_roteirizavel_bloco_4"
             ),
+            "uso_frota_m4": _snapshot_dataframe(df_uso_frota_m4, "df_uso_frota_m4"),
             "regionalidades": _snapshot_dataframe(contexto.df_geo_raw, "df_geo_raw"),
             "parametros": _snapshot_dataframe(contexto.df_parametros_raw, "df_parametros_raw"),
             "veiculos": _snapshot_dataframe(contexto.df_veiculos_raw, "df_veiculos_raw"),
@@ -291,12 +302,13 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "carteira_enriquecida": _df_to_records(df_carteira_enriquecida, limit=5),
             "carteira_roteirizavel": _df_to_records(df_carteira_roteirizavel, limit=5),
             "input_oficial_bloco_4": _df_to_records(df_input_oficial_bloco_4, limit=5),
-            "entrega_futura": _df_to_records(df_carteira_entrega_futura, limit=5),
-            "aguardando_agendamento": _df_to_records(df_carteira_aguardando_agendamento, limit=5),
+            "agendamento_futuro": _df_to_records(df_carteira_agendamento_futuro, limit=5),
+            "agendas_vencidas": _df_to_records(df_carteira_agendas_vencidas, limit=5),
             "excecoes_triagem": _df_to_records(df_carteira_excecoes_triagem, limit=5),
             "manifestos_fechados_bloco_4": _df_to_records(df_manifestos_fechados_bloco_4, limit=10),
             "itens_manifestos_fechados_bloco_4": _df_to_records(df_itens_manifestos_fechados_bloco_4, limit=10),
             "remanescente_roteirizavel_bloco_4": _df_to_records(df_remanescente_roteirizavel_bloco_4, limit=10),
+            "uso_frota_m4": _df_to_records(df_uso_frota_m4, limit=10),
         },
         "outputs_intermediarios": {
             "df_input_oficial_bloco_4": _df_to_records(df_input_oficial_bloco_4),
@@ -304,6 +316,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "df_itens_manifestos_fechados_bloco_4": _df_to_records(df_itens_manifestos_fechados_bloco_4),
             "df_tentativas_fechamento_bloco_4": _df_to_records(df_tentativas_fechamento_bloco_4),
             "df_remanescente_roteirizavel_bloco_4": _df_to_records(df_remanescente_roteirizavel_bloco_4),
+            "df_uso_frota_m4": _df_to_records(df_uso_frota_m4),
         },
         "manifestos_fechados": _df_to_records(df_manifestos_fechados_bloco_4),
         "manifestos_compostos": [],
