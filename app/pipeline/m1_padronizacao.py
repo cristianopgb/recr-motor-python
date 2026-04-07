@@ -12,8 +12,16 @@ import numpy as np
 
 
 def normalizar_texto_basico(valor):
-    if pd.isna(valor):
+    if valor is None:
         return np.nan
+
+    try:
+        resultado_isna = pd.isna(valor)
+        if isinstance(resultado_isna, (bool, np.bool_)) and bool(resultado_isna):
+            return np.nan
+    except Exception:
+        pass
+
     texto = str(valor).replace("\u00a0", " ")
     texto = texto.strip()
     texto = re.sub(r"\s+", " ", texto)
@@ -21,8 +29,16 @@ def normalizar_texto_basico(valor):
 
 
 def remover_acentos(texto):
-    if pd.isna(texto):
+    if texto is None:
         return np.nan
+
+    try:
+        resultado_isna = pd.isna(texto)
+        if isinstance(resultado_isna, (bool, np.bool_)) and bool(resultado_isna):
+            return np.nan
+    except Exception:
+        pass
+
     texto = str(texto)
     return "".join(
         c for c in unicodedata.normalize("NFKD", texto)
@@ -33,7 +49,7 @@ def remover_acentos(texto):
 def padronizar_nome_coluna(col):
     col = normalizar_texto_basico(col)
     col = remover_acentos(col)
-    col = col.lower()
+    col = str(col).lower()
     col = col.replace("/", "_")
     col = col.replace(".", "")
     col = col.replace("-", "_")
@@ -66,8 +82,16 @@ def converter_numerico_brasil(serie):
     s = serie.astype(str).str.strip()
 
     def _conv(x):
-        if pd.isna(x):
+        if x is None:
             return np.nan
+
+        try:
+            resultado_isna = pd.isna(x)
+            if isinstance(resultado_isna, (bool, np.bool_)) and bool(resultado_isna):
+                return np.nan
+        except Exception:
+            pass
+
         x = str(x).replace("R$", "").replace(" ", "")
 
         if "." in x and "," in x:
@@ -87,8 +111,16 @@ def converter_coordenada(serie):
     s = serie.astype(str).str.strip()
 
     def _coord(x):
-        if pd.isna(x):
+        if x is None:
             return np.nan
+
+        try:
+            resultado_isna = pd.isna(x)
+            if isinstance(resultado_isna, (bool, np.bool_)) and bool(resultado_isna):
+                return np.nan
+        except Exception:
+            pass
+
         x = str(x).replace(" ", "")
 
         if "." in x and "," in x:
@@ -110,20 +142,36 @@ def converter_data(serie):
 
 def converter_flag_agendamento(serie):
     def _f(x):
-        if pd.isna(x):
+        if x is None:
             return False
+
+        try:
+            resultado_isna = pd.isna(x)
+            if isinstance(resultado_isna, (bool, np.bool_)) and bool(resultado_isna):
+                return False
+        except Exception:
+            pass
+
         x = str(x).strip()
         return x != ""
+
     return serie.apply(_f)
 
 
 def converter_flag_sim_nao(serie):
     def _f(x):
-        if pd.isna(x):
+        if x is None:
             return False
 
+        try:
+            resultado_isna = pd.isna(x)
+            if isinstance(resultado_isna, (bool, np.bool_)) and bool(resultado_isna):
+                return False
+        except Exception:
+            pass
+
         texto = normalizar_texto_basico(x)
-        if pd.isna(texto):
+        if texto is None or (isinstance(texto, float) and pd.isna(texto)):
             return False
 
         texto = remover_acentos(texto)
@@ -151,6 +199,40 @@ def normalizar_chave_texto(serie: pd.Series) -> pd.Series:
     return serie.apply(
         lambda x: remover_acentos(str(x)).upper().strip() if pd.notna(x) else np.nan
     )
+
+
+def normalizar_valor_parametro(x):
+    if x is None:
+        return None
+
+    if x is pd.NaT:
+        return None
+
+    if isinstance(x, pd.Timestamp):
+        if pd.isna(x):
+            return None
+        return x.isoformat()
+
+    if isinstance(x, np.ndarray):
+        return str(x.tolist()).strip()
+
+    if isinstance(x, pd.Series):
+        return str(x.tolist()).strip()
+
+    if isinstance(x, pd.Index):
+        return str(x.tolist()).strip()
+
+    if isinstance(x, (list, tuple, set)):
+        return str(list(x)).strip()
+
+    try:
+        resultado_isna = pd.isna(x)
+        if isinstance(resultado_isna, (bool, np.bool_)) and bool(resultado_isna):
+            return None
+    except Exception:
+        pass
+
+    return str(x).strip()
 
 
 def executar_m1_padronizacao(
@@ -242,11 +324,9 @@ def executar_m1_padronizacao(
 
     geo = geo.rename(columns={k: v for k, v in mapa_geo.items() if k in geo.columns})
 
-    # se veio "cidade" e não veio "nome", cria "nome" espelhado
     if "nome" not in geo.columns and "cidade" in geo.columns:
         geo["nome"] = geo["cidade"]
 
-    # se veio "nome" e não veio "cidade", cria "cidade" espelhado
     if "cidade" not in geo.columns and "nome" in geo.columns:
         geo["cidade"] = geo["nome"]
 
@@ -261,7 +341,6 @@ def executar_m1_padronizacao(
         if col_valor and col_valor != "valor":
             parametros = parametros.rename(columns={col_valor: "valor"})
 
-    # se parâmetros vierem como dict convertido em linhas/colunas estranhas, garante mínimo
     if "parametro" not in parametros.columns or "valor" not in parametros.columns:
         raise Exception("A base de parâmetros não contém as colunas obrigatórias 'parametro' e 'valor'.")
 
@@ -379,14 +458,14 @@ def executar_m1_padronizacao(
     # 9) TIPAGEM PARÂMETROS
     # --------------------------------------------------------
     parametros["parametro"] = parametros["parametro"].apply(normalizar_texto_basico)
-    parametros["valor"] = parametros["valor"].apply(lambda x: x if pd.isna(x) else str(x).strip())
+    parametros["valor"] = parametros["valor"].apply(normalizar_valor_parametro)
 
     param_dict = dict(zip(parametros["parametro"], parametros["valor"]))
 
     carteira["origem_cidade"] = param_dict.get("origem_cidade")
     carteira["origem_uf"] = param_dict.get("origem_uf")
-    carteira["latitude_filial"] = float(param_dict.get("origem_latitude", 0))
-    carteira["longitude_filial"] = float(param_dict.get("origem_longitude", 0))
+    carteira["latitude_filial"] = float(param_dict.get("origem_latitude", 0) or 0)
+    carteira["longitude_filial"] = float(param_dict.get("origem_longitude", 0) or 0)
     carteira["data_base_roteirizacao"] = param_dict.get("data_base_roteirizacao")
 
     # --------------------------------------------------------
@@ -414,7 +493,6 @@ def executar_m1_padronizacao(
     # 11) TIPAGEM VEÍCULOS
     # --------------------------------------------------------
     colunas_num_veiculos = [
-        "id",
         "qtd_eixos",
         "capacidade_peso_kg",
         "capacidade_vol_m3",
