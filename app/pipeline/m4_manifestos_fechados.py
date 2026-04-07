@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -11,9 +12,9 @@ import pandas as pd
 
 # ============================================================
 # MÓDULO 4 - GERAÇÃO DE MANIFESTOS FECHADOS
-# NOVA VERSÃO ADERENTE À REGRA DE NEGÓCIO ATUAL
+# VERSÃO OTIMIZADA SEM ALTERAR REGRA DE NEGÓCIO
 #
-# Regras principais:
+# Regras principais preservadas:
 # - recebe somente a carteira roteirizável
 # - usa peso_calculado como base oficial de ocupação/capacidade
 # - exclusivo sai primeiro e não exige ocupação mínima
@@ -30,6 +31,14 @@ import pandas as pd
 
 OCUPACAO_MINIMA_PADRAO = 0.70
 CHAVES_PARADA = ["destinatario", "cidade", "uf"]
+
+
+def _agora() -> float:
+    return time.perf_counter()
+
+
+def _duracao_ms(inicio: float) -> float:
+    return round((time.perf_counter() - inicio) * 1000, 2)
 
 
 def _to_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
@@ -356,6 +365,19 @@ def _avaliar_combo_catalogo(
             ignorar_ocupacao_minima=ignorar_ocupacao_minima,
         )
         r["resultado_teste"] = "aceito" if r["aceito"] else "rejeitado"
+
+        if not r["aceito"]:
+            motivos = []
+            if not r.get("cabe_carga_oficial", True):
+                motivos.append("excede_capacidade_peso_oficial")
+            if not r.get("cabe_paradas", True):
+                motivos.append("excede_max_entregas")
+            if not r.get("cabe_km", True):
+                motivos.append("excede_max_km")
+            if not r.get("passa_ocupacao", True):
+                motivos.append("nao_atinge_ocupacao_minima")
+            r["motivo_reprovacao"] = "|".join(motivos) if motivos else "nao_cabe_ou_nao_atinge_regra_minima"
+
         tentativas.append(r)
 
         if r["aceito"]:
@@ -502,6 +524,15 @@ def _ordenar_mesmo_cliente(df_: pd.DataFrame) -> pd.DataFrame:
     return _ordenar_fila(df_)
 
 
+def _materializar_selecionados(selecionados: List[pd.Series], nova_linha: Optional[pd.Series] = None) -> pd.DataFrame:
+    rows = list(selecionados)
+    if nova_linha is not None:
+        rows.append(nova_linha)
+    if len(rows) == 0:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).reset_index(drop=True)
+
+
 def _tentar_exclusivo_com_mesmo_cliente(
     linha_exclusiva: pd.Series,
     fila_disponivel: pd.DataFrame,
@@ -533,12 +564,9 @@ def _tentar_exclusivo_com_mesmo_cliente(
         if not _veiculo_disponivel_no_modo_frota(veic, tipo_roteirizacao):
             continue
 
-        selecionados = []
+        selecionados: List[pd.Series] = []
         for _, row in base_cliente.iterrows():
-            if len(selecionados) == 0:
-                teste = pd.DataFrame([row])
-            else:
-                teste = pd.concat([pd.DataFrame(selecionados), pd.DataFrame([row])], ignore_index=True)
+            teste = _materializar_selecionados(selecionados, row)
 
             aval = _avaliar_combo_no_veiculo(
                 teste,
@@ -552,7 +580,7 @@ def _tentar_exclusivo_com_mesmo_cliente(
         if len(selecionados) == 0:
             continue
 
-        df_combo = pd.DataFrame(selecionados).reset_index(drop=True)
+        df_combo = _materializar_selecionados(selecionados)
 
         if str(linha_exclusiva["id_linha_pipeline"]) not in set(df_combo["id_linha_pipeline"].astype(str)):
             continue
@@ -640,14 +668,18 @@ def _tentar_consolidar_mesmo_cliente(
 
     for idx, veic in catalogo_veiculos.sort_values("ordem_porte").iterrows():
         if not _veiculo_disponivel_no_modo_frota(veic, tipo_roteirizacao):
+            tentativas.append(
+                {
+                    "veiculo_tipo": veic["tipo"],
+                    "resultado_teste": "rejeitado",
+                    "motivo_reprovacao": "perfil_sem_disponibilidade_no_modo_frota",
+                }
+            )
             continue
 
-        selecionados = []
+        selecionados: List[pd.Series] = []
         for _, row in base_cliente.iterrows():
-            if len(selecionados) == 0:
-                teste = pd.DataFrame([row])
-            else:
-                teste = pd.concat([pd.DataFrame(selecionados), pd.DataFrame([row])], ignore_index=True)
+            teste = _materializar_selecionados(selecionados, row)
 
             aval_teste = _avaliar_combo_no_veiculo(
                 teste,
@@ -661,7 +693,7 @@ def _tentar_consolidar_mesmo_cliente(
         if len(selecionados) == 0:
             continue
 
-        df_combo = pd.DataFrame(selecionados).reset_index(drop=True)
+        df_combo = _materializar_selecionados(selecionados)
 
         if str(linha_ancora["id_linha_pipeline"]) not in set(df_combo["id_linha_pipeline"].astype(str)):
             continue
@@ -673,6 +705,18 @@ def _tentar_consolidar_mesmo_cliente(
         )
 
         tent = {**aval, "resultado_teste": "aceito" if aval["aceito"] else "rejeitado"}
+        if not aval["aceito"]:
+            motivos = []
+            if not aval.get("cabe_carga_oficial", True):
+                motivos.append("excede_capacidade_peso_oficial")
+            if not aval.get("cabe_paradas", True):
+                motivos.append("excede_max_entregas")
+            if not aval.get("cabe_km", True):
+                motivos.append("excede_max_km")
+            if not aval.get("passa_ocupacao", True):
+                motivos.append("nao_atinge_ocupacao_minima")
+            tent["motivo_reprovacao"] = "|".join(motivos) if motivos else "mesmo_cliente_nao_fechou"
+
         tentativas.append(tent)
 
         if aval["aceito"]:
@@ -710,6 +754,48 @@ def _tentar_consolidar_mesmo_cliente(
     return melhor
 
 
+def _motivo_final_remanescente(
+    id_linha: str,
+    cliente: str,
+    df_tentativas: pd.DataFrame,
+) -> str:
+    if df_tentativas is None or df_tentativas.empty:
+        return "sem_tentativa_registrada"
+
+    base = df_tentativas.copy()
+
+    if "linha_ancora" in base.columns:
+        base = base.loc[base["linha_ancora"].astype(str) == str(id_linha)].copy()
+
+    if base.empty and "cliente_referencia" in df_tentativas.columns:
+        base = df_tentativas.loc[df_tentativas["cliente_referencia"].astype(str) == str(cliente)].copy()
+
+    if base.empty:
+        return "sem_tentativa_registrada"
+
+    if "resultado_teste" in base.columns:
+        base_rej = base.loc[base["resultado_teste"].astype(str) == "rejeitado"].copy()
+        if not base_rej.empty:
+            base = base_rej
+
+    motivos = []
+    if "motivo_reprovacao" in base.columns:
+        motivos = [
+            str(x).strip()
+            for x in base["motivo_reprovacao"].dropna().astype(str).tolist()
+            if str(x).strip() != ""
+        ]
+
+    if len(motivos) == 0:
+        return "rejeitado_sem_motivo_detalhado"
+
+    freq: Dict[str, int] = {}
+    for motivo in motivos:
+        freq[motivo] = freq.get(motivo, 0) + 1
+
+    return max(freq.items(), key=lambda kv: kv[1])[0]
+
+
 def executar_m4_manifestos_fechados(
     df_input_oficial_bloco_4: pd.DataFrame,
     df_veiculos_tratados: pd.DataFrame,
@@ -719,10 +805,31 @@ def executar_m4_manifestos_fechados(
     configuracao_frota: Any = None,
     caminhos_pipeline: Dict[str, Any] | None = None,
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, Any]]:
+    inicio_total = _agora()
+    tempos_m4: Dict[str, float] = {}
+    contadores_m4: Dict[str, Any] = {
+        "qtd_anchors_exclusivos": 0,
+        "qtd_anchors_direto": 0,
+        "qtd_anchors_consolidacao": 0,
+        "qtd_tentativas_total": 0,
+        "qtd_tentativas_rejeitadas_ocupacao": 0,
+        "qtd_tentativas_rejeitadas_km": 0,
+        "qtd_tentativas_rejeitadas_paradas": 0,
+        "qtd_tentativas_rejeitadas_capacidade": 0,
+        "qtd_tentativas_sem_disponibilidade_frota": 0,
+    }
+
     fila = _deduplicar_colunas(df_input_oficial_bloco_4.copy().reset_index(drop=True))
     veiculos = _deduplicar_colunas(df_veiculos_tratados.copy().reset_index(drop=True))
     caminhos_pipeline = caminhos_pipeline or {}
     tipo_roteirizacao = _normalizar_tipo_roteirizacao(tipo_roteirizacao)
+
+    persistir_artefatos = bool(caminhos_pipeline.get("persistir_artefatos", False))
+
+    # =========================================================================================
+    # PREPARAÇÃO
+    # =========================================================================================
+    t0 = _agora()
 
     fila = _garantir_coluna_por_alias(fila, "destinatario", ["Destinatário", "cliente"], default=np.nan)
     fila = _garantir_coluna_por_alias(fila, "cidade", ["Cida", "cidade_dest", "cidade_destino"], default=np.nan)
@@ -805,7 +912,7 @@ def executar_m4_manifestos_fechados(
     fila = _garantir_coluna_por_alias(
         fila,
         "cte",
-        ["nro_documento", "romaneio", "nro_doc"],
+        ["nro_documento", "romaneio", "nro_doc", "Nro Doc."],
         default=np.nan,
     )
 
@@ -903,27 +1010,32 @@ def executar_m4_manifestos_fechados(
         configuracao_frota=configuracao_frota,
     )
 
-    pasta_saida_base_str = caminhos_pipeline.get("pasta_saida_base")
-    if pasta_saida_base_str:
-        pasta_saida_base = Path(pasta_saida_base_str)
-    else:
-        pasta_saida_base = Path("/tmp/rec_roteirizador") / str(rodada_id)
+    fila_ordenada = _ordenar_fila(fila)
 
-    pasta_modulo_4 = pasta_saida_base / "bloco_4_manifestos_fechados"
-    pasta_modulo_4.mkdir(parents=True, exist_ok=True)
+    tempos_m4["preparacao_validacao_ms"] = _duracao_ms(t0)
 
-    arq_manifestos_xlsx = pasta_modulo_4 / "df_manifestos_fechados_bloco_4.xlsx"
-    arq_itens_csv = pasta_modulo_4 / "df_itens_manifestos_fechados_bloco_4.csv"
-    arq_tentativas_csv = pasta_modulo_4 / "df_tentativas_fechamento_bloco_4.csv"
-    arq_remanescente_csv = pasta_modulo_4 / "df_remanescente_roteirizavel_bloco_4.csv"
-    arq_resumo_xlsx = pasta_modulo_4 / "resumo_modulo_4.xlsx"
-    arq_metadata_json = pasta_modulo_4 / "metadata_modulo_4.json"
-
+    # =========================================================================================
+    # EXECUÇÃO
+    # =========================================================================================
     manifestos_fechados: List[Dict[str, Any]] = []
     itens_manifestos_fechados: List[pd.DataFrame] = []
     tentativas_fechamento: List[Dict[str, Any]] = []
     ids_alocados: set[str] = set()
     contador_manifesto = 1
+
+    def _contabilizar_tentativa(tent: Dict[str, Any]) -> None:
+        contadores_m4["qtd_tentativas_total"] += 1
+        motivo = str(tent.get("motivo_reprovacao", "")).strip()
+        if motivo == "perfil_sem_disponibilidade_no_modo_frota":
+            contadores_m4["qtd_tentativas_sem_disponibilidade_frota"] += 1
+        if "nao_atinge_ocupacao_minima" in motivo:
+            contadores_m4["qtd_tentativas_rejeitadas_ocupacao"] += 1
+        if "excede_max_km" in motivo:
+            contadores_m4["qtd_tentativas_rejeitadas_km"] += 1
+        if "excede_max_entregas" in motivo:
+            contadores_m4["qtd_tentativas_rejeitadas_paradas"] += 1
+        if "excede_capacidade_peso_oficial" in motivo:
+            contadores_m4["qtd_tentativas_rejeitadas_capacidade"] += 1
 
     def registrar_manifesto(
         df_combo: pd.DataFrame,
@@ -963,10 +1075,13 @@ def executar_m4_manifestos_fechados(
         ids_alocados.update(df_combo["id_linha_pipeline"].astype(str).tolist())
         _consumir_veiculo_catalogo(catalogo_veiculos, catalogo_idx, tipo_roteirizacao)
 
-    fila_ordenada = _ordenar_fila(fila)
-
+    # -----------------------------------------
+    # 4B1 - EXCLUSIVOS
+    # -----------------------------------------
+    t0 = _agora()
     exclusivos = fila_ordenada.loc[fila_ordenada["veiculo_exclusivo_flag"] == True].copy()
     exclusivos = exclusivos.loc[~exclusivos["id_linha_pipeline"].astype(str).isin(ids_alocados)].reset_index(drop=True)
+    contadores_m4["qtd_anchors_exclusivos"] = int(len(exclusivos))
 
     for _, linha_exclusiva in exclusivos.iterrows():
         id_anchor = str(linha_exclusiva["id_linha_pipeline"])
@@ -985,19 +1100,19 @@ def executar_m4_manifestos_fechados(
         )
 
         if resultado_exclusivo["aceito"]:
-            tentativas_fechamento.append(
-                {
-                    "etapa_fechamento": "4B1_exclusivo",
-                    "tipo_tentativa": "exclusivo_com_mesmo_cliente",
-                    "cliente_referencia": linha_exclusiva["destinatario"],
-                    "linha_ancora": id_anchor,
-                    "veiculo_tipo": resultado_exclusivo["avaliacao"]["veiculo_tipo"],
-                    "qtd_linhas_grupo": int(len(resultado_exclusivo["df_combo"])),
-                    "base_carga_oficial": resultado_exclusivo["avaliacao"]["base_carga_oficial"],
-                    "ocupacao_oficial_perc": resultado_exclusivo["avaliacao"]["ocupacao_oficial_perc"],
-                    "resultado_teste": "aceito",
-                }
-            )
+            tent = {
+                "etapa_fechamento": "4B1_exclusivo",
+                "tipo_tentativa": "exclusivo_com_mesmo_cliente",
+                "cliente_referencia": linha_exclusiva["destinatario"],
+                "linha_ancora": id_anchor,
+                "veiculo_tipo": resultado_exclusivo["avaliacao"]["veiculo_tipo"],
+                "qtd_linhas_grupo": int(len(resultado_exclusivo["df_combo"])),
+                "base_carga_oficial": resultado_exclusivo["avaliacao"]["base_carga_oficial"],
+                "ocupacao_oficial_perc": resultado_exclusivo["avaliacao"]["ocupacao_oficial_perc"],
+                "resultado_teste": "aceito",
+            }
+            tentativas_fechamento.append(tent)
+            _contabilizar_tentativa(tent)
 
             registrar_manifesto(
                 df_combo=resultado_exclusivo["df_combo"],
@@ -1006,20 +1121,27 @@ def executar_m4_manifestos_fechados(
                 catalogo_idx=resultado_exclusivo["catalogo_idx"],
             )
         else:
-            tentativas_fechamento.append(
-                {
-                    "etapa_fechamento": "4B1_exclusivo",
-                    "tipo_tentativa": "exclusivo_com_mesmo_cliente",
-                    "cliente_referencia": linha_exclusiva["destinatario"],
-                    "linha_ancora": id_anchor,
-                    "resultado_teste": "rejeitado",
-                    "motivo_reprovacao": resultado_exclusivo.get("motivo_reprovacao", "exclusivo_sem_veiculo_viavel"),
-                }
-            )
+            tent = {
+                "etapa_fechamento": "4B1_exclusivo",
+                "tipo_tentativa": "exclusivo_com_mesmo_cliente",
+                "cliente_referencia": linha_exclusiva["destinatario"],
+                "linha_ancora": id_anchor,
+                "resultado_teste": "rejeitado",
+                "motivo_reprovacao": resultado_exclusivo.get("motivo_reprovacao", "exclusivo_sem_veiculo_viavel"),
+            }
+            tentativas_fechamento.append(tent)
+            _contabilizar_tentativa(tent)
 
+    tempos_m4["4B1_exclusivos_ms"] = _duracao_ms(t0)
+
+    # -----------------------------------------
+    # 4B2 - FECHAMENTO DIRETO
+    # -----------------------------------------
+    t0 = _agora()
     fila_saldo_direto = fila_ordenada.loc[
         ~fila_ordenada["id_linha_pipeline"].astype(str).isin(ids_alocados)
     ].copy().reset_index(drop=True)
+    contadores_m4["qtd_anchors_direto"] = int(len(fila_saldo_direto))
 
     for _, linha in fila_saldo_direto.iterrows():
         id_anchor = str(linha["id_linha_pipeline"])
@@ -1034,19 +1156,19 @@ def executar_m4_manifestos_fechados(
         )
 
         if resultado_direto["aceito"]:
-            tentativas_fechamento.append(
-                {
-                    "etapa_fechamento": "4B2_fechamento_direto",
-                    "tipo_tentativa": "linha_direta",
-                    "cliente_referencia": linha["destinatario"],
-                    "linha_ancora": id_anchor,
-                    "veiculo_tipo": resultado_direto["avaliacao"]["veiculo_tipo"],
-                    "qtd_linhas_grupo": int(len(resultado_direto["df_combo"])),
-                    "base_carga_oficial": resultado_direto["avaliacao"]["base_carga_oficial"],
-                    "ocupacao_oficial_perc": resultado_direto["avaliacao"]["ocupacao_oficial_perc"],
-                    "resultado_teste": "aceito",
-                }
-            )
+            tent = {
+                "etapa_fechamento": "4B2_fechamento_direto",
+                "tipo_tentativa": "linha_direta",
+                "cliente_referencia": linha["destinatario"],
+                "linha_ancora": id_anchor,
+                "veiculo_tipo": resultado_direto["avaliacao"]["veiculo_tipo"],
+                "qtd_linhas_grupo": int(len(resultado_direto["df_combo"])),
+                "base_carga_oficial": resultado_direto["avaliacao"]["base_carga_oficial"],
+                "ocupacao_oficial_perc": resultado_direto["avaliacao"]["ocupacao_oficial_perc"],
+                "resultado_teste": "aceito",
+            }
+            tentativas_fechamento.append(tent)
+            _contabilizar_tentativa(tent)
 
             registrar_manifesto(
                 df_combo=resultado_direto["df_combo"],
@@ -1056,16 +1178,22 @@ def executar_m4_manifestos_fechados(
             )
         else:
             for tent in resultado_direto.get("tentativas", []):
-                tentativas_fechamento.append(
-                    {
-                        **tent,
-                        "etapa_fechamento": "4B2_fechamento_direto",
-                        "tipo_tentativa": "linha_direta",
-                        "cliente_referencia": linha["destinatario"],
-                        "linha_ancora": id_anchor,
-                    }
-                )
+                tent_padrao = {
+                    **tent,
+                    "etapa_fechamento": "4B2_fechamento_direto",
+                    "tipo_tentativa": "linha_direta",
+                    "cliente_referencia": linha["destinatario"],
+                    "linha_ancora": id_anchor,
+                }
+                tentativas_fechamento.append(tent_padrao)
+                _contabilizar_tentativa(tent_padrao)
 
+    tempos_m4["4B2_fechamento_direto_ms"] = _duracao_ms(t0)
+
+    # -----------------------------------------
+    # 4C - CONSOLIDAÇÃO MESMO CLIENTE
+    # -----------------------------------------
+    t0 = _agora()
     fila_saldo_consolidacao = fila_ordenada.loc[
         ~fila_ordenada["id_linha_pipeline"].astype(str).isin(ids_alocados)
     ].copy().reset_index(drop=True)
@@ -1075,6 +1203,7 @@ def executar_m4_manifestos_fechados(
     ].copy().reset_index(drop=True)
 
     fila_saldo_consolidacao = _ordenar_fila(fila_saldo_consolidacao)
+    contadores_m4["qtd_anchors_consolidacao"] = int(len(fila_saldo_consolidacao))
 
     for _, linha_ancora in fila_saldo_consolidacao.iterrows():
         id_anchor = str(linha_ancora["id_linha_pipeline"])
@@ -1097,15 +1226,15 @@ def executar_m4_manifestos_fechados(
 
         if resultado_consolidacao["aceito"]:
             for tent in resultado_consolidacao.get("tentativas", []):
-                tentativas_fechamento.append(
-                    {
-                        **tent,
-                        "etapa_fechamento": "4C_consolidacao_mesmo_cliente",
-                        "tipo_tentativa": "mesmo_cliente",
-                        "cliente_referencia": linha_ancora["destinatario"],
-                        "linha_ancora": id_anchor,
-                    }
-                )
+                tent_padrao = {
+                    **tent,
+                    "etapa_fechamento": "4C_consolidacao_mesmo_cliente",
+                    "tipo_tentativa": "mesmo_cliente",
+                    "cliente_referencia": linha_ancora["destinatario"],
+                    "linha_ancora": id_anchor,
+                }
+                tentativas_fechamento.append(tent_padrao)
+                _contabilizar_tentativa(tent_padrao)
 
             registrar_manifesto(
                 df_combo=resultado_consolidacao["df_combo"],
@@ -1114,16 +1243,37 @@ def executar_m4_manifestos_fechados(
                 catalogo_idx=resultado_consolidacao["catalogo_idx"],
             )
         else:
-            for tent in resultado_consolidacao.get("tentativas", []):
-                tentativas_fechamento.append(
-                    {
+            if len(resultado_consolidacao.get("tentativas", [])) > 0:
+                for tent in resultado_consolidacao.get("tentativas", []):
+                    tent_padrao = {
                         **tent,
                         "etapa_fechamento": "4C_consolidacao_mesmo_cliente",
                         "tipo_tentativa": "mesmo_cliente",
                         "cliente_referencia": linha_ancora["destinatario"],
                         "linha_ancora": id_anchor,
                     }
-                )
+                    tentativas_fechamento.append(tent_padrao)
+                    _contabilizar_tentativa(tent_padrao)
+            else:
+                tent_padrao = {
+                    "etapa_fechamento": "4C_consolidacao_mesmo_cliente",
+                    "tipo_tentativa": "mesmo_cliente",
+                    "cliente_referencia": linha_ancora["destinatario"],
+                    "linha_ancora": id_anchor,
+                    "resultado_teste": "rejeitado",
+                    "motivo_reprovacao": resultado_consolidacao.get(
+                        "motivo_reprovacao", "mesmo_cliente_nao_fechou"
+                    ),
+                }
+                tentativas_fechamento.append(tent_padrao)
+                _contabilizar_tentativa(tent_padrao)
+
+    tempos_m4["4C_consolidacao_mesmo_cliente_ms"] = _duracao_ms(t0)
+
+    # =========================================================================================
+    # MATERIALIZAÇÃO DOS OUTPUTS
+    # =========================================================================================
+    t0 = _agora()
 
     df_manifestos_fechados_bloco_4 = pd.DataFrame(manifestos_fechados)
     df_itens_manifestos_fechados_bloco_4 = (
@@ -1136,6 +1286,16 @@ def executar_m4_manifestos_fechados(
     df_remanescente_roteirizavel_bloco_4 = fila.loc[
         ~fila["id_linha_pipeline"].astype(str).isin(ids_alocados)
     ].copy().reset_index(drop=True)
+
+    if len(df_remanescente_roteirizavel_bloco_4) > 0:
+        df_remanescente_roteirizavel_bloco_4["motivo_final_remanescente_m4"] = df_remanescente_roteirizavel_bloco_4.apply(
+            lambda row: _motivo_final_remanescente(
+                id_linha=str(row["id_linha_pipeline"]),
+                cliente=str(row["destinatario"]),
+                df_tentativas=df_tentativas_fechamento_bloco_4,
+            ),
+            axis=1,
+        )
 
     uso_frota = catalogo_veiculos[["tipo", "limite_manifestos", "manifestos_utilizados"]].copy()
     uso_frota["saldo_manifestos"] = uso_frota.apply(
@@ -1151,78 +1311,108 @@ def executar_m4_manifestos_fechados(
     itens_manifestados_m4 = len(df_itens_manifestos_fechados_bloco_4)
     remanescente_roteirizavel_m4 = len(df_remanescente_roteirizavel_bloco_4)
 
-    try:
-        if len(df_manifestos_fechados_bloco_4) > 0:
-            df_manifestos_fechados_bloco_4.to_excel(arq_manifestos_xlsx, index=False)
+    tempos_m4["materializacao_outputs_ms"] = _duracao_ms(t0)
 
-        if len(df_itens_manifestos_fechados_bloco_4) > 0:
-            df_itens_manifestos_fechados_bloco_4.to_csv(arq_itens_csv, index=False, encoding="utf-8-sig")
+    # =========================================================================================
+    # PERSISTÊNCIA OPCIONAL DE ARTEFATOS
+    # =========================================================================================
+    t0 = _agora()
 
-        if len(df_tentativas_fechamento_bloco_4) > 0:
-            df_tentativas_fechamento_bloco_4.to_csv(arq_tentativas_csv, index=False, encoding="utf-8-sig")
+    if persistir_artefatos:
+        try:
+            pasta_saida_base_str = caminhos_pipeline.get("pasta_saida_base")
+            if pasta_saida_base_str:
+                pasta_saida_base = Path(pasta_saida_base_str)
+            else:
+                pasta_saida_base = Path("/tmp/rec_roteirizador") / str(rodada_id)
 
-        if len(df_remanescente_roteirizavel_bloco_4) > 0:
-            df_remanescente_roteirizavel_bloco_4.to_csv(arq_remanescente_csv, index=False, encoding="utf-8-sig")
+            pasta_modulo_4 = pasta_saida_base / "bloco_4_manifestos_fechados"
+            pasta_modulo_4.mkdir(parents=True, exist_ok=True)
 
-        with pd.ExcelWriter(arq_resumo_xlsx, engine="openpyxl") as writer:
-            pd.DataFrame(
-                [
-                    {
-                        "roteirizavel_entrada_m4": int(roteirizavel_entrada_m4),
-                        "manifestos_fechados_gerados_m4": int(len(df_manifestos_fechados_bloco_4)),
-                        "itens_manifestados_m4": int(itens_manifestados_m4),
-                        "remanescente_roteirizavel_m4": int(remanescente_roteirizavel_m4),
-                        "tipo_roteirizacao": tipo_roteirizacao,
-                    }
-                ]
-            ).to_excel(writer, sheet_name="resumo", index=False)
+            arq_manifestos_xlsx = pasta_modulo_4 / "df_manifestos_fechados_bloco_4.xlsx"
+            arq_itens_csv = pasta_modulo_4 / "df_itens_manifestos_fechados_bloco_4.csv"
+            arq_tentativas_csv = pasta_modulo_4 / "df_tentativas_fechamento_bloco_4.csv"
+            arq_remanescente_csv = pasta_modulo_4 / "df_remanescente_roteirizavel_bloco_4.csv"
+            arq_resumo_xlsx = pasta_modulo_4 / "resumo_modulo_4.xlsx"
+            arq_metadata_json = pasta_modulo_4 / "metadata_modulo_4.json"
 
-            if len(uso_frota) > 0:
-                uso_frota.to_excel(writer, sheet_name="uso_frota", index=False)
+            if len(df_manifestos_fechados_bloco_4) > 0:
+                df_manifestos_fechados_bloco_4.to_excel(arq_manifestos_xlsx, index=False)
 
-        metadata = {
-            "modulo": "4_manifestos_fechados_regra_nova",
-            "data_execucao": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "data_base_projeto": pd.Timestamp(data_base_roteirizacao).strftime("%Y-%m-%d"),
-            "tipo_roteirizacao": tipo_roteirizacao,
-            "regras": {
-                "peso_calculado_base_oficial": True,
-                "exclusivo_sem_ocupacao_minima": True,
-                "exclusivo_puxa_mesmo_cliente": True,
-                "prioridade_embarque_1_primeiro": True,
-                "agendadas_depois_da_prioridade_1": True,
-                "leadtimes_positivos_antes_dos_vencidos": True,
-                "consolidacao_mesmo_cliente_no_saldo": True,
-                "ocupacao_minima_padrao": OCUPACAO_MINIMA_PADRAO,
-                "modo_frota_respeita_quantidade_por_perfil": True,
-            },
-            "totais": {
-                "roteirizavel_entrada_m4": int(roteirizavel_entrada_m4),
-                "manifestos_fechados_gerados_m4": int(len(df_manifestos_fechados_bloco_4)),
-                "itens_manifestados_m4": int(itens_manifestados_m4),
-                "remanescente_roteirizavel_m4": int(remanescente_roteirizavel_m4),
-            },
-            "outputs": {
-                "df_manifestos_fechados_bloco_4_xlsx": str(arq_manifestos_xlsx),
-                "df_itens_manifestos_fechados_bloco_4_csv": str(arq_itens_csv),
-                "df_tentativas_fechamento_bloco_4_csv": str(arq_tentativas_csv),
-                "df_remanescente_roteirizavel_bloco_4_csv": str(arq_remanescente_csv),
-                "resumo_modulo_4_xlsx": str(arq_resumo_xlsx),
-            },
-        }
+            if len(df_itens_manifestos_fechados_bloco_4) > 0:
+                df_itens_manifestos_fechados_bloco_4.to_csv(arq_itens_csv, index=False, encoding="utf-8-sig")
 
-        with open(arq_metadata_json, "w", encoding="utf-8") as f:
-            json.dump(metadata, f, ensure_ascii=False, indent=4)
+            if len(df_tentativas_fechamento_bloco_4) > 0:
+                df_tentativas_fechamento_bloco_4.to_csv(arq_tentativas_csv, index=False, encoding="utf-8-sig")
 
-        caminhos_pipeline["df_manifestos_fechados_bloco_4_xlsx"] = str(arq_manifestos_xlsx)
-        caminhos_pipeline["df_itens_manifestos_fechados_bloco_4_csv"] = str(arq_itens_csv)
-        caminhos_pipeline["df_tentativas_fechamento_bloco_4_csv"] = str(arq_tentativas_csv)
-        caminhos_pipeline["df_remanescente_roteirizavel_bloco_4_csv"] = str(arq_remanescente_csv)
-        caminhos_pipeline["resumo_modulo_4_xlsx"] = str(arq_resumo_xlsx)
-        caminhos_pipeline["metadata_modulo_4_json"] = str(arq_metadata_json)
-    except Exception:
-        pass
+            if len(df_remanescente_roteirizavel_bloco_4) > 0:
+                df_remanescente_roteirizavel_bloco_4.to_csv(arq_remanescente_csv, index=False, encoding="utf-8-sig")
 
+            with pd.ExcelWriter(arq_resumo_xlsx, engine="openpyxl") as writer:
+                pd.DataFrame(
+                    [
+                        {
+                            "roteirizavel_entrada_m4": int(roteirizavel_entrada_m4),
+                            "manifestos_fechados_gerados_m4": int(len(df_manifestos_fechados_bloco_4)),
+                            "itens_manifestados_m4": int(itens_manifestados_m4),
+                            "remanescente_roteirizavel_m4": int(remanescente_roteirizavel_m4),
+                            "tipo_roteirizacao": tipo_roteirizacao,
+                        }
+                    ]
+                ).to_excel(writer, sheet_name="resumo", index=False)
+
+                if len(uso_frota) > 0:
+                    uso_frota.to_excel(writer, sheet_name="uso_frota", index=False)
+
+            metadata = {
+                "modulo": "4_manifestos_fechados_regra_nova",
+                "data_execucao": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "data_base_projeto": pd.Timestamp(data_base_roteirizacao).strftime("%Y-%m-%d"),
+                "tipo_roteirizacao": tipo_roteirizacao,
+                "regras": {
+                    "peso_calculado_base_oficial": True,
+                    "exclusivo_sem_ocupacao_minima": True,
+                    "exclusivo_puxa_mesmo_cliente": True,
+                    "prioridade_embarque_1_primeiro": True,
+                    "agendadas_depois_da_prioridade_1": True,
+                    "leadtimes_positivos_antes_dos_vencidos": True,
+                    "consolidacao_mesmo_cliente_no_saldo": True,
+                    "ocupacao_minima_padrao": OCUPACAO_MINIMA_PADRAO,
+                    "modo_frota_respeita_quantidade_por_perfil": True,
+                },
+                "totais": {
+                    "roteirizavel_entrada_m4": int(roteirizavel_entrada_m4),
+                    "manifestos_fechados_gerados_m4": int(len(df_manifestos_fechados_bloco_4)),
+                    "itens_manifestados_m4": int(itens_manifestados_m4),
+                    "remanescente_roteirizavel_m4": int(remanescente_roteirizavel_m4),
+                },
+                "outputs": {
+                    "df_manifestos_fechados_bloco_4_xlsx": str(arq_manifestos_xlsx),
+                    "df_itens_manifestos_fechados_bloco_4_csv": str(arq_itens_csv),
+                    "df_tentativas_fechamento_bloco_4_csv": str(arq_tentativas_csv),
+                    "df_remanescente_roteirizavel_bloco_4_csv": str(arq_remanescente_csv),
+                    "resumo_modulo_4_xlsx": str(arq_resumo_xlsx),
+                },
+            }
+
+            with open(arq_metadata_json, "w", encoding="utf-8") as f:
+                json.dump(metadata, f, ensure_ascii=False, indent=4)
+
+            caminhos_pipeline["df_manifestos_fechados_bloco_4_xlsx"] = str(arq_manifestos_xlsx)
+            caminhos_pipeline["df_itens_manifestos_fechados_bloco_4_csv"] = str(arq_itens_csv)
+            caminhos_pipeline["df_tentativas_fechamento_bloco_4_csv"] = str(arq_tentativas_csv)
+            caminhos_pipeline["df_remanescente_roteirizavel_bloco_4_csv"] = str(arq_remanescente_csv)
+            caminhos_pipeline["resumo_modulo_4_xlsx"] = str(arq_resumo_xlsx)
+            caminhos_pipeline["metadata_modulo_4_json"] = str(arq_metadata_json)
+        except Exception:
+            pass
+
+    tempos_m4["persistencia_artefatos_ms"] = _duracao_ms(t0)
+    tempos_m4["tempo_total_m4_ms"] = _duracao_ms(inicio_total)
+
+    # =========================================================================================
+    # RESUMOS E METADADOS
+    # =========================================================================================
     resumo_m4 = {
         "modulo": "M4",
         "data_base_roteirizacao": pd.Timestamp(data_base_roteirizacao).isoformat(),
@@ -1235,7 +1425,16 @@ def executar_m4_manifestos_fechados(
         "exclusivos_entrada_m4": int((fila["veiculo_exclusivo_flag"] == True).sum()),
         "prioridade_embarque_1_entrada_m4": int((pd.to_numeric(fila["prioridade_embarque"], errors="coerce") == 1).sum()),
         "ocupacao_minima_padrao_perc": round(OCUPACAO_MINIMA_PADRAO * 100, 2),
+        "persistiu_artefatos": persistir_artefatos,
         "caminhos_pipeline": caminhos_pipeline,
+    }
+
+    auditoria_m4 = {
+        "motivos_remanescente_m4": (
+            df_remanescente_roteirizavel_bloco_4["motivo_final_remanescente_m4"].value_counts(dropna=False).to_dict()
+            if "motivo_final_remanescente_m4" in df_remanescente_roteirizavel_bloco_4.columns
+            else {}
+        )
     }
 
     outputs = {
@@ -1248,6 +1447,11 @@ def executar_m4_manifestos_fechados(
 
     meta = {
         "resumo_m4": resumo_m4,
+        "auditoria_m4": auditoria_m4,
+        "metricas_m4": {
+            **tempos_m4,
+            **contadores_m4,
+        },
         "metadata_modulo_4": {
             "tipo_roteirizacao": tipo_roteirizacao,
             "catalogo_veiculos": _to_records(catalogo_veiculos),
