@@ -117,6 +117,29 @@ def converter_flag_agendamento(serie):
     return serie.apply(_f)
 
 
+def converter_flag_sim_nao(serie):
+    def _f(x):
+        if pd.isna(x):
+            return False
+
+        texto = normalizar_texto_basico(x)
+        if pd.isna(texto):
+            return False
+
+        texto = remover_acentos(texto)
+        texto = str(texto).strip().lower()
+
+        if texto in {"sim", "s", "yes", "y", "true", "1"}:
+            return True
+
+        if texto in {"nao", "não", "n", "no", "false", "0", ""}:
+            return False
+
+        return False
+
+    return serie.apply(_f)
+
+
 def escolher_coluna(df: pd.DataFrame, candidatos: list[str]) -> str | None:
     for c in candidatos:
         if c in df.columns:
@@ -193,7 +216,10 @@ def executar_m1_padronizacao(
         "ultima": "ultima",
         "status": "status",
         "lat": "latitude_destinatario",
-        "lon": "longitude_destinatario"
+        "lon": "longitude_destinatario",
+        "veiculo_exclusivo": "veiculo_exclusivo",
+        "peso_calculado": "peso_calculado",
+        "prioridade": "prioridade_embarque",
     }
 
     carteira = carteira.rename(
@@ -275,7 +301,9 @@ def executar_m1_padronizacao(
         "valor_nf",
         "qtd_volumes",
         "vol_m3",
-        "qtd_nf"
+        "qtd_nf",
+        "peso_calculado",
+        "prioridade_embarque",
     ]
 
     for c in colunas_num:
@@ -290,10 +318,44 @@ def executar_m1_padronizacao(
         if c in carteira.columns:
             carteira[c] = converter_data(carteira[c])
 
+    colunas_texto = [
+        "conferencia",
+        "classifi",
+        "tomador",
+        "destinatario",
+        "bairro",
+        "cidade",
+        "uf",
+        "nf_serie",
+        "tipo_carga",
+        "regiao",
+        "sub_regiao",
+        "ocorrencias_nfs",
+        "remetente",
+        "observacao_r",
+        "ref_cliente",
+        "cidade_dest",
+        "mesorregiao",
+        "agenda",
+        "tipo_c",
+        "ultima",
+        "status",
+        "veiculo_exclusivo",
+    ]
+
+    for c in colunas_texto:
+        if c in carteira.columns:
+            carteira[c] = carteira[c].apply(normalizar_texto_basico)
+
     if "data_agenda" in carteira.columns:
         carteira["agendada"] = converter_flag_agendamento(carteira["data_agenda"])
     else:
         carteira["agendada"] = False
+
+    if "veiculo_exclusivo" in carteira.columns:
+        carteira["veiculo_exclusivo_flag"] = converter_flag_sim_nao(carteira["veiculo_exclusivo"])
+    else:
+        carteira["veiculo_exclusivo_flag"] = False
 
     # --------------------------------------------------------
     # 8) TIPAGEM GEO
