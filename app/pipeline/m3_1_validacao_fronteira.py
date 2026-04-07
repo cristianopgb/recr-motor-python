@@ -18,8 +18,9 @@ COLUNAS_MINIMAS_M31 = [
     "destinatario",
     "cidade",
     "uf",
+    "data_agenda",
+    "data_leadtime",
 ]
-
 
 COLUNAS_BASE_HASH_PREFERENCIA = [
     "nro_documento",
@@ -33,6 +34,7 @@ COLUNAS_BASE_HASH_PREFERENCIA = [
     "uf",
     "peso_kg",
     "vol_m3",
+    "peso_calculado",
     "data_agenda",
     "data_leadtime",
 ]
@@ -51,9 +53,15 @@ def executar_m3_1_validacao_fronteira(
     - Validar ausência de contaminação na fronteira do bloco 4
     - Criar a chave técnica oficial id_linha_pipeline
     - Devolver o dataframe oficial de entrada do bloco 4
+
+    Regras alinhadas ao M3 atual:
+    - roteirizável com data_agenda: folga_dias >= 0 e < 2
+    - roteirizável sem data_agenda: deve ter data_leadtime preenchida
+    - a verdade operacional de agenda é somente data_agenda
     """
 
     df_input = df_carteira_roteirizavel.copy().reset_index(drop=True)
+
     _validar_colunas_minimas(df_input)
     _tipagem_defensiva(df_input)
     _validacoes_duras(df_input)
@@ -84,11 +92,14 @@ def executar_m3_1_validacao_fronteira(
         "data_base_roteirizacao": data_base_roteirizacao.isoformat(),
         "linhas_input": int(len(df_input_oficial_bloco_4)),
         "colunas_input": int(len(df_input_oficial_bloco_4.columns)),
-        "agendadas_validas": int((df_input_oficial_bloco_4["agendada"] == True).sum()),
-        "nao_agendadas": int((df_input_oficial_bloco_4["agendada"] == False).sum()),
+        "agendadas_validas": int(df_input_oficial_bloco_4["data_agenda"].notna().sum()),
+        "leadtime_sem_agenda": int(df_input_oficial_bloco_4["data_agenda"].isna().sum()),
         "peso_nulo": int(df_input_oficial_bloco_4["peso_kg"].isna().sum()),
         "volume_nulo": int(df_input_oficial_bloco_4["vol_m3"].isna().sum()),
+        "peso_calculado_nulo": int(df_input_oficial_bloco_4["peso_calculado"].isna().sum()) if "peso_calculado" in df_input_oficial_bloco_4.columns else None,
         "km_nulo": int(df_input_oficial_bloco_4["distancia_rodoviaria_est_km"].isna().sum()),
+        "veiculo_exclusivo_flag_true": int(df_input_oficial_bloco_4["veiculo_exclusivo_flag"].fillna(False).astype(bool).sum()) if "veiculo_exclusivo_flag" in df_input_oficial_bloco_4.columns else None,
+        "prioridade_embarque_1": int((pd.to_numeric(df_input_oficial_bloco_4["prioridade_embarque"], errors="coerce") == 1).sum()) if "prioridade_embarque" in df_input_oficial_bloco_4.columns else None,
         "ids_tecnicos_unicos": int(df_input_oficial_bloco_4["id_linha_pipeline"].nunique()),
         "colunas_base_hash": colunas_base_hash,
         "caminhos_pipeline": caminhos_pipeline or {},
@@ -114,10 +125,23 @@ def _tipagem_defensiva(df: pd.DataFrame) -> None:
     df["status_triagem"] = df["status_triagem"].astype(str).str.strip()
     df["grupo_saida"] = df["grupo_saida"].astype(str).str.strip()
     df["agendada"] = df["agendada"].fillna(False).astype(bool)
+
+    df["data_agenda"] = pd.to_datetime(df["data_agenda"], errors="coerce")
+    df["data_leadtime"] = pd.to_datetime(df["data_leadtime"], errors="coerce")
+
     df["folga_dias"] = pd.to_numeric(df["folga_dias"], errors="coerce")
     df["peso_kg"] = pd.to_numeric(df["peso_kg"], errors="coerce")
     df["vol_m3"] = pd.to_numeric(df["vol_m3"], errors="coerce")
     df["distancia_rodoviaria_est_km"] = pd.to_numeric(df["distancia_rodoviaria_est_km"], errors="coerce")
+
+    if "peso_calculado" in df.columns:
+        df["peso_calculado"] = pd.to_numeric(df["peso_calculado"], errors="coerce")
+
+    if "prioridade_embarque" in df.columns:
+        df["prioridade_embarque"] = pd.to_numeric(df["prioridade_embarque"], errors="coerce")
+
+    if "veiculo_exclusivo_flag" in df.columns:
+        df["veiculo_exclusivo_flag"] = df["veiculo_exclusivo_flag"].fillna(False).astype(bool)
 
 
 def _validacoes_duras(df: pd.DataFrame) -> None:
@@ -135,17 +159,27 @@ def _validacoes_duras(df: pd.DataFrame) -> None:
             f"Linhas com grupo_saida diferente de 'df_carteira_roteirizavel': {len(invalidas_grupo)}"
         )
 
+    # Regra 1: se tem data_agenda, a folga válida para roteirizável é 0 <= folga < 2
     agendadas_invalidas = df.loc[
-        (df["agendada"] == True)
+        df["data_agenda"].notna()
         & (
             df["folga_dias"].isna()
             | (df["folga_dias"] < 0)
-            | (df["folga_dias"] > 1)
+            | (df["folga_dias"] >= 2)
         )
     ]
     if len(agendadas_invalidas) > 0:
         problemas.append(
-            f"Linhas agendadas fora da faixa permitida (0 a 1): {len(agendadas_invalidas)}"
+            f"Linhas com data_agenda fora da faixa permitida para roteirização (0 <= folga < 2): {len(agendadas_invalidas)}"
+        )
+
+    # Regra 2: se não tem data_agenda, deve ter DLE preenchido
+    leadtimes_invalidos = df.loc[
+        df["data_agenda"].isna() & df["data_leadtime"].isna()
+    ]
+    if len(leadtimes_invalidos) > 0:
+        problemas.append(
+            f"Linhas sem data_agenda e sem data_leadtime na fronteira do Bloco 4: {len(leadtimes_invalidos)}"
         )
 
     linhas_sem_peso = int(df["peso_kg"].isna().sum())
