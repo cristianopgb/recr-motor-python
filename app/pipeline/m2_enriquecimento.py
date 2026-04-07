@@ -34,6 +34,13 @@ def executar_m2_enriquecimento(
     - regionalidades são FALLBACK
     - latitude/longitude de destino vêm da carteira
     - não pode multiplicar linhas da carteira
+
+    Regras de territorialidade validadas:
+    - subregiao do dataset equivale à microrregiao da base fallback
+    - mesorregiao do dataset equivale à mesorregiao da base fallback
+    - fallback só preenche quando o campo da carteira vier vazio
+    - não criar coluna nova para isso
+    - regiao permanece como dado original da carteira, sem fallback automático
     """
 
     carteira = df_carteira_tratada.copy()
@@ -170,14 +177,15 @@ def executar_m2_enriquecimento(
 
     # ============================================================
     # FALLBACK DE REGIONALIDADES SEM DUPLICAR LINHAS
-    # de/para:
-    # cidade      -> cidade
-    # regiao      -> microrregiao
-    # subregiao   -> microrregiao
-    # mesorregiao -> mesorregiao
+    #
+    # Regras oficiais:
+    # - cidade/uf = chave de busca na base fallback
+    # - subregiao da carteira equivale à microrregiao da base
+    # - mesorregiao da carteira equivale à mesorregiao da base
+    # - fallback só preenche quando o campo na carteira vier vazio
+    # - regiao permanece como dado original da carteira
     # ============================================================
 
-    # garante colunas-base na carteira
     if "regiao" not in carteira.columns:
         carteira["regiao"] = np.nan
     if "subregiao" not in carteira.columns:
@@ -185,11 +193,13 @@ def executar_m2_enriquecimento(
     if "mesorregiao" not in carteira.columns:
         carteira["mesorregiao"] = np.nan
 
-    # normaliza carteira
+    carteira["regiao"] = carteira["regiao"].apply(_limpar_vazio)
+    carteira["subregiao"] = carteira["subregiao"].apply(_limpar_vazio)
+    carteira["mesorregiao"] = carteira["mesorregiao"].apply(_limpar_vazio)
+
     carteira["_cidade_norm"] = carteira["cidade"].apply(_normalizar_texto)
     carteira["_uf_norm"] = carteira["uf"].apply(_normalizar_texto)
 
-    # normaliza geo
     geo = geo.copy()
 
     if "nome" in geo.columns:
@@ -202,7 +212,6 @@ def executar_m2_enriquecimento(
     geo["_cidade_norm"] = geo["cidade_fallback"].apply(_normalizar_texto)
     geo["_uf_norm"] = geo["uf"].apply(_normalizar_texto)
 
-    # saneia colunas fallback
     for c in ["mesorregiao", "microrregiao"]:
         if c not in geo.columns:
             geo[c] = np.nan
@@ -210,25 +219,18 @@ def executar_m2_enriquecimento(
     geo["mesorregiao"] = geo["mesorregiao"].apply(_limpar_vazio)
     geo["microrregiao"] = geo["microrregiao"].apply(_limpar_vazio)
 
-    # score para escolher a melhor linha por cidade+uf
-    # prioridade:
-    # 1) tem meso e micro
-    # 2) tem meso
-    # 3) tem micro
-    # 4) resto
     geo["_score_geo"] = (
         geo["mesorregiao"].notna().astype(int) * 2
-        + geo["microrregiao"].notna().astype(int) * 1
+        + geo["microrregiao"].notna().astype(int)
     )
 
-    # deduplicação 1:1 pela chave do merge
     geo_chaves = (
         geo.sort_values(
             by=["_cidade_norm", "_uf_norm", "_score_geo"],
             ascending=[True, True, False]
         )
         .drop_duplicates(subset=["_cidade_norm", "_uf_norm"], keep="first")
-        [[" _cidade_norm".strip(), "_uf_norm", "mesorregiao", "microrregiao"]]
+        [["_cidade_norm", "_uf_norm", "mesorregiao", "microrregiao"]]
         .rename(
             columns={
                 "mesorregiao": "mesorregiao_fallback",
@@ -245,7 +247,6 @@ def executar_m2_enriquecimento(
         validate="m:1",
     )
 
-    # fallback controlado: só preenche se estiver vazio na carteira
     carteira["mesorregiao"] = carteira.apply(
         lambda row: _preencher_somente_se_vazio(
             row.get("mesorregiao"),
@@ -254,7 +255,6 @@ def executar_m2_enriquecimento(
         axis=1,
     )
 
-    # subregiao fallback = microrregiao
     carteira["subregiao"] = carteira.apply(
         lambda row: _preencher_somente_se_vazio(
             row.get("subregiao"),
@@ -263,14 +263,10 @@ def executar_m2_enriquecimento(
         axis=1,
     )
 
-    # regiao fallback = microrregiao
-    carteira["regiao"] = carteira.apply(
-        lambda row: _preencher_somente_se_vazio(
-            row.get("regiao"),
-            row.get("microrregiao_fallback"),
-        ),
-        axis=1,
-    )
+    # REGRA IMPORTANTE:
+    # regiao permanece como veio do dataset.
+    # Não preencher automaticamente com microrregiao fallback
+    # para não misturar conceitos territoriais distintos.
 
     carteira["status_geo"] = np.where(
         carteira["mesorregiao"].notna() & carteira["subregiao"].notna(),
@@ -346,7 +342,6 @@ def executar_m2_enriquecimento(
 
     df_carteira_enriquecida = carteira[colunas_existentes + colunas_restantes].copy()
 
-    # blindagem cardinalidade
     if len(df_carteira_enriquecida) != qtd_linhas_entrada:
         raise Exception(
             "O M2 alterou a cardinalidade da carteira, o que não é permitido.\n"
@@ -372,12 +367,6 @@ def executar_m2_enriquecimento(
         "mesorregiao_nulos": int(df_carteira_enriquecida["mesorregiao"].isna().sum()),
         "status_geo_ok": int((df_carteira_enriquecida["status_geo"] == "ok").sum()),
         "status_geo_pendencia": int((df_carteira_enriquecida["status_geo"] == "pendencia_geo").sum()),
-        "linhas_enriquecidas_por_fallback_regiao": int(
-            (
-                df_carteira_enriquecida["regiao"].notna()
-                & df_carteira_tratada.reindex(df_carteira_enriquecida.index)["regiao"].isna()
-            ).sum()
-        ) if "regiao" in df_carteira_tratada.columns else None,
         "linhas_enriquecidas_por_fallback_subregiao": int(
             (
                 df_carteira_enriquecida["subregiao"].notna()
@@ -460,6 +449,7 @@ def _validar_saida_m2(df: pd.DataFrame) -> None:
         "faixa_km_cd",
         "quadrante",
     ]
+    faltam = [c for c in df.columns if c in []]
     faltam = [c for c in colunas_obrigatorias_saida if c not in df.columns]
     if faltam:
         raise Exception(
