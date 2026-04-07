@@ -245,44 +245,6 @@ def _obter_coluna_id_documento(df: pd.DataFrame) -> str:
     return "id_linha_pipeline"
 
 
-def _obter_colunas_duplicidade_linha(df: pd.DataFrame) -> List[str]:
-    colunas_excluidas = {
-        "id_linha_pipeline",
-        "manifesto_id",
-        "tipo_manifesto",
-        "veiculo_tipo",
-        "capacidade_peso_kg_veiculo",
-        "capacidade_vol_m3_veiculo",
-        "max_entregas_veiculo",
-        "max_km_distancia_veiculo",
-        "base_carga_oficial_manifesto",
-        "ocupacao_oficial_perc_manifesto",
-        "ignorar_ocupacao_minima_manifesto",
-        "origem_modulo",
-        "origem_etapa",
-    }
-
-    return [col for col in df.columns if col not in colunas_excluidas]
-
-
-def _ha_linhas_totalmente_repetidas(df: pd.DataFrame) -> bool:
-    if df is None or len(df) == 0:
-        return False
-
-    subset = _obter_colunas_duplicidade_linha(df)
-    if len(subset) == 0:
-        return False
-
-    base = df[subset].copy()
-    for col in base.columns:
-        if pd.api.types.is_datetime64_any_dtype(base[col]):
-            base[col] = base[col].astype(str)
-    base = base.where(pd.notnull(base), None)
-
-    return bool(base.duplicated(subset=subset, keep=False).any())
-
-
-
 def _normalizar_str(x: Any) -> str:
     if pd.isna(x):
         return ""
@@ -674,23 +636,26 @@ def _tentar_cluster_mesmo_cliente_menor_para_maior(
     tipo_roteirizacao: str,
 ) -> Dict[str, Any]:
     """
-    Tenta absorver o cluster inteiro do cliente no menor veículo possível.
-    Se não couber tudo, tenta subconjunto do mesmo cliente ainda no menor veículo possível.
+    Regra operacional:
+    1) primeiro tenta fechar o cluster inteiro do cliente do MAIOR para o MENOR
+    2) se o cluster inteiro não fechar em nenhum perfil, quebra o cluster
+    3) após a quebra, tenta subconjunto do mesmo cliente no MENOR veículo possível
     """
     tentativas: List[Dict[str, Any]] = []
 
-    for idx, veic in catalogo_veiculos.sort_values("ordem_porte").iterrows():
+    # 1) cluster inteiro: maior -> menor
+    for idx, veic in catalogo_veiculos.sort_values("ordem_porte", ascending=False).iterrows():
         if not _veiculo_disponivel_no_modo_frota(veic, tipo_roteirizacao):
             tentativas.append(
                 {
                     "veiculo_tipo": veic["tipo"],
                     "resultado_teste": "rejeitado",
                     "motivo_reprovacao": "perfil_sem_disponibilidade_no_modo_frota",
+                    "tipo_busca": "cluster_completo",
                 }
             )
             continue
 
-        # tenta cluster inteiro primeiro
         aval_full = _avaliar_combo_no_veiculo(base_cliente, veic=veic, ignorar_ocupacao_minima=False)
         reg_full = {
             **aval_full,
@@ -720,7 +685,19 @@ def _tentar_cluster_mesmo_cliente_menor_para_maior(
                 "tentativas": tentativas,
             }
 
-        # se o cluster inteiro não fechou, tenta subconjunto guloso do mesmo cliente
+    # 2) cluster não fechou: quebra e tenta subconjunto no menor -> maior
+    for idx, veic in catalogo_veiculos.sort_values("ordem_porte").iterrows():
+        if not _veiculo_disponivel_no_modo_frota(veic, tipo_roteirizacao):
+            tentativas.append(
+                {
+                    "veiculo_tipo": veic["tipo"],
+                    "resultado_teste": "rejeitado",
+                    "motivo_reprovacao": "perfil_sem_disponibilidade_no_modo_frota",
+                    "tipo_busca": "subconjunto_mesmo_cliente",
+                }
+            )
+            continue
+
         grupo = _gerar_subconjunto_guloso(
             base_cliente=base_cliente,
             veic=veic,
@@ -763,7 +740,7 @@ def _tentar_cluster_mesmo_cliente_menor_para_maior(
 
     return {
         "aceito": False,
-        "motivo_reprovacao": "cliente_nao_fechou_menor_para_maior",
+        "motivo_reprovacao": "cliente_nao_fechou_cluster_maior_menor_e_subconjunto_menor_maior",
         "tentativas": tentativas,
     }
 
@@ -1084,7 +1061,11 @@ def executar_m4_manifestos_fechados(
             contadores_m4["qtd_tentativas_rejeitadas_capacidade"] += 1
 
     def _filtrar_nao_alocados(df_base: pd.DataFrame) -> pd.DataFrame:
-        mask = ~df_base["id_linha_pipeline"].astype(str).isin(ids_alocados)
+        col_doc = _obter_coluna_id_documento(df_base)
+        mask = (
+            ~df_base["id_linha_pipeline"].astype(str).isin(ids_alocados)
+            & ~df_base[col_doc].astype(str).isin(docs_alocados)
+        )
         return df_base.loc[mask].copy().reset_index(drop=True)
 
     def registrar_manifesto(
@@ -1106,8 +1087,8 @@ def executar_m4_manifestos_fechados(
         if ids_combo & ids_alocados:
             raise Exception("Manifesto inválido: há id_linha_pipeline já alocado em outro manifesto.")
 
-        if _ha_linhas_totalmente_repetidas(df_combo):
-            raise Exception("Manifesto inválido: há linhas totalmente repetidas dentro do combo.")
+        if docs_combo & docs_alocados:
+            raise Exception("Manifesto inválido: há documento/CTE já alocado em outro manifesto.")
 
         if not avaliacao.get("ignorar_ocupacao_minima", False):
             ocup = _num_safe(avaliacao.get("ocupacao_oficial_perc"), default=np.nan)
@@ -1301,8 +1282,8 @@ def executar_m4_manifestos_fechados(
         if df_itens_manifestos_fechados_bloco_4["id_linha_pipeline"].astype(str).duplicated().any():
             raise Exception("Validação pós-M4 falhou: id_linha_pipeline repetido em mais de um item manifesto.")
 
-        if _ha_linhas_totalmente_repetidas(df_itens_manifestos_fechados_bloco_4):
-            raise Exception("Validação pós-M4 falhou: linha totalmente repetida em mais de um item manifesto.")
+        if df_itens_manifestos_fechados_bloco_4[col_doc].astype(str).duplicated().any():
+            raise Exception("Validação pós-M4 falhou: documento/CTE repetido em mais de um manifesto.")
 
         # validar ocupação por manifesto pelo resumo, não somando linhas
         if len(df_manifestos_fechados_bloco_4) > 0:
@@ -1404,7 +1385,7 @@ def executar_m4_manifestos_fechados(
                     "peso_calculado_base_oficial": True,
                     "exclusivo_sem_ocupacao_minima": True,
                     "nao_mistura_clientes": True,
-                    "cluster_cliente_menor_para_maior": True,
+                    "cluster_cliente_maior_para_menor_e_subconjunto_menor_para_maior": True,
                     "restante_cliente_maior_para_menor": True,
                     "ocupacao_minima_padrao": OCUPACAO_MINIMA_PADRAO,
                     "ocupacao_maxima_padrao": OCUPACAO_MAXIMA_PADRAO,
