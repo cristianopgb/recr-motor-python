@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import math
+import traceback
 from typing import Any
 
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from app.schemas import RoteirizacaoRequest
@@ -16,14 +17,6 @@ router = APIRouter()
 
 
 def _sanitize_for_json(value: Any) -> Any:
-    """
-    Converte recursivamente valores não compatíveis com JSON:
-    - np.nan -> None
-    - pd.NaT -> None
-    - inf / -inf -> None
-    - tipos numpy -> tipos Python nativos
-    - Series / Index / ndarray -> listas Python
-    """
     if value is None:
         return None
 
@@ -73,64 +66,92 @@ def _sanitize_for_json(value: Any) -> Any:
     if isinstance(value, pd.Index):
         return [_sanitize_for_json(v) for v in value.tolist()]
 
-    # fallback seguro apenas para escalares
     try:
         resultado_isna = pd.isna(value)
-        if isinstance(resultado_isna, (bool, np.bool_)):
-            if bool(resultado_isna):
-                return None
+        if isinstance(resultado_isna, (bool, np.bool_)) and bool(resultado_isna):
+            return None
     except Exception:
         pass
 
     return value
 
 
+def _resposta_erro(
+    *,
+    mensagem: str,
+    tipo_erro: str,
+    detalhe_tecnico: str | None = None,
+    traceback_texto: str | None = None,
+) -> JSONResponse:
+    conteudo_erro = {
+        "status": "erro",
+        "mensagem": mensagem,
+        "tipo_erro": tipo_erro,
+        "detalhe_tecnico": detalhe_tecnico,
+        "traceback": traceback_texto,
+        "resumo": {
+            "total_manifestos": 0,
+            "total_manifestos_fechados": 0,
+            "total_manifestos_compostos": 0,
+            "total_nao_roteirizados": 0,
+        },
+        "manifestos_fechados": [],
+        "manifestos_compostos": [],
+        "nao_roteirizados": [],
+        "logs": [
+            {
+                "modulo": "api_roteirizacao",
+                "status": "erro",
+                "mensagem": mensagem,
+                "quantidade_entrada": None,
+                "quantidade_saida": None,
+            }
+        ],
+    }
+
+    return JSONResponse(
+        status_code=200,
+        content=_sanitize_for_json(conteudo_erro),
+    )
+
+
 @router.post("/roteirizar")
 def roteirizar(payload: RoteirizacaoRequest):
+    # 1) validação do contrato de entrada
     try:
         validar_payload(payload)
-
-        resultado_pipeline = executar_pipeline(payload)
-
-        resultado_pipeline = _sanitize_for_json(resultado_pipeline)
-
-        return JSONResponse(
-            status_code=200,
-            content=resultado_pipeline,
-        )
-
-    except ValueError as ve:
-        conteudo_erro = {
-            "status": "erro",
-            "mensagem": str(ve),
-            "tipo_erro": "VALIDACAO",
-            "resumo": {
-                "total_manifestos": 0,
-                "total_manifestos_fechados": 0,
-                "total_manifestos_compostos": 0,
-                "total_nao_roteirizados": 0,
-            },
-            "manifestos_fechados": [],
-            "manifestos_compostos": [],
-            "nao_roteirizados": [],
-            "logs": [
-                {
-                    "modulo": "api_roteirizacao",
-                    "status": "erro",
-                    "mensagem": f"VALIDACAO: {str(ve)}",
-                    "quantidade_entrada": None,
-                    "quantidade_saida": None,
-                }
-            ],
-        }
-
-        return JSONResponse(
-            status_code=200,
-            content=_sanitize_for_json(conteudo_erro),
-        )
-
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Erro interno no motor de roteirização: {str(e)}"
+        return _resposta_erro(
+            mensagem=f"VALIDACAO_CONTRATO: {str(e)}",
+            tipo_erro="VALIDACAO_CONTRATO",
+            detalhe_tecnico=type(e).__name__,
+            traceback_texto=traceback.format_exc(),
         )
+
+    # 2) execução/orquestração do pipeline
+    try:
+        resultado_pipeline = executar_pipeline(payload)
+    except Exception as e:
+        return _resposta_erro(
+            mensagem=f"ERRO_PIPELINE: {str(e)}",
+            tipo_erro="ERRO_PIPELINE",
+            detalhe_tecnico=type(e).__name__,
+            traceback_texto=traceback.format_exc(),
+        )
+
+    # 3) sanitização para JSON
+    try:
+        resultado_pipeline = _sanitize_for_json(resultado_pipeline)
+    except Exception as e:
+        return _resposta_erro(
+            mensagem=f"ERRO_SANITIZACAO: {str(e)}",
+            tipo_erro="ERRO_SANITIZACAO",
+            detalhe_tecnico=type(e).__name__,
+            traceback_texto=traceback.format_exc(),
+        )
+
+    # 4) devolve resultado bruto estruturado
+    return JSONResponse(
+        status_code=200,
+        content=resultado_pipeline,
+    )
