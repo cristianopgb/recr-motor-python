@@ -22,11 +22,11 @@ import pandas as pd
 #    - podem puxar outros docs do MESMO cliente, se couberem
 # 3) não exclusivos:
 #    - NUNCA misturam clientes
-#    - primeiro tentam consolidar o cluster do mesmo cliente
-#      no MENOR veículo possível, respeitando ocupação entre 70% e 100%
-#    - se não der para absorver tudo, tentam subconjuntos do mesmo cliente
-#      ainda no menor veículo possível
-#    - o restante do cliente tenta do MAIOR para o MENOR, ainda respeitando 70% a 100%
+#    - primeiro tentam consolidar o cluster inteiro do mesmo cliente
+#      do MAIOR para o MENOR, respeitando ocupação entre 70% e 100%
+#    - se o cluster inteiro não fechar em nenhum perfil, quebram o cluster
+#      e tentam subconjuntos do mesmo cliente do MENOR para o MAIOR
+#    - o que não fechar no M4 segue para o próximo bloco
 # 4) o que não fechar no M4 fica para o M5
 #
 # CORREÇÕES IMPORTANTES:
@@ -636,10 +636,10 @@ def _tentar_cluster_mesmo_cliente_menor_para_maior(
     tipo_roteirizacao: str,
 ) -> Dict[str, Any]:
     """
-    Regra operacional:
-    1) primeiro tenta fechar o cluster inteiro do cliente do MAIOR para o MENOR
+    Regra operacional ajustada:
+    1) tenta primeiro o CLUSTER INTEIRO do cliente do MAIOR para o MENOR
     2) se o cluster inteiro não fechar em nenhum perfil, quebra o cluster
-    3) após a quebra, tenta subconjunto do mesmo cliente no MENOR veículo possível
+       e tenta SUBCONJUNTO do MENOR para o MAIOR
     """
     tentativas: List[Dict[str, Any]] = []
 
@@ -651,7 +651,7 @@ def _tentar_cluster_mesmo_cliente_menor_para_maior(
                     "veiculo_tipo": veic["tipo"],
                     "resultado_teste": "rejeitado",
                     "motivo_reprovacao": "perfil_sem_disponibilidade_no_modo_frota",
-                    "tipo_busca": "cluster_completo",
+                    "tipo_busca": "cluster_completo_maior_para_menor",
                 }
             )
             continue
@@ -660,7 +660,7 @@ def _tentar_cluster_mesmo_cliente_menor_para_maior(
         reg_full = {
             **aval_full,
             "resultado_teste": "aceito" if aval_full["aceito"] else "rejeitado",
-            "tipo_busca": "cluster_completo",
+            "tipo_busca": "cluster_completo_maior_para_menor",
         }
         if not aval_full["aceito"]:
             motivos = []
@@ -685,7 +685,7 @@ def _tentar_cluster_mesmo_cliente_menor_para_maior(
                 "tentativas": tentativas,
             }
 
-    # 2) cluster não fechou: quebra e tenta subconjunto no menor -> maior
+    # 2) cluster quebrado / subconjunto: menor -> maior
     for idx, veic in catalogo_veiculos.sort_values("ordem_porte").iterrows():
         if not _veiculo_disponivel_no_modo_frota(veic, tipo_roteirizacao):
             tentativas.append(
@@ -693,7 +693,7 @@ def _tentar_cluster_mesmo_cliente_menor_para_maior(
                     "veiculo_tipo": veic["tipo"],
                     "resultado_teste": "rejeitado",
                     "motivo_reprovacao": "perfil_sem_disponibilidade_no_modo_frota",
-                    "tipo_busca": "subconjunto_mesmo_cliente",
+                    "tipo_busca": "subconjunto_mesmo_cliente_menor_para_maior",
                 }
             )
             continue
@@ -713,7 +713,7 @@ def _tentar_cluster_mesmo_cliente_menor_para_maior(
         reg_sub = {
             **aval_sub,
             "resultado_teste": "aceito" if aval_sub["aceito"] else "rejeitado",
-            "tipo_busca": "subconjunto_mesmo_cliente",
+            "tipo_busca": "subconjunto_mesmo_cliente_menor_para_maior",
         }
         if not aval_sub["aceito"]:
             motivos = []
@@ -740,7 +740,7 @@ def _tentar_cluster_mesmo_cliente_menor_para_maior(
 
     return {
         "aceito": False,
-        "motivo_reprovacao": "cliente_nao_fechou_cluster_maior_menor_e_subconjunto_menor_maior",
+        "motivo_reprovacao": "cliente_nao_fechou_cluster_maior_e_subconjunto_menor",
         "tentativas": tentativas,
     }
 
@@ -905,7 +905,7 @@ def executar_m4_manifestos_fechados(
         "qtd_tentativas_rejeitadas_capacidade": 0,
         "qtd_tentativas_sem_disponibilidade_frota": 0,
         "qtd_manifestos_exclusivos": 0,
-        "qtd_manifestos_cliente_menor_maior": 0,
+        "qtd_manifestos_cliente_cluster": 0,
         "qtd_manifestos_cliente_maior_menor": 0,
     }
 
@@ -1043,7 +1043,6 @@ def executar_m4_manifestos_fechados(
     itens_manifestos_fechados: List[pd.DataFrame] = []
     tentativas_fechamento: List[Dict[str, Any]] = []
     ids_alocados: set[str] = set()
-    docs_alocados: set[str] = set()
     contador_manifesto = 1
 
     def _contabilizar_tentativa(tent: Dict[str, Any]) -> None:
@@ -1061,11 +1060,7 @@ def executar_m4_manifestos_fechados(
             contadores_m4["qtd_tentativas_rejeitadas_capacidade"] += 1
 
     def _filtrar_nao_alocados(df_base: pd.DataFrame) -> pd.DataFrame:
-        col_doc = _obter_coluna_id_documento(df_base)
-        mask = (
-            ~df_base["id_linha_pipeline"].astype(str).isin(ids_alocados)
-            & ~df_base[col_doc].astype(str).isin(docs_alocados)
-        )
+        mask = ~df_base["id_linha_pipeline"].astype(str).isin(ids_alocados)
         return df_base.loc[mask].copy().reset_index(drop=True)
 
     def registrar_manifesto(
@@ -1074,21 +1069,16 @@ def executar_m4_manifestos_fechados(
         origem_etapa: str,
         catalogo_idx: Optional[int],
     ) -> None:
-        nonlocal contador_manifesto, manifestos_fechados, itens_manifestos_fechados, ids_alocados, docs_alocados
+        nonlocal contador_manifesto, manifestos_fechados, itens_manifestos_fechados, ids_alocados
 
         if len(df_combo) == 0:
             raise Exception("Tentativa de registrar manifesto vazio.")
 
-        col_doc = _obter_coluna_id_documento(df_combo)
-
         ids_combo = set(df_combo["id_linha_pipeline"].astype(str).tolist())
-        docs_combo = set(df_combo[col_doc].astype(str).tolist())
 
         if ids_combo & ids_alocados:
             raise Exception("Manifesto inválido: há id_linha_pipeline já alocado em outro manifesto.")
 
-        if docs_combo & docs_alocados:
-            raise Exception("Manifesto inválido: há documento/CTE já alocado em outro manifesto.")
 
         if not avaliacao.get("ignorar_ocupacao_minima", False):
             ocup = _num_safe(avaliacao.get("ocupacao_oficial_perc"), default=np.nan)
@@ -1127,7 +1117,6 @@ def executar_m4_manifestos_fechados(
         itens_manifestos_fechados.append(itens)
 
         ids_alocados.update(ids_combo)
-        docs_alocados.update(docs_combo)
 
         _consumir_veiculo_catalogo(catalogo_veiculos, catalogo_idx, tipo_roteirizacao)
 
@@ -1208,7 +1197,7 @@ def executar_m4_manifestos_fechados(
             for tent in resultado_primario.get("tentativas", []):
                 tent_padrao = {
                     **tent,
-                    "etapa_fechamento": "4B2_cliente_menor_para_maior",
+                    "etapa_fechamento": "4B2_cluster_maior_para_menor",
                     "tipo_tentativa": "cluster_mesmo_cliente",
                     "cliente_referencia": cliente,
                     "linha_ancora": fila_cliente["id_linha_pipeline"].astype(str).iloc[0],
@@ -1220,10 +1209,10 @@ def executar_m4_manifestos_fechados(
                 registrar_manifesto(
                     df_combo=resultado_primario["df_combo"],
                     avaliacao=resultado_primario["avaliacao"],
-                    origem_etapa="4B2_cliente_menor_para_maior",
+                    origem_etapa="4B2_cluster_maior_para_menor",
                     catalogo_idx=resultado_primario["catalogo_idx"],
                 )
-                contadores_m4["qtd_manifestos_cliente_menor_maior"] += 1
+                contadores_m4["qtd_manifestos_cliente_cluster"] += 1
                 continue
 
             # 2) tenta o restante do cliente do maior -> menor
@@ -1277,13 +1266,8 @@ def executar_m4_manifestos_fechados(
     df_remanescente_roteirizavel_bloco_4 = _filtrar_nao_alocados(fila).copy().reset_index(drop=True)
 
     if len(df_itens_manifestos_fechados_bloco_4) > 0:
-        col_doc = _obter_coluna_id_documento(df_itens_manifestos_fechados_bloco_4)
-
         if df_itens_manifestos_fechados_bloco_4["id_linha_pipeline"].astype(str).duplicated().any():
             raise Exception("Validação pós-M4 falhou: id_linha_pipeline repetido em mais de um item manifesto.")
-
-        if df_itens_manifestos_fechados_bloco_4[col_doc].astype(str).duplicated().any():
-            raise Exception("Validação pós-M4 falhou: documento/CTE repetido em mais de um manifesto.")
 
         # validar ocupação por manifesto pelo resumo, não somando linhas
         if len(df_manifestos_fechados_bloco_4) > 0:
@@ -1385,7 +1369,7 @@ def executar_m4_manifestos_fechados(
                     "peso_calculado_base_oficial": True,
                     "exclusivo_sem_ocupacao_minima": True,
                     "nao_mistura_clientes": True,
-                    "cluster_cliente_maior_para_menor_e_subconjunto_menor_para_maior": True,
+                    "cluster_cliente_maior_para_menor": True,
                     "restante_cliente_maior_para_menor": True,
                     "ocupacao_minima_padrao": OCUPACAO_MINIMA_PADRAO,
                     "ocupacao_maxima_padrao": OCUPACAO_MAXIMA_PADRAO,
