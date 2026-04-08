@@ -331,6 +331,21 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     df_remanescente_roteirizavel_bloco_4 = outputs_m4["df_remanescente_roteirizavel_bloco_4"]
     df_uso_frota_m4 = outputs_m4.get("df_uso_frota_m4", pd.DataFrame())
 
+    # fonte oficial de auditoria do que não fechou no M4
+    df_nao_roteirizados_bloco_4 = outputs_m4.get("df_nao_roteirizados_bloco_4")
+    if df_nao_roteirizados_bloco_4 is None:
+        df_nao_roteirizados_bloco_4 = df_remanescente_roteirizavel_bloco_4.copy()
+
+        if len(df_nao_roteirizados_bloco_4) > 0:
+            if "status_roteirizacao" not in df_nao_roteirizados_bloco_4.columns:
+                df_nao_roteirizados_bloco_4["status_roteirizacao"] = "remanescente_bloco_4"
+            if "origem_bloco" not in df_nao_roteirizados_bloco_4.columns:
+                df_nao_roteirizados_bloco_4["origem_bloco"] = "M4"
+            if "segue_para_proximo_bloco" not in df_nao_roteirizados_bloco_4.columns:
+                df_nao_roteirizados_bloco_4["segue_para_proximo_bloco"] = True
+            if "motivo_nao_roteirizado" not in df_nao_roteirizados_bloco_4.columns:
+                df_nao_roteirizados_bloco_4["motivo_nao_roteirizado"] = "remanescente_nao_fechado_no_m4"
+
     logs.append(
         _log(
             modulo="m4_manifestos_fechados",
@@ -350,37 +365,52 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
 
     manifestos_fechados = _serializar_dataframe_para_records(df_manifestos_fechados_bloco_4)
     itens_manifestos_fechados = _serializar_dataframe_para_records(df_itens_manifestos_fechados_bloco_4)
+    nao_roteirizados = _serializar_dataframe_para_records(df_nao_roteirizados_bloco_4)
 
     colunas_preferenciais_remanescente = [
         "nro_documento",
+        "cte",
         "destinatario",
+        "cidade",
         "cidade_dest",
+        "uf",
         "subregiao",
+        "sub_regiao",
         "mesorregiao",
         "peso_kg",
         "peso_calculado",
+        "distancia_rodoviaria_est_km",
         "data_leadtime",
         "data_agenda",
+        "agendada",
+        "folga_dias",
         "prioridade_embarque",
         "restricao_veiculo",
         "veiculo_exclusivo",
+        "status_triagem",
+        "motivo_triagem",
+        "status_roteirizacao",
+        "motivo_nao_roteirizado",
+        "origem_bloco",
+        "segue_para_proximo_bloco",
     ]
     colunas_existentes_remanescente = [
-        c for c in colunas_preferenciais_remanescente if c in df_remanescente_roteirizavel_bloco_4.columns
+        c for c in colunas_preferenciais_remanescente if c in df_nao_roteirizados_bloco_4.columns
     ]
 
     if colunas_existentes_remanescente:
-        df_remanescente_resumido = df_remanescente_roteirizavel_bloco_4[colunas_existentes_remanescente].copy()
+        df_nao_roteirizados_resumido = df_nao_roteirizados_bloco_4[colunas_existentes_remanescente].copy()
     else:
-        df_remanescente_resumido = df_remanescente_roteirizavel_bloco_4.head(0).copy()
+        df_nao_roteirizados_resumido = df_nao_roteirizados_bloco_4.head(0).copy()
 
-    remanescentes_resumidos = _serializar_dataframe_para_records(df_remanescente_resumido)
+    nao_roteirizados_resumido = _serializar_dataframe_para_records(df_nao_roteirizados_resumido)
 
     auditoria_m4 = {
         "total_tentativas": _safe_len(df_tentativas_fechamento_bloco_4),
         "total_manifestos_fechados": _safe_len(df_manifestos_fechados_bloco_4),
         "total_itens_manifestados": _safe_len(df_itens_manifestos_fechados_bloco_4),
         "total_remanescentes": _safe_len(df_remanescente_roteirizavel_bloco_4),
+        "total_nao_roteirizados_bloco_4": _safe_len(df_nao_roteirizados_bloco_4),
         "total_uso_frota_registros": _safe_len(df_uso_frota_m4),
     }
 
@@ -429,6 +459,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "total_manifestos_fechados_m4": _safe_len(df_manifestos_fechados_bloco_4),
             "total_itens_manifestados_m4": _safe_len(df_itens_manifestos_fechados_bloco_4),
             "total_remanescentes_m4": _safe_len(df_remanescente_roteirizavel_bloco_4),
+            "total_nao_roteirizados_bloco_4": _safe_len(df_nao_roteirizados_bloco_4),
             "resumo_m2": resumo_m2,
             "resumo_m3": resumo_m3,
             "resumo_m31": resumo_m31,
@@ -440,11 +471,12 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         },
         "manifestos_fechados": manifestos_fechados,
         "itens_manifestos_fechados": itens_manifestos_fechados,
-        "remanescente_roteirizavel_resumido": remanescentes_resumidos,
+        "remanescente_roteirizavel_resumido": nao_roteirizados_resumido,
+        "nao_roteirizados_resumido": nao_roteirizados_resumido,
         "auditoria_m4": auditoria_m4,
         "manifestos_compostos": [],
         "itens_manifestos_compostos": [],
-        "nao_roteirizados": [],
+        "nao_roteirizados": nao_roteirizados,
         "logs": logs,
     }
 
@@ -481,6 +513,9 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                 "remanescente_roteirizavel_bloco_4": _snapshot_dataframe(
                     df_remanescente_roteirizavel_bloco_4, "df_remanescente_roteirizavel_bloco_4"
                 ),
+                "nao_roteirizados_bloco_4": _snapshot_dataframe(
+                    df_nao_roteirizados_bloco_4, "df_nao_roteirizados_bloco_4"
+                ),
                 "uso_frota_m4": _snapshot_dataframe(df_uso_frota_m4, "df_uso_frota_m4"),
                 "regionalidades": _snapshot_dataframe(contexto.df_geo_raw, "df_geo_raw"),
                 "parametros": _snapshot_dataframe(contexto.df_parametros_raw, "df_parametros_raw"),
@@ -503,6 +538,9 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                 "remanescente_roteirizavel_bloco_4": _serializar_dataframe_para_records(
                     df_remanescente_roteirizavel_bloco_4, limit=10
                 ),
+                "nao_roteirizados_bloco_4": _serializar_dataframe_para_records(
+                    df_nao_roteirizados_bloco_4, limit=10
+                ),
                 "uso_frota_m4": _serializar_dataframe_para_records(df_uso_frota_m4, limit=10),
             },
             "outputs_intermediarios": {
@@ -518,6 +556,9 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                 ),
                 "df_remanescente_roteirizavel_bloco_4": _serializar_dataframe_para_records(
                     df_remanescente_roteirizavel_bloco_4
+                ),
+                "df_nao_roteirizados_bloco_4": _serializar_dataframe_para_records(
+                    df_nao_roteirizados_bloco_4
                 ),
                 "df_uso_frota_m4": _serializar_dataframe_para_records(df_uso_frota_m4),
             },
