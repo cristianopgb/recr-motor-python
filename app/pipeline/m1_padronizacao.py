@@ -1,17 +1,20 @@
 # ============================================================
 # MÓDULO 1 - LIMPEZA, PADRONIZAÇÃO E TIPAGEM
-# (VERSÃO API - AJUSTADA AO CONTRATO REAL DO SISTEMA 1)
+# (VERSÃO API - AJUSTADA AO DATASET V2 DO SISTEMA 1)
 # ============================================================
+
+from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Dict, Any
+from datetime import datetime, time
+from typing import Any, Dict, Optional
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 
-def normalizar_texto_basico(valor):
+def normalizar_texto_basico(valor: Any) -> Any:
     if valor is None:
         return np.nan
 
@@ -25,10 +28,11 @@ def normalizar_texto_basico(valor):
     texto = str(valor).replace("\u00a0", " ")
     texto = texto.strip()
     texto = re.sub(r"\s+", " ", texto)
-    return texto
+
+    return texto if texto != "" else np.nan
 
 
-def remover_acentos(texto):
+def remover_acentos(texto: Any) -> Any:
     if texto is None:
         return np.nan
 
@@ -46,7 +50,7 @@ def remover_acentos(texto):
     )
 
 
-def padronizar_nome_coluna(col):
+def padronizar_nome_coluna(col: Any) -> str:
     col = normalizar_texto_basico(col)
     col = remover_acentos(col)
     col = str(col).lower()
@@ -62,9 +66,10 @@ def padronizar_nome_coluna(col):
     return col
 
 
-def garantir_colunas_unicas(colunas):
+def garantir_colunas_unicas(colunas: list[str]) -> list[str]:
     novas = []
-    contador = {}
+    contador: Dict[str, int] = {}
+
     for c in colunas:
         if c not in contador:
             contador[c] = 0
@@ -72,16 +77,24 @@ def garantir_colunas_unicas(colunas):
         else:
             contador[c] += 1
             novas.append(f"{c}_{contador[c]}")
+
     return novas
 
 
-def converter_numerico_brasil(serie):
+def escolher_coluna(df: pd.DataFrame, candidatos: list[str]) -> Optional[str]:
+    for c in candidatos:
+        if c in df.columns:
+            return c
+    return None
+
+
+def converter_numerico_brasil(serie: pd.Series) -> pd.Series:
     if pd.api.types.is_numeric_dtype(serie):
         return pd.to_numeric(serie, errors="coerce")
 
     s = serie.astype(str).str.strip()
 
-    def _conv(x):
+    def _conv(x: Any) -> float:
         if x is None:
             return np.nan
 
@@ -107,10 +120,10 @@ def converter_numerico_brasil(serie):
     return s.apply(_conv)
 
 
-def converter_coordenada(serie):
+def converter_coordenada(serie: pd.Series) -> pd.Series:
     s = serie.astype(str).str.strip()
 
-    def _coord(x):
+    def _coord(x: Any) -> float:
         if x is None:
             return np.nan
 
@@ -136,12 +149,49 @@ def converter_coordenada(serie):
     return s.apply(_coord)
 
 
-def converter_data(serie):
+def converter_data(serie: pd.Series) -> pd.Series:
     return pd.to_datetime(serie, errors="coerce", dayfirst=True)
 
 
-def converter_flag_agendamento(serie):
-    def _f(x):
+def _parse_hora_flex(valor: Any) -> Optional[time]:
+    if valor is None:
+        return None
+
+    try:
+        resultado_isna = pd.isna(valor)
+        if isinstance(resultado_isna, (bool, np.bool_)) and bool(resultado_isna):
+            return None
+    except Exception:
+        pass
+
+    if isinstance(valor, time):
+        return valor
+
+    if isinstance(valor, pd.Timestamp):
+        if pd.isna(valor):
+            return None
+        return valor.time()
+
+    texto = str(valor).strip()
+    if texto == "":
+        return None
+
+    formatos = ("%H:%M", "%H:%M:%S")
+    for fmt in formatos:
+        try:
+            return datetime.strptime(texto, fmt).time()
+        except Exception:
+            continue
+
+    return None
+
+
+def converter_hora(serie: pd.Series) -> pd.Series:
+    return serie.apply(_parse_hora_flex)
+
+
+def converter_flag_agendamento(serie: pd.Series) -> pd.Series:
+    def _f(x: Any) -> bool:
         if x is None:
             return False
 
@@ -158,8 +208,8 @@ def converter_flag_agendamento(serie):
     return serie.apply(_f)
 
 
-def converter_flag_sim_nao(serie):
-    def _f(x):
+def converter_flag_sim_nao(serie: pd.Series) -> pd.Series:
+    def _f(x: Any) -> bool:
         if x is None:
             return False
 
@@ -188,20 +238,13 @@ def converter_flag_sim_nao(serie):
     return serie.apply(_f)
 
 
-def escolher_coluna(df: pd.DataFrame, candidatos: list[str]) -> str | None:
-    for c in candidatos:
-        if c in df.columns:
-            return c
-    return None
-
-
 def normalizar_chave_texto(serie: pd.Series) -> pd.Series:
     return serie.apply(
         lambda x: remover_acentos(str(x)).upper().strip() if pd.notna(x) else np.nan
     )
 
 
-def normalizar_valor_parametro(x):
+def normalizar_valor_parametro(x: Any) -> Any:
     if x is None:
         return None
 
@@ -235,6 +278,47 @@ def normalizar_valor_parametro(x):
     return str(x).strip()
 
 
+def _coalescer_colunas(df: pd.DataFrame, alvo: str, candidatos: list[str]) -> pd.DataFrame:
+    presentes = [c for c in candidatos if c in df.columns]
+
+    if not presentes:
+        return df
+
+    if alvo not in df.columns:
+        df[alvo] = np.nan
+
+    for col in presentes:
+        df[alvo] = df[alvo].where(df[alvo].notna(), df[col])
+
+    return df
+
+
+def _garantir_colunas_carteira_v2(carteira: pd.DataFrame) -> pd.DataFrame:
+    """
+    Consolida layout novo e antigo em um conjunto estável de colunas brutas.
+    """
+    # Layout V2 -> nomes padronizados após padronizar_nome_coluna
+    carteira = _coalescer_colunas(carteira, "filial_r", ["filial_r", "filial"])
+    carteira = _coalescer_colunas(carteira, "filial_d", ["filial_d", "filial_origem"])
+    carteira = _coalescer_colunas(carteira, "peso_cub", ["peso_cub", "peso_c"])
+    carteira = _coalescer_colunas(carteira, "classif", ["classif", "classifi"])
+    carteira = _coalescer_colunas(carteira, "tomad", ["tomad", "tomador"])
+    carteira = _coalescer_colunas(carteira, "destin", ["destin", "destinatario"])
+    carteira = _coalescer_colunas(carteira, "cidad", ["cidad", "cida"])
+    carteira = _coalescer_colunas(carteira, "ocorrencias_nf", ["ocorrencias_nf", "ocorrencias_nfs"])
+    carteira = _coalescer_colunas(carteira, "observacao", ["observacao", "observacao_r"])
+    carteira = _coalescer_colunas(carteira, "ultima_ocorrencia", ["ultima_ocorrencia", "ultima"])
+    carteira = _coalescer_colunas(carteira, "status_r", ["status_r", "status"])
+    carteira = _coalescer_colunas(carteira, "latitude", ["latitude", "lat"])
+    carteira = _coalescer_colunas(carteira, "longitude", ["longitude", "lon"])
+    carteira = _coalescer_colunas(carteira, "peso_calculo", ["peso_calculo", "peso_calculado"])
+    carteira = _coalescer_colunas(carteira, "carro_dedicado", ["carro_dedicado", "veiculo_exclusivo"])
+    carteira = _coalescer_colunas(carteira, "tipo_carga", ["tipo_carga", "tipo_c"])
+    carteira = _coalescer_colunas(carteira, "fim_en", ["fim_en", "fim_ent", "fim_ent_1"])
+
+    return carteira
+
+
 def executar_m1_padronizacao(
     df_carteira_raw: pd.DataFrame,
     df_geo_raw: pd.DataFrame,
@@ -251,19 +335,22 @@ def executar_m1_padronizacao(
     veiculos = df_veiculos_raw.copy()
 
     # --------------------------------------------------------
-    # 2) PADRONIZA COLUNAS
+    # 2) PADRONIZA NOMES DE COLUNAS
     # --------------------------------------------------------
     for df in [carteira, geo, parametros, veiculos]:
         cols = [padronizar_nome_coluna(c) for c in df.columns]
         df.columns = garantir_colunas_unicas(cols)
 
+    carteira = _garantir_colunas_carteira_v2(carteira)
+
     # --------------------------------------------------------
     # 3) MAPA CARTEIRA
+    # Layout interno estável do pipeline
     # --------------------------------------------------------
     mapa_carteira = {
-        "filial": "filial_roteirizacao",
+        "filial_r": "filial_roteirizacao",
         "romane": "romaneio",
-        "filial_origem": "filial_origem",
+        "filial_d": "filial_origem",
         "serie": "serie",
         "nro_doc": "nro_documento",
         "data_des": "data_descarga",
@@ -273,35 +360,37 @@ def executar_m1_padronizacao(
         "palet": "qtd_pallet",
         "conf": "conferencia",
         "peso": "peso_kg",
-        "vlr_merc": "valor_nf",
+        "vlrmerc": "valor_nf",
         "qtd": "qtd_volumes",
-        "peso_c": "vol_m3",
-        "classifi": "classifi",
-        "tomador": "tomador",
-        "destinatario": "destinatario",
+        "peso_cub": "vol_m3",
+        "classif": "classifi",
+        "tomad": "tomador",
+        "destin": "destinatario",
         "bairro": "bairro",
-        "cida": "cidade",
+        "cidad": "cidade",
         "uf": "uf",
         "nf_serie": "nf_serie",
+        "tipo_ca": "tipo_ca",
         "tipo_carga": "tipo_carga",
-        "qtd_nf": "qtd_nf",
-        "regiao": "regiao",
+        "qtdnf": "qtd_nf",
         "sub_regiao": "sub_regiao",
-        "ocorrencias_nfs": "ocorrencias_nfs",
+        "ocorrencias_nf": "ocorrencias_nfs",
         "remetente": "remetente",
-        "observacao_r": "observacao_r",
+        "observacao": "observacao_r",
         "ref_cliente": "ref_cliente",
         "cidade_dest": "cidade_dest",
         "mesoregiao": "mesorregiao",
         "agenda": "agenda",
-        "tipo_c": "tipo_c",
-        "ultima": "ultima",
-        "status": "status",
-        "lat": "latitude_destinatario",
-        "lon": "longitude_destinatario",
-        "veiculo_exclusivo": "veiculo_exclusivo",
-        "peso_calculado": "peso_calculado",
+        "ultima_ocorrencia": "ultima",
+        "status_r": "status",
+        "latitude": "latitude_destinatario",
+        "longitude": "longitude_destinatario",
+        "peso_calculo": "peso_calculado",
         "prioridade": "prioridade_embarque",
+        "restricao_veiculo": "restricao_veiculo",
+        "carro_dedicado": "veiculo_exclusivo",
+        "inicio_ent": "inicio_entrega",
+        "fim_en": "fim_entrega",
     }
 
     carteira = carteira.rename(
@@ -310,7 +399,6 @@ def executar_m1_padronizacao(
 
     # --------------------------------------------------------
     # 4) MAPA GEO / REGIONALIDADES
-    # Aceita tanto base antiga quanto contrato do Sistema 1
     # --------------------------------------------------------
     mapa_geo = {
         "cidade": "cidade",
@@ -319,7 +407,7 @@ def executar_m1_padronizacao(
         "mesorregiao": "mesorregiao",
         "microrregiao": "microrregiao",
         "latitude": "latitude",
-        "longitude": "longitude"
+        "longitude": "longitude",
     }
 
     geo = geo.rename(columns={k: v for k, v in mapa_geo.items() if k in geo.columns})
@@ -359,7 +447,8 @@ def executar_m1_padronizacao(
         "ocupacao_minima_perc": "ocupacao_minima_perc",
         "filial_id": "filial_id",
         "tipo_frota": "tipo_frota",
-        "ativo": "ativo"
+        "ativo": "ativo",
+        "dedicado": "dedicado",
     }
 
     veiculos = veiculos.rename(
@@ -382,12 +471,25 @@ def executar_m1_padronizacao(
         "vol_m3",
         "qtd_nf",
         "peso_calculado",
-        "prioridade_embarque",
     ]
 
     for c in colunas_num:
         if c in carteira.columns:
             carteira[c] = converter_numerico_brasil(carteira[c])
+
+    # prioridade pode ser enum textual no novo dataset.
+    # então tenta numérico, mas preserva texto se não converter.
+    if "prioridade_embarque" in carteira.columns:
+        prioridade_num = converter_numerico_brasil(carteira["prioridade_embarque"])
+        carteira["prioridade_embarque_num"] = prioridade_num
+
+        carteira["prioridade_embarque"] = carteira["prioridade_embarque"].apply(normalizar_texto_basico)
+
+        # se converteu numericamente, usa a versão numérica como base oficial
+        carteira["prioridade_embarque"] = carteira["prioridade_embarque"].where(
+            prioridade_num.isna(),
+            prioridade_num
+        )
 
     for c in ["latitude_destinatario", "longitude_destinatario"]:
         if c in carteira.columns:
@@ -396,6 +498,10 @@ def executar_m1_padronizacao(
     for c in ["data_descarga", "data_nf", "data_leadtime", "data_agenda"]:
         if c in carteira.columns:
             carteira[c] = converter_data(carteira[c])
+
+    for c in ["inicio_entrega", "fim_entrega"]:
+        if c in carteira.columns:
+            carteira[c] = converter_hora(carteira[c])
 
     colunas_texto = [
         "conferencia",
@@ -406,8 +512,8 @@ def executar_m1_padronizacao(
         "cidade",
         "uf",
         "nf_serie",
+        "tipo_ca",
         "tipo_carga",
-        "regiao",
         "sub_regiao",
         "ocorrencias_nfs",
         "remetente",
@@ -416,10 +522,10 @@ def executar_m1_padronizacao(
         "cidade_dest",
         "mesorregiao",
         "agenda",
-        "tipo_c",
         "ultima",
         "status",
         "veiculo_exclusivo",
+        "restricao_veiculo",
     ]
 
     for c in colunas_texto:
@@ -435,6 +541,21 @@ def executar_m1_padronizacao(
         carteira["veiculo_exclusivo_flag"] = converter_flag_sim_nao(carteira["veiculo_exclusivo"])
     else:
         carteira["veiculo_exclusivo_flag"] = False
+
+    # usa peso calculado quando disponível, senão usa peso real
+    if "peso_calculado" not in carteira.columns:
+        carteira["peso_calculado"] = np.nan
+
+    if "peso_kg" not in carteira.columns:
+        carteira["peso_kg"] = np.nan
+
+    carteira["peso_calculado"] = carteira["peso_calculado"].where(
+        carteira["peso_calculado"].notna(),
+        carteira["peso_kg"]
+    )
+
+    # garante coluna canônica de exclusividade para os próximos módulos
+    carteira["veiculo_exclusivo"] = carteira["veiculo_exclusivo_flag"]
 
     # --------------------------------------------------------
     # 8) TIPAGEM GEO
@@ -498,7 +619,7 @@ def executar_m1_padronizacao(
         "capacidade_vol_m3",
         "max_entregas",
         "max_km_distancia",
-        "ocupacao_minima_perc"
+        "ocupacao_minima_perc",
     ]
 
     for c in colunas_num_veiculos:
@@ -508,14 +629,43 @@ def executar_m1_padronizacao(
     if "perfil" in veiculos.columns:
         veiculos["perfil"] = veiculos["perfil"].apply(normalizar_texto_basico)
 
+    if "dedicado" in veiculos.columns:
+        veiculos["dedicado"] = converter_flag_sim_nao(veiculos["dedicado"])
+
     veiculos["ordem_porte"] = np.arange(1, len(veiculos) + 1)
 
     # --------------------------------------------------------
-    # 12) OUTPUT
+    # 12) SAFEGUARDS MÍNIMOS DE COLUNAS
+    # --------------------------------------------------------
+    colunas_minimas = [
+        "nro_documento",
+        "peso_kg",
+        "vol_m3",
+        "peso_calculado",
+        "destinatario",
+        "cidade",
+        "uf",
+        "mesorregiao",
+        "sub_regiao",
+        "latitude_destinatario",
+        "longitude_destinatario",
+        "prioridade_embarque",
+        "restricao_veiculo",
+        "veiculo_exclusivo",
+        "inicio_entrega",
+        "fim_entrega",
+    ]
+
+    for col in colunas_minimas:
+        if col not in carteira.columns:
+            carteira[col] = np.nan
+
+    # --------------------------------------------------------
+    # 13) OUTPUT
     # --------------------------------------------------------
     return {
         "df_carteira_tratada": carteira,
         "df_geo_tratado": geo,
         "df_parametros_tratados": parametros,
-        "df_veiculos_tratados": veiculos
+        "df_veiculos_tratados": veiculos,
     }
