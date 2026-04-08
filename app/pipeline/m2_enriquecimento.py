@@ -36,16 +36,20 @@ def executar_m2_enriquecimento(
     - não pode multiplicar linhas da carteira
 
     Regras de territorialidade validadas:
-    - subregiao do dataset equivale à microrregiao da base fallback
+    - subregiao do pipeline equivale à sub_regiao vinda do M1
+    - fallback usa microrregiao da base
     - mesorregiao do dataset equivale à mesorregiao da base fallback
     - fallback só preenche quando o campo da carteira vier vazio
-    - não criar coluna nova para isso
     - regiao permanece como dado original da carteira, sem fallback automático
     """
 
     carteira = df_carteira_tratada.copy()
     geo = df_geo_tratado.copy()
     parametros = df_parametros_tratados.copy()
+
+    # compatibilidade M1 novo -> M2
+    if "subregiao" not in carteira.columns and "sub_regiao" in carteira.columns:
+        carteira["subregiao"] = carteira["sub_regiao"]
 
     _validar_colunas_minimas(carteira, geo)
 
@@ -177,13 +181,6 @@ def executar_m2_enriquecimento(
 
     # ============================================================
     # FALLBACK DE REGIONALIDADES SEM DUPLICAR LINHAS
-    #
-    # Regras oficiais:
-    # - cidade/uf = chave de busca na base fallback
-    # - subregiao da carteira equivale à microrregiao da base
-    # - mesorregiao da carteira equivale à mesorregiao da base
-    # - fallback só preenche quando o campo na carteira vier vazio
-    # - regiao permanece como dado original da carteira
     # ============================================================
 
     if "regiao" not in carteira.columns:
@@ -263,11 +260,6 @@ def executar_m2_enriquecimento(
         axis=1,
     )
 
-    # REGRA IMPORTANTE:
-    # regiao permanece como veio do dataset.
-    # Não preencher automaticamente com microrregiao fallback
-    # para não misturar conceitos territoriais distintos.
-
     carteira["status_geo"] = np.where(
         carteira["mesorregiao"].notna() & carteira["subregiao"].notna(),
         "ok",
@@ -303,10 +295,11 @@ def executar_m2_enriquecimento(
         "filial_roteirizacao",
         "romaneio",
         "filial_origem",
-        "serie_romaneio",
+        "serie",
         "nro_documento",
-        "embarcador",
+        "tomador",
         "destinatario",
+        "ref_cliente",
         "cidade",
         "uf",
         "regiao",
@@ -318,6 +311,12 @@ def executar_m2_enriquecimento(
         "longitude_destinatario",
         "peso_kg",
         "vol_m3",
+        "peso_calculado",
+        "prioridade_embarque",
+        "restricao_veiculo",
+        "veiculo_exclusivo",
+        "inicio_entrega",
+        "fim_entrega",
         "agendada",
         "data_agenda",
         "data_leadtime",
@@ -370,9 +369,13 @@ def executar_m2_enriquecimento(
         "linhas_enriquecidas_por_fallback_subregiao": int(
             (
                 df_carteira_enriquecida["subregiao"].notna()
-                & df_carteira_tratada.reindex(df_carteira_enriquecida.index)["subregiao"].isna()
+                & df_carteira_tratada.assign(
+                    subregiao=df_carteira_tratada["sub_regiao"]
+                    if "sub_regiao" in df_carteira_tratada.columns
+                    else df_carteira_tratada.get("subregiao")
+                )["subregiao"].isna()
             ).sum()
-        ) if "subregiao" in df_carteira_tratada.columns else None,
+        ) if ("sub_regiao" in df_carteira_tratada.columns or "subregiao" in df_carteira_tratada.columns) else None,
         "linhas_enriquecidas_por_fallback_mesorregiao": int(
             (
                 df_carteira_enriquecida["mesorregiao"].notna()
@@ -449,7 +452,6 @@ def _validar_saida_m2(df: pd.DataFrame) -> None:
         "faixa_km_cd",
         "quadrante",
     ]
-    faltam = [c for c in df.columns if c in []]
     faltam = [c for c in colunas_obrigatorias_saida if c not in df.columns]
     if faltam:
         raise Exception(
@@ -574,8 +576,49 @@ def _classificar_perfil_veiculo_referencia(km: Any) -> str:
     return "CARRETA"
 
 
+def _score_prioridade_embarque(valor: Any) -> int:
+    if pd.isna(valor):
+        return 0
+
+    try:
+        num = float(valor)
+        if num == 1:
+            return 120
+        if num == 2:
+            return 90
+        if num == 3:
+            return 60
+        if num == 4:
+            return 30
+        if num >= 5:
+            return 10
+    except Exception:
+        pass
+
+    texto = str(valor).strip().upper()
+    texto = _remover_acentos(texto)
+
+    mapa = {
+        "SIM": 120,
+        "ALTA": 120,
+        "ALTO": 120,
+        "URGENTE": 120,
+        "MEDIA": 60,
+        "MEDIO": 60,
+        "NORMAL": 30,
+        "BAIXA": 10,
+        "BAIXO": 10,
+        "NAO": 0,
+        "NÃO": 0,
+    }
+
+    return mapa.get(texto, 0)
+
+
 def _calcular_score(row: pd.Series) -> int:
     score = 0
+
+    score += _score_prioridade_embarque(row.get("prioridade_embarque"))
 
     if row.get("agendada") is True:
         score += 100
@@ -599,6 +642,9 @@ def _calcular_score(row: pd.Series) -> int:
             score += 10
         elif km > 150:
             score += 5
+
+    if row.get("veiculo_exclusivo") is True:
+        score += 20
 
     return score
 
