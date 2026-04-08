@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 import time
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -29,11 +31,12 @@ import pandas as pd
 #    - o que não fechar no M4 segue para o próximo bloco
 # 4) o que não fechar no M4 fica para o M5
 #
-# CORREÇÕES IMPORTANTES:
-# - impede reutilização de CTE em mais de um manifesto
-# - impede ocupação/base duplicada por linha
-# - impede somatório artificial > 100%
-# - resumo do manifesto calculado UMA única vez
+# AJUSTES IMPORTANTES NESTA VERSÃO:
+# - respeita Restrição Veículo do novo dataset
+# - lê Carro Dedicado como alias operacional de exclusividade
+# - aceita Prioridade numérica ou textual na ordenação
+# - impede reutilização de item em mais de um manifesto
+# - resumo do manifesto calculado uma única vez
 # ============================================================
 
 OCUPACAO_MINIMA_PADRAO = 0.70
@@ -82,15 +85,21 @@ def _scalar_safe(x: Any) -> Any:
 def _bool_safe(x: Any) -> bool:
     x = _scalar_safe(x)
 
-    if pd.isna(x):
-        return False
+    try:
+        if pd.isna(x):
+            return False
+    except Exception:
+        pass
 
     if isinstance(x, (bool, np.bool_)):
         return bool(x)
 
     if isinstance(x, (int, float, np.integer, np.floating)):
-        if pd.isna(x):
-            return False
+        try:
+            if pd.isna(x):
+                return False
+        except Exception:
+            pass
         return bool(int(x))
 
     txt = str(x).strip().lower()
@@ -246,9 +255,102 @@ def _obter_coluna_id_documento(df: pd.DataFrame) -> str:
 
 
 def _normalizar_str(x: Any) -> str:
-    if pd.isna(x):
-        return ""
+    try:
+        if pd.isna(x):
+            return ""
+    except Exception:
+        pass
     return str(x).strip().upper()
+
+
+def _normalizar_token_restricao(x: Any) -> str:
+    if x is None:
+        return ""
+
+    try:
+        if pd.isna(x):
+            return ""
+    except Exception:
+        pass
+
+    txt = str(x).strip().upper()
+    txt = "".join(
+        c for c in unicodedata.normalize("NFKD", txt)
+        if not unicodedata.combining(c)
+    )
+    txt = re.sub(r"[^A-Z0-9]+", "_", txt)
+    txt = re.sub(r"_+", "_", txt).strip("_")
+    return txt
+
+
+def _expandir_alias_restricao(token: str) -> set[str]:
+    token = _normalizar_token_restricao(token)
+    if token == "":
+        return set()
+
+    aliases = {
+        "VUC": {"VUC"},
+        "3_4": {"3_4", "TRES_QUARTOS", "TRES_QUARTO"},
+        "TOCO": {"TOCO"},
+        "TRUCK": {"TRUCK"},
+        "CARRETA": {"CARRETA"},
+        "UTILITARIO": {"UTILITARIO", "UTILITARIOS", "FIORINO", "VAN"},
+        "CARRO": {"CARRO", "PASSEIO", "VEICULO_LEVE"},
+    }
+
+    for canonico, grupo in aliases.items():
+        if token == canonico or token in grupo:
+            return {canonico} | grupo
+
+    return {token}
+
+
+def _tokens_restricao_valor(valor: Any) -> set[str]:
+    if valor is None:
+        return set()
+
+    try:
+        if pd.isna(valor):
+            return set()
+    except Exception:
+        pass
+
+    txt = str(valor).strip()
+    if txt == "":
+        return set()
+
+    partes = re.split(r"[;,|/]+", txt)
+    tokens: set[str] = set()
+
+    for parte in partes:
+        token = _normalizar_token_restricao(parte)
+        if token != "":
+            tokens |= _expandir_alias_restricao(token)
+
+    return tokens
+
+
+def _veiculo_compativel_com_restricao(veiculo_tipo: Any, restricao_valor: Any) -> bool:
+    tokens_restricao = _tokens_restricao_valor(restricao_valor)
+    if len(tokens_restricao) == 0:
+        return True
+
+    tokens_veiculo = _expandir_alias_restricao(veiculo_tipo)
+    return len(tokens_restricao & tokens_veiculo) > 0
+
+
+def _combo_respeita_restricao_veiculo(df_combo: pd.DataFrame, veic: pd.Series) -> bool:
+    if "restricao_veiculo" not in df_combo.columns:
+        return True
+
+    tipo_veiculo = veic.get("tipo")
+    restricoes = df_combo["restricao_veiculo"].tolist()
+
+    for restricao in restricoes:
+        if not _veiculo_compativel_com_restricao(tipo_veiculo, restricao):
+            return False
+
+    return True
 
 
 def _eh_exclusivo(row: pd.Series) -> bool:
@@ -304,6 +406,7 @@ def _avaliar_combo_no_veiculo(
     cabe_carga_oficial = base_carga_total <= cap_peso
     cabe_paradas = qtd_paradas <= max_entregas
     cabe_km = km_combo <= max_km if pd.notna(km_combo) else False
+    cabe_restricao_veiculo = _combo_respeita_restricao_veiculo(df_combo=df_combo, veic=veic)
 
     ocupacao_oficial = base_carga_total / cap_peso if pd.notna(cap_peso) and cap_peso > 0 else np.nan
 
@@ -316,7 +419,13 @@ def _avaliar_combo_no_veiculo(
             and ocupacao_oficial <= OCUPACAO_MAXIMA_PADRAO
         )
 
-    aceito = bool(cabe_carga_oficial and cabe_paradas and cabe_km and passa_ocupacao)
+    aceito = bool(
+        cabe_carga_oficial
+        and cabe_paradas
+        and cabe_km
+        and passa_ocupacao
+        and cabe_restricao_veiculo
+    )
 
     return {
         "veiculo_tipo": veic["tipo"],
@@ -334,6 +443,7 @@ def _avaliar_combo_no_veiculo(
         "cabe_carga_oficial": cabe_carga_oficial,
         "cabe_paradas": cabe_paradas,
         "cabe_km": cabe_km,
+        "cabe_restricao_veiculo": cabe_restricao_veiculo,
         "ocupacao_oficial_perc": round(float(ocupacao_oficial * 100), 2) if pd.notna(ocupacao_oficial) else np.nan,
         "passa_ocupacao": passa_ocupacao,
         "ignorar_ocupacao_minima": bool(ignorar_ocupacao_minima),
@@ -374,17 +484,66 @@ def _consumir_veiculo_catalogo(
     catalogo_veiculos.at[catalogo_idx, "manifestos_utilizados"] = atual + 1
 
 
+def _score_prioridade_embarque(valor: Any) -> int:
+    if valor is None:
+        return 0
+
+    try:
+        if pd.isna(valor):
+            return 0
+    except Exception:
+        pass
+
+    try:
+        num = float(valor)
+        if num == 1:
+            return 120
+        if num == 2:
+            return 90
+        if num == 3:
+            return 60
+        if num == 4:
+            return 30
+        if num >= 5:
+            return 10
+    except Exception:
+        pass
+
+    texto = _normalizar_str(valor)
+    texto = "".join(
+        c for c in unicodedata.normalize("NFKD", texto)
+        if not unicodedata.combining(c)
+    )
+
+    mapa = {
+        "SIM": 120,
+        "ALTA": 120,
+        "ALTO": 120,
+        "URGENTE": 120,
+        "MEDIA": 60,
+        "MEDIO": 60,
+        "NORMAL": 30,
+        "BAIXA": 10,
+        "BAIXO": 10,
+        "NAO": 0,
+        "NÃO": 0,
+    }
+
+    return mapa.get(texto, 0)
+
+
 def _score_ordem_fila(row: pd.Series) -> Tuple[Any, ...]:
     exclusivo = 0 if _eh_exclusivo(row) else 1
 
-    prioridade_embarque = _num_safe(row.get("prioridade_embarque", np.nan), default=np.nan)
+    prioridade_embarque = row.get("prioridade_embarque", np.nan)
+    prioridade_score = _score_prioridade_embarque(prioridade_embarque)
     data_agenda = _scalar_safe(row.get("data_agenda", pd.NaT))
     folga = _num_safe(row.get("folga_dias", np.nan), default=np.nan)
     score = _num_safe(row.get("score_prioridade_preliminar", 0), default=0)
     km = _num_safe(row.get("distancia_rodoviaria_est_km", np.nan), default=np.nan)
     base_carga = _num_safe(row.get("peso_calculado", 0), default=0)
 
-    if pd.notna(prioridade_embarque) and int(prioridade_embarque) == 1:
+    if prioridade_score >= 120:
         grupo = 1
     elif pd.notna(data_agenda):
         grupo = 2
@@ -399,6 +558,7 @@ def _score_ordem_fila(row: pd.Series) -> Tuple[Any, ...]:
     return (
         exclusivo,
         grupo,
+        -prioridade_score,
         folga_ordem,
         -score,
         km_ordem,
@@ -486,16 +646,17 @@ def _gerar_subconjunto_guloso(
         restantes = trabalho.drop(index=idx_anchor).copy()
         restantes = restantes.sort_values("peso_calculado", ascending=not ordem_desc).reset_index(drop=True)
 
-        ordem_indices = [idx_anchor]
-        # reindexar restantes em sequência separada
-        restantes["_tmp_idx_local"] = np.arange(len(restantes))
-        # vamos trabalhar por linhas, depois remontar pelo conteúdo
         grupo = trabalho.loc[[idx_anchor]].copy().reset_index(drop=True)
 
         for _, row in restantes.iterrows():
             teste = pd.concat([grupo, row.to_frame().T], ignore_index=True)
             aval = _avaliar_combo_no_veiculo(teste, veic=veic, ignorar_ocupacao_minima=ignorar_ocupacao_minima)
-            if aval["cabe_carga_oficial"] and aval["cabe_paradas"] and aval["cabe_km"]:
+            if (
+                aval["cabe_carga_oficial"]
+                and aval["cabe_paradas"]
+                and aval["cabe_km"]
+                and aval["cabe_restricao_veiculo"]
+            ):
                 grupo = teste
 
         return grupo.reset_index(drop=True)
@@ -506,7 +667,12 @@ def _gerar_subconjunto_guloso(
     for _, row in trabalho.iterrows():
         teste = pd.concat([grupo, row.to_frame().T], ignore_index=True)
         aval = _avaliar_combo_no_veiculo(teste, veic=veic, ignorar_ocupacao_minima=ignorar_ocupacao_minima)
-        if aval["cabe_carga_oficial"] and aval["cabe_paradas"] and aval["cabe_km"]:
+        if (
+            aval["cabe_carga_oficial"]
+            and aval["cabe_paradas"]
+            and aval["cabe_km"]
+            and aval["cabe_restricao_veiculo"]
+        ):
             grupo = teste
 
     return grupo.reset_index(drop=True)
@@ -560,6 +726,17 @@ def _tentar_exclusivo_com_mesmo_cliente(
 
         aval = _avaliar_combo_no_veiculo(grupo, veic=veic, ignorar_ocupacao_minima=True)
         registro = {**aval, "resultado_teste": "aceito" if aval["aceito"] else "rejeitado"}
+        if not aval["aceito"]:
+            motivos = []
+            if not aval.get("cabe_carga_oficial", True):
+                motivos.append("excede_capacidade_peso_oficial")
+            if not aval.get("cabe_paradas", True):
+                motivos.append("excede_max_entregas")
+            if not aval.get("cabe_km", True):
+                motivos.append("excede_max_km")
+            if not aval.get("cabe_restricao_veiculo", True):
+                motivos.append("restricao_veiculo_incompativel")
+            registro["motivo_reprovacao"] = "|".join(motivos) if motivos else "exclusivo_nao_fechou"
         tentativas.append(registro)
 
         if aval["aceito"]:
@@ -610,6 +787,8 @@ def _tentar_fechamento_direto_linha(
                 motivos.append("excede_max_km")
             if not aval.get("passa_ocupacao", True):
                 motivos.append("nao_atinge_faixa_ocupacao_70_100")
+            if not aval.get("cabe_restricao_veiculo", True):
+                motivos.append("restricao_veiculo_incompativel")
             registro["motivo_reprovacao"] = "|".join(motivos) if motivos else "nao_fechou_direto"
 
         tentativas.append(registro)
@@ -672,6 +851,8 @@ def _tentar_cluster_mesmo_cliente_menor_para_maior(
                 motivos.append("excede_max_km")
             if not aval_full.get("passa_ocupacao", True):
                 motivos.append("nao_atinge_faixa_ocupacao_70_100")
+            if not aval_full.get("cabe_restricao_veiculo", True):
+                motivos.append("restricao_veiculo_incompativel")
             reg_full["motivo_reprovacao"] = "|".join(motivos) if motivos else "cluster_completo_nao_fechou"
 
         tentativas.append(reg_full)
@@ -725,6 +906,8 @@ def _tentar_cluster_mesmo_cliente_menor_para_maior(
                 motivos.append("excede_max_km")
             if not aval_sub.get("passa_ocupacao", True):
                 motivos.append("nao_atinge_faixa_ocupacao_70_100")
+            if not aval_sub.get("cabe_restricao_veiculo", True):
+                motivos.append("restricao_veiculo_incompativel")
             reg_sub["motivo_reprovacao"] = "|".join(motivos) if motivos else "subconjunto_nao_fechou"
 
         tentativas.append(reg_sub)
@@ -782,6 +965,8 @@ def _tentar_restante_cliente_maior_para_menor(
                 motivos.append("excede_max_km")
             if not aval_full.get("passa_ocupacao", True):
                 motivos.append("nao_atinge_faixa_ocupacao_70_100")
+            if not aval_full.get("cabe_restricao_veiculo", True):
+                motivos.append("restricao_veiculo_incompativel")
             reg_full["motivo_reprovacao"] = "|".join(motivos) if motivos else "restante_nao_fechou"
 
         tentativas.append(reg_full)
@@ -822,6 +1007,8 @@ def _tentar_restante_cliente_maior_para_menor(
                 motivos.append("excede_max_km")
             if not aval_sub.get("passa_ocupacao", True):
                 motivos.append("nao_atinge_faixa_ocupacao_70_100")
+            if not aval_sub.get("cabe_restricao_veiculo", True):
+                motivos.append("restricao_veiculo_incompativel")
             reg_sub["motivo_reprovacao"] = "|".join(motivos) if motivos else "restante_subconjunto_nao_fechou"
 
         tentativas.append(reg_sub)
@@ -903,6 +1090,7 @@ def executar_m4_manifestos_fechados(
         "qtd_tentativas_rejeitadas_km": 0,
         "qtd_tentativas_rejeitadas_paradas": 0,
         "qtd_tentativas_rejeitadas_capacidade": 0,
+        "qtd_tentativas_rejeitadas_restricao_veiculo": 0,
         "qtd_tentativas_sem_disponibilidade_frota": 0,
         "qtd_manifestos_exclusivos": 0,
         "qtd_manifestos_cliente_cluster": 0,
@@ -925,10 +1113,21 @@ def executar_m4_manifestos_fechados(
     fila = _garantir_coluna_por_alias(fila, "cidade", ["Cidade Dest.", "Cida", "cidade_dest", "cidade_destino"], default=np.nan)
     fila = _garantir_coluna_por_alias(fila, "uf", ["UF"], default=np.nan)
     fila = _garantir_coluna_por_alias(fila, "peso_kg", ["Peso", "peso"], default=np.nan)
-    fila = _garantir_coluna_por_alias(fila, "vol_m3", ["Peso C", "peso_c", "cubagem_m3"], default=np.nan)
-    fila = _garantir_coluna_por_alias(fila, "peso_calculado", ["Peso Calculado", "peso_calc"], default=np.nan)
-    fila = _garantir_coluna_por_alias(fila, "veiculo_exclusivo", ["Veiculo Exclusivo", "veiculo_dedicado"], default=np.nan)
-    fila = _garantir_coluna_por_alias(fila, "veiculo_exclusivo_flag", ["flag_veiculo_exclusivo", "veiculo_exclusivo_bool"], default=False)
+    fila = _garantir_coluna_por_alias(fila, "vol_m3", ["Peso C", "Peso Cub.", "peso_c", "cubagem_m3"], default=np.nan)
+    fila = _garantir_coluna_por_alias(fila, "peso_calculado", ["Peso Calculado", "Peso Calculo", "peso_calc"], default=np.nan)
+    fila = _garantir_coluna_por_alias(
+        fila,
+        "veiculo_exclusivo",
+        ["Veiculo Exclusivo", "Carro Dedicado", "veiculo_dedicado", "carro_dedicado"],
+        default=np.nan,
+    )
+    fila = _garantir_coluna_por_alias(
+        fila,
+        "veiculo_exclusivo_flag",
+        ["flag_veiculo_exclusivo", "veiculo_exclusivo_bool"],
+        default=False,
+    )
+    fila = _garantir_coluna_por_alias(fila, "restricao_veiculo", ["Restrição Veículo", "restricao_veiculo"], default=np.nan)
     fila = _garantir_coluna_por_alias(fila, "prioridade_embarque", ["Prioridade", "prioridade"], default=np.nan)
     fila = _garantir_coluna_por_alias(fila, "distancia_rodoviaria_est_km", ["km_referencia", "distancia_km", "km_rota_referencia"], default=np.nan)
     fila = _garantir_coluna_por_alias(fila, "status_triagem", ["status_roteirizacao", "status_fila"], default=np.nan)
@@ -940,7 +1139,7 @@ def executar_m4_manifestos_fechados(
     fila = _garantir_coluna_por_alias(fila, "id_linha_pipeline", ["id", "id_linha", "hash_linha_pipeline"], default=np.nan)
     fila = _garantir_coluna_por_alias(fila, "cte", ["nro_documento", "romaneio", "nro_doc", "Nro Doc."], default=np.nan)
     fila = _garantir_coluna_por_alias(fila, "mesorregiao", ["Mesoregião", "mesorregiao"], default=np.nan)
-    fila = _garantir_coluna_por_alias(fila, "subregiao", ["Sub-Região", "subregiao"], default=np.nan)
+    fila = _garantir_coluna_por_alias(fila, "subregiao", ["Sub-Região", "subregiao", "sub_regiao"], default=np.nan)
 
     coluna_tipo_veiculo = _resolver_coluna_tipo_veiculo(veiculos)
 
@@ -996,7 +1195,6 @@ def executar_m4_manifestos_fechados(
         "ranking_prioridade",
         "score_prioridade_preliminar",
         "folga_dias",
-        "prioridade_embarque",
     ]:
         if col in fila.columns:
             fila[col] = pd.to_numeric(fila[col], errors="coerce")
@@ -1018,6 +1216,9 @@ def executar_m4_manifestos_fechados(
     fila["ranking_prioridade"] = pd.to_numeric(fila["ranking_prioridade"], errors="coerce").fillna(999999)
     fila["score_prioridade_preliminar"] = pd.to_numeric(fila["score_prioridade_preliminar"], errors="coerce").fillna(0.0)
     fila["peso_calculado"] = pd.to_numeric(fila["peso_calculado"], errors="coerce")
+
+    if "restricao_veiculo" not in fila.columns:
+        fila["restricao_veiculo"] = np.nan
 
     if fila["peso_calculado"].isna().any():
         qtd_nulos = int(fila["peso_calculado"].isna().sum())
@@ -1058,6 +1259,8 @@ def executar_m4_manifestos_fechados(
             contadores_m4["qtd_tentativas_rejeitadas_paradas"] += 1
         if "excede_capacidade_peso_oficial" in motivo:
             contadores_m4["qtd_tentativas_rejeitadas_capacidade"] += 1
+        if "restricao_veiculo_incompativel" in motivo:
+            contadores_m4["qtd_tentativas_rejeitadas_restricao_veiculo"] += 1
 
     def _filtrar_nao_alocados(df_base: pd.DataFrame) -> pd.DataFrame:
         mask = ~df_base["id_linha_pipeline"].astype(str).isin(ids_alocados)
@@ -1078,7 +1281,6 @@ def executar_m4_manifestos_fechados(
 
         if ids_combo & ids_alocados:
             raise Exception("Manifesto inválido: há id_linha_pipeline já alocado em outro manifesto.")
-
 
         if not avaliacao.get("ignorar_ocupacao_minima", False):
             ocup = _num_safe(avaliacao.get("ocupacao_oficial_perc"), default=np.nan)
@@ -1172,7 +1374,6 @@ def executar_m4_manifestos_fechados(
     fila_nao_exclusiva = _filtrar_nao_alocados(fila_ordenada)
     fila_nao_exclusiva = fila_nao_exclusiva.loc[fila_nao_exclusiva["veiculo_exclusivo_flag"] == False].copy()
 
-    # agrupamento por cliente puro, nunca mistura cliente diferente
     clientes = list(dict.fromkeys(fila_nao_exclusiva["destinatario"].astype(str).tolist()))
     contadores_m4["qtd_clientes_nao_exclusivos"] = int(len(clientes))
 
@@ -1187,7 +1388,6 @@ def executar_m4_manifestos_fechados(
             if len(fila_cliente) == 0:
                 break
 
-            # 1) tenta cluster completo / subconjunto no menor -> maior
             resultado_primario = _tentar_cluster_mesmo_cliente_menor_para_maior(
                 base_cliente=fila_cliente,
                 catalogo_veiculos=catalogo_veiculos,
@@ -1215,7 +1415,6 @@ def executar_m4_manifestos_fechados(
                 contadores_m4["qtd_manifestos_cliente_cluster"] += 1
                 continue
 
-            # 2) tenta o restante do cliente do maior -> menor
             resultado_restante = _tentar_restante_cliente_maior_para_menor(
                 base_cliente=fila_cliente,
                 catalogo_veiculos=catalogo_veiculos,
@@ -1243,7 +1442,6 @@ def executar_m4_manifestos_fechados(
                 contadores_m4["qtd_manifestos_cliente_maior_menor"] += 1
                 continue
 
-            # nada mais fecha para esse cliente no M4
             break
 
     tempos_m4["4B2_4C_clientes_ms"] = _duracao_ms(t0)
@@ -1269,7 +1467,6 @@ def executar_m4_manifestos_fechados(
         if df_itens_manifestos_fechados_bloco_4["id_linha_pipeline"].astype(str).duplicated().any():
             raise Exception("Validação pós-M4 falhou: id_linha_pipeline repetido em mais de um item manifesto.")
 
-        # validar ocupação por manifesto pelo resumo, não somando linhas
         if len(df_manifestos_fechados_bloco_4) > 0:
             base_invalidos = df_manifestos_fechados_bloco_4.loc[
                 (~df_manifestos_fechados_bloco_4["ignorar_ocupacao_minima"])
@@ -1374,6 +1571,7 @@ def executar_m4_manifestos_fechados(
                     "ocupacao_minima_padrao": OCUPACAO_MINIMA_PADRAO,
                     "ocupacao_maxima_padrao": OCUPACAO_MAXIMA_PADRAO,
                     "modo_frota_respeita_quantidade_por_perfil": True,
+                    "respeita_restricao_veiculo": True,
                 },
                 "totais": {
                     "roteirizavel_entrada_m4": int(roteirizavel_entrada_m4),
