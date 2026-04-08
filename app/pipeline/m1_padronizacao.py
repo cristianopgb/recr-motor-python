@@ -149,8 +149,66 @@ def converter_coordenada(serie: pd.Series) -> pd.Series:
     return s.apply(_coord)
 
 
+def _limpar_texto_data(valor: Any) -> Any:
+    """
+    Higieniza datas vindas do dataset REC sem alterar a regra do pipeline.
+    Casos tratados:
+    - espaços extras
+    - vírgula/; no final: "26/12/2025 06:00:00,"
+    - placeholders textuais: "-", "null", "nan", etc.
+    - timestamps/datetime já prontos
+    """
+    if valor is None:
+        return np.nan
+
+    try:
+        resultado_isna = pd.isna(valor)
+        if isinstance(resultado_isna, (bool, np.bool_)) and bool(resultado_isna):
+            return np.nan
+    except Exception:
+        pass
+
+    if isinstance(valor, pd.Timestamp):
+        return valor
+
+    if isinstance(valor, datetime):
+        return pd.Timestamp(valor)
+
+    texto = str(valor).replace("\u00a0", " ")
+    texto = texto.strip()
+
+    # remove repetições de espaço
+    texto = re.sub(r"\s+", " ", texto)
+
+    # remove lixo comum no final/início
+    texto = re.sub(r"^[,;]+", "", texto)
+    texto = re.sub(r"[,;]+$", "", texto)
+    texto = texto.strip()
+
+    # placeholders usuais
+    texto_lower = texto.lower()
+    if texto_lower in {"", "-", "--", "null", "none", "nan", "nat", "n/a", "na"}:
+        return np.nan
+
+    return texto
+
+
 def converter_data(serie: pd.Series) -> pd.Series:
-    return pd.to_datetime(serie, errors="coerce", dayfirst=True)
+    serie_limpa = serie.apply(_limpar_texto_data)
+
+    # primeira tentativa: formato brasileiro / dataset REC
+    convertido = pd.to_datetime(serie_limpa, errors="coerce", dayfirst=True)
+
+    # fallback para o que sobrar em formatos ISO ou variantes
+    mask_falha = convertido.isna() & serie_limpa.notna()
+    if mask_falha.any():
+        convertido.loc[mask_falha] = pd.to_datetime(
+            serie_limpa.loc[mask_falha],
+            errors="coerce",
+            dayfirst=False
+        )
+
+    return convertido
 
 
 def _parse_hora_flex(valor: Any) -> Optional[time]:
@@ -202,8 +260,9 @@ def converter_flag_agendamento(serie: pd.Series) -> pd.Series:
         except Exception:
             pass
 
-        x = str(x).strip()
-        return x != ""
+        # aqui a regra é simples:
+        # se data_agenda existe após conversão, então é agendada
+        return True
 
     return serie.apply(_f)
 
@@ -297,7 +356,6 @@ def _garantir_colunas_carteira_v2(carteira: pd.DataFrame) -> pd.DataFrame:
     """
     Consolida layout novo e antigo em um conjunto estável de colunas brutas.
     """
-    # Layout V2 -> nomes padronizados após padronizar_nome_coluna
     carteira = _coalescer_colunas(carteira, "filial_r", ["filial_r", "filial"])
     carteira = _coalescer_colunas(carteira, "filial_d", ["filial_d", "filial_origem"])
     carteira = _coalescer_colunas(carteira, "peso_cub", ["peso_cub", "peso_c"])
@@ -477,15 +535,12 @@ def executar_m1_padronizacao(
         if c in carteira.columns:
             carteira[c] = converter_numerico_brasil(carteira[c])
 
-    # prioridade pode ser enum textual no novo dataset.
-    # então tenta numérico, mas preserva texto se não converter.
     if "prioridade_embarque" in carteira.columns:
         prioridade_num = converter_numerico_brasil(carteira["prioridade_embarque"])
         carteira["prioridade_embarque_num"] = prioridade_num
 
         carteira["prioridade_embarque"] = carteira["prioridade_embarque"].apply(normalizar_texto_basico)
 
-        # se converteu numericamente, usa a versão numérica como base oficial
         carteira["prioridade_embarque"] = carteira["prioridade_embarque"].where(
             prioridade_num.isna(),
             prioridade_num
@@ -495,6 +550,7 @@ def executar_m1_padronizacao(
         if c in carteira.columns:
             carteira[c] = converter_coordenada(carteira[c])
 
+    # normaliza textos antes do parse das datas, especialmente Agendam.
     for c in ["data_descarga", "data_nf", "data_leadtime", "data_agenda"]:
         if c in carteira.columns:
             carteira[c] = converter_data(carteira[c])
@@ -532,6 +588,7 @@ def executar_m1_padronizacao(
         if c in carteira.columns:
             carteira[c] = carteira[c].apply(normalizar_texto_basico)
 
+    # regra oficial: só Agendam. / data_agenda define se é agendada
     if "data_agenda" in carteira.columns:
         carteira["agendada"] = converter_flag_agendamento(carteira["data_agenda"])
     else:
@@ -542,7 +599,6 @@ def executar_m1_padronizacao(
     else:
         carteira["veiculo_exclusivo_flag"] = False
 
-    # usa peso calculado quando disponível, senão usa peso real
     if "peso_calculado" not in carteira.columns:
         carteira["peso_calculado"] = np.nan
 
@@ -554,7 +610,6 @@ def executar_m1_padronizacao(
         carteira["peso_kg"]
     )
 
-    # garante coluna canônica de exclusividade para os próximos módulos
     carteira["veiculo_exclusivo"] = carteira["veiculo_exclusivo_flag"]
 
     # --------------------------------------------------------
