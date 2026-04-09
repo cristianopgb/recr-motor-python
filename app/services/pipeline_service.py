@@ -31,6 +31,10 @@ def _safe_len(obj: Any) -> int:
 
 
 def _is_debug(payload: RoteirizacaoRequest) -> bool:
+    """
+    Não exige mudança imediata no schema.
+    Se no futuro existir payload.modo_debug ou payload.debug, ele passa a funcionar.
+    """
     for attr in ("modo_debug", "debug", "retornar_debug", "incluir_debug"):
         try:
             valor = getattr(payload, attr, False)
@@ -79,6 +83,9 @@ def _serializar_dataframe_para_records(
     df: pd.DataFrame,
     limit: int | None = None,
 ) -> List[Dict[str, Any]]:
+    """
+    Só usar quando realmente precisar devolver linhas no JSON.
+    """
     if df is None or df.empty:
         return []
 
@@ -145,15 +152,15 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         _log(
             modulo="payload_service",
             status="ok",
-            mensagem="Payload normalizado com sucesso",
-            quantidade_entrada=_safe_len(getattr(payload, "carteira", [])),
+            mensagem="Payload normalizado para o contexto interno do pipeline",
+            quantidade_entrada=_safe_len(contexto.df_carteira_raw),
             quantidade_saida=_safe_len(contexto.df_carteira_raw),
             tempo_ms=tempo_payload,
             extra={
                 "rodada_id": contexto.rodada_id,
                 "filial_id": contexto.filial_id,
-                "tipo_roteirizacao": contexto.tipo_roteirizacao,
                 "data_base_roteirizacao": contexto.data_base.isoformat(),
+                "tipo_roteirizacao": contexto.tipo_roteirizacao,
             },
         )
     )
@@ -162,7 +169,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     # M0 ADAPTER
     # =========================================================================================
     t0 = _agora()
-    m0 = _executar_m0_adapter(contexto)
+    resultado_m0 = _executar_m0_adapter(contexto)
     tempo_m0 = _duracao_ms(t0)
     metricas_tempo["m0_adapter_ms"] = tempo_m0
 
@@ -170,11 +177,15 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         _log(
             modulo="m0_adapter",
             status="ok",
-            mensagem="Adapter inicial executado com sucesso",
+            mensagem="M0 adaptado executado com sucesso",
             quantidade_entrada=_safe_len(contexto.df_carteira_raw),
-            quantidade_saida=_safe_len(m0["df_carteira_raw"]),
+            quantidade_saida=_safe_len(contexto.df_carteira_raw),
             tempo_ms=tempo_m0,
-            extra=m0["inventario"],
+            extra={
+                "filial": contexto.filial,
+                "data_base_roteirizacao": contexto.data_base.isoformat(),
+                "tipo_roteirizacao": contexto.tipo_roteirizacao,
+            },
         )
     )
 
@@ -182,29 +193,33 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     # M1
     # =========================================================================================
     t0 = _agora()
-    (
-        df_carteira_tratada,
-        df_geo_tratado,
-        df_parametros_tratados,
-        df_veiculos_tratados,
-        resumo_m1,
-    ) = executar_m1_padronizacao(
-        df_carteira_raw=m0["df_carteira_raw"],
-        df_geo_raw=m0["df_geo_raw"],
-        df_parametros_raw=m0["df_parametros_raw"],
-        df_veiculos_raw=m0["df_veiculos_raw"],
-        data_base_roteirizacao=contexto.data_base,
-        caminhos_pipeline=contexto.caminhos_pipeline,
+    resultado_m1 = executar_m1_padronizacao(
+        df_carteira_raw=resultado_m0["df_carteira_raw"],
+        df_geo_raw=resultado_m0["df_geo_raw"],
+        df_parametros_raw=resultado_m0["df_parametros_raw"],
+        df_veiculos_raw=resultado_m0["df_veiculos_raw"],
     )
     tempo_m1 = _duracao_ms(t0)
     metricas_tempo["m1_padronizacao_ms"] = tempo_m1
+
+    df_carteira_tratada = resultado_m1["df_carteira_tratada"]
+    df_geo_tratado = resultado_m1["df_geo_tratado"]
+    df_parametros_tratados = resultado_m1["df_parametros_tratados"]
+    df_veiculos_tratados = resultado_m1["df_veiculos_tratados"]
+
+    resumo_m1 = {
+        "carteira_colunas": int(len(df_carteira_tratada.columns)),
+        "geo_colunas": int(len(df_geo_tratado.columns)),
+        "parametros_colunas": int(len(df_parametros_tratados.columns)),
+        "veiculos_colunas": int(len(df_veiculos_tratados.columns)),
+    }
 
     logs.append(
         _log(
             modulo="m1_padronizacao",
             status="ok",
             mensagem="M1 executado com sucesso",
-            quantidade_entrada=_safe_len(m0["df_carteira_raw"]),
+            quantidade_entrada=_safe_len(contexto.df_carteira_raw),
             quantidade_saida=_safe_len(df_carteira_tratada),
             tempo_ms=tempo_m1,
             extra=resumo_m1,
@@ -341,7 +356,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         rodada_id=contexto.rodada_id,
         data_base_roteirizacao=contexto.data_base,
         tipo_roteirizacao=contexto.tipo_roteirizacao,
-        configuracao_frota=getattr(payload, "configuracao_frota", None),
+        configuracao_frota=payload.configuracao_frota,
         df_uso_frota_m4=df_uso_frota_m4,
         caminhos_pipeline=contexto.caminhos_pipeline,
     )
@@ -393,6 +408,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     if isinstance(meta_m4, dict):
         if "auditoria_m4" in meta_m4 and isinstance(meta_m4["auditoria_m4"], dict):
             auditoria_m4.update(meta_m4["auditoria_m4"])
+
         if "metricas_m4" in meta_m4 and isinstance(meta_m4["metricas_m4"], dict):
             auditoria_m4["metricas_m4"] = meta_m4["metricas_m4"]
 
@@ -408,6 +424,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     if isinstance(meta_m5_1, dict):
         if "auditoria_m5_1" in meta_m5_1 and isinstance(meta_m5_1["auditoria_m5_1"], dict):
             auditoria_m5_1.update(meta_m5_1["auditoria_m5_1"])
+
         if "metricas_m5_1" in meta_m5_1 and isinstance(meta_m5_1["metricas_m5_1"], dict):
             auditoria_m5_1["metricas_m5_1"] = meta_m5_1["metricas_m5_1"]
 
