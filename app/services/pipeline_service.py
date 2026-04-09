@@ -366,6 +366,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     manifestos_fechados = _serializar_dataframe_para_records(df_manifestos_fechados_bloco_4)
     itens_manifestos_fechados = _serializar_dataframe_para_records(df_itens_manifestos_fechados_bloco_4)
     nao_roteirizados = _serializar_dataframe_para_records(df_nao_roteirizados_bloco_4)
+    remanescente_m4 = nao_roteirizados
 
     colunas_preferenciais_remanescente = [
         "nro_documento",
@@ -404,6 +405,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         df_nao_roteirizados_resumido = df_nao_roteirizados_bloco_4.head(0).copy()
 
     nao_roteirizados_resumido = _serializar_dataframe_para_records(df_nao_roteirizados_resumido)
+    remanescente_m4_resumido = nao_roteirizados_resumido
 
     auditoria_m4 = {
         "total_tentativas": _safe_len(df_tentativas_fechamento_bloco_4),
@@ -471,7 +473,9 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         },
         "manifestos_fechados": manifestos_fechados,
         "itens_manifestos_fechados": itens_manifestos_fechados,
-        "remanescente_roteirizavel_resumido": nao_roteirizados_resumido,
+        "remanescente_m4": remanescente_m4,
+        "remanescente_m4_resumido": remanescente_m4_resumido,
+        "remanescente_roteirizavel_resumido": remanescente_m4_resumido,
         "nao_roteirizados_resumido": nao_roteirizados_resumido,
         "auditoria_m4": auditoria_m4,
         "manifestos_compostos": [],
@@ -539,6 +543,9 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                     df_remanescente_roteirizavel_bloco_4, limit=10
                 ),
                 "nao_roteirizados_bloco_4": _serializar_dataframe_para_records(
+                    df_nao_roteirizados_bloco_4, limit=10
+                ),
+                "remanescente_m4": _serializar_dataframe_para_records(
                     df_nao_roteirizados_bloco_4, limit=10
                 ),
                 "uso_frota_m4": _serializar_dataframe_para_records(df_uso_frota_m4, limit=10),
