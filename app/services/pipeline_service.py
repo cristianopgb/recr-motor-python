@@ -151,15 +151,15 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         _log(
             modulo="payload_service",
             status="ok",
-            mensagem="Payload normalizado para o contexto interno do pipeline",
-            quantidade_entrada=_safe_len(contexto.df_carteira_raw),
+            mensagem="Payload normalizado com sucesso",
+            quantidade_entrada=_safe_len(getattr(payload, "carteira", [])),
             quantidade_saida=_safe_len(contexto.df_carteira_raw),
             tempo_ms=tempo_payload,
             extra={
                 "rodada_id": contexto.rodada_id,
                 "filial_id": contexto.filial_id,
-                "data_base_roteirizacao": contexto.data_base.isoformat(),
                 "tipo_roteirizacao": contexto.tipo_roteirizacao,
+                "data_base_roteirizacao": contexto.data_base.isoformat(),
             },
         )
     )
@@ -168,7 +168,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     # M0 ADAPTER
     # =========================================================================================
     t0 = _agora()
-    resultado_m0 = _executar_m0_adapter(contexto)
+    m0 = _executar_m0_adapter(contexto)
     tempo_m0 = _duracao_ms(t0)
     metricas_tempo["m0_adapter_ms"] = tempo_m0
 
@@ -176,15 +176,11 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         _log(
             modulo="m0_adapter",
             status="ok",
-            mensagem="M0 adaptado executado com sucesso",
+            mensagem="Adapter inicial executado com sucesso",
             quantidade_entrada=_safe_len(contexto.df_carteira_raw),
-            quantidade_saida=_safe_len(contexto.df_carteira_raw),
+            quantidade_saida=_safe_len(m0["df_carteira_raw"]),
             tempo_ms=tempo_m0,
-            extra={
-                "filial": contexto.filial,
-                "data_base_roteirizacao": contexto.data_base.isoformat(),
-                "tipo_roteirizacao": contexto.tipo_roteirizacao,
-            },
+            extra=m0["inventario"],
         )
     )
 
@@ -192,34 +188,33 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     # M1
     # =========================================================================================
     t0 = _agora()
-    resultado_m1 = executar_m1_padronizacao(
-        df_carteira_raw=resultado_m0["df_carteira_raw"],
-        df_geo_raw=resultado_m0["df_geo_raw"],
-        df_parametros_raw=resultado_m0["df_parametros_raw"],
-        df_veiculos_raw=resultado_m0["df_veiculos_raw"],
+    outputs_m1, meta_m1 = executar_m1_padronizacao(
+        df_carteira_raw=m0["df_carteira_raw"],
+        df_geo_raw=m0["df_geo_raw"],
+        df_parametros_raw=m0["df_parametros_raw"],
+        df_veiculos_raw=m0["df_veiculos_raw"],
+        rodada_id=contexto.rodada_id,
+        data_base_roteirizacao=contexto.data_base,
+        caminhos_pipeline=contexto.caminhos_pipeline,
     )
     tempo_m1 = _duracao_ms(t0)
     metricas_tempo["m1_padronizacao_ms"] = tempo_m1
 
-    df_carteira_tratada = resultado_m1["df_carteira_tratada"]
-    df_geo_tratado = resultado_m1["df_geo_tratado"]
-    df_parametros_tratados = resultado_m1["df_parametros_tratados"]
-    df_veiculos_tratados = resultado_m1["df_veiculos_tratados"]
+    df_carteira_tratada = outputs_m1["df_carteira_tratada"]
+    df_geo_tratado = outputs_m1["df_geo_tratado"]
+    df_parametros_tratado = outputs_m1["df_parametros_tratado"]
+    df_veiculos_tratados = outputs_m1["df_veiculos_tratados"]
+    resumo_m1 = meta_m1["resumo_m1"]
 
     logs.append(
         _log(
             modulo="m1_padronizacao",
             status="ok",
             mensagem="M1 executado com sucesso",
-            quantidade_entrada=_safe_len(contexto.df_carteira_raw),
+            quantidade_entrada=_safe_len(m0["df_carteira_raw"]),
             quantidade_saida=_safe_len(df_carteira_tratada),
             tempo_ms=tempo_m1,
-            extra={
-                "carteira_colunas": int(len(df_carteira_tratada.columns)),
-                "geo_colunas": int(len(df_geo_tratado.columns)),
-                "parametros_colunas": int(len(df_parametros_tratados.columns)),
-                "veiculos_colunas": int(len(df_veiculos_tratados.columns)),
-            },
+            extra=resumo_m1,
         )
     )
 
@@ -227,15 +222,19 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     # M2
     # =========================================================================================
     t0 = _agora()
-    df_carteira_enriquecida, resumo_m2 = executar_m2_enriquecimento(
+    outputs_m2, meta_m2 = executar_m2_enriquecimento(
         df_carteira_tratada=df_carteira_tratada,
         df_geo_tratado=df_geo_tratado,
-        df_parametros_tratados=df_parametros_tratados,
+        df_parametros_tratado=df_parametros_tratado,
+        rodada_id=contexto.rodada_id,
         data_base_roteirizacao=contexto.data_base,
         caminhos_pipeline=contexto.caminhos_pipeline,
     )
     tempo_m2 = _duracao_ms(t0)
     metricas_tempo["m2_enriquecimento_ms"] = tempo_m2
+
+    df_carteira_enriquecida = outputs_m2["df_carteira_enriquecida"]
+    resumo_m2 = meta_m2["resumo_m2"]
 
     logs.append(
         _log(
@@ -253,21 +252,21 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     # M3
     # =========================================================================================
     t0 = _agora()
-    df_carteira_triagem, meta_m3 = executar_m3_triagem(
+    outputs_m3, meta_m3 = executar_m3_triagem(
         df_carteira_enriquecida=df_carteira_enriquecida,
+        rodada_id=contexto.rodada_id,
         data_base_roteirizacao=contexto.data_base,
         caminhos_pipeline=contexto.caminhos_pipeline,
     )
     tempo_m3 = _duracao_ms(t0)
     metricas_tempo["m3_triagem_ms"] = tempo_m3
 
-    outputs_m3 = meta_m3["outputs_m3"]
-    resumo_m3 = meta_m3["resumo_m3"]
-
+    df_carteira_triagem = outputs_m3["df_carteira_triagem"]
     df_carteira_roteirizavel = outputs_m3["df_carteira_roteirizavel"]
     df_carteira_agendamento_futuro = outputs_m3["df_carteira_agendamento_futuro"]
     df_carteira_agendas_vencidas = outputs_m3["df_carteira_agendas_vencidas"]
-    df_carteira_excecoes_triagem = outputs_m3.get("df_carteira_excecoes_triagem", pd.DataFrame())
+    df_carteira_excecoes_triagem = outputs_m3["df_carteira_excecoes_triagem"]
+    resumo_m3 = meta_m3["resumo_m3"]
 
     logs.append(
         _log(
@@ -285,14 +284,16 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     # M3.1
     # =========================================================================================
     t0 = _agora()
-    df_input_oficial_bloco_4, meta_m31 = executar_m3_1_validacao_fronteira(
+    outputs_m31, meta_m31 = executar_m3_1_validacao_fronteira(
         df_carteira_roteirizavel=df_carteira_roteirizavel,
+        rodada_id=contexto.rodada_id,
         data_base_roteirizacao=contexto.data_base,
         caminhos_pipeline=contexto.caminhos_pipeline,
     )
     tempo_m31 = _duracao_ms(t0)
     metricas_tempo["m3_1_validacao_fronteira_ms"] = tempo_m31
 
+    df_input_oficial_bloco_4 = outputs_m31["df_input_oficial_bloco_4"]
     resumo_m31 = meta_m31["resumo_m31"]
 
     logs.append(
@@ -331,21 +332,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     df_remanescente_roteirizavel_bloco_4 = outputs_m4["df_remanescente_roteirizavel_bloco_4"]
     df_uso_frota_m4 = outputs_m4.get("df_uso_frota_m4", pd.DataFrame())
 
-    # fonte oficial de auditoria do que não fechou no M4
-    df_nao_roteirizados_bloco_4 = outputs_m4.get("df_nao_roteirizados_bloco_4")
-    if df_nao_roteirizados_bloco_4 is None:
-        df_nao_roteirizados_bloco_4 = df_remanescente_roteirizavel_bloco_4.copy()
-
-        if len(df_nao_roteirizados_bloco_4) > 0:
-            if "status_roteirizacao" not in df_nao_roteirizados_bloco_4.columns:
-                df_nao_roteirizados_bloco_4["status_roteirizacao"] = "remanescente_bloco_4"
-            if "origem_bloco" not in df_nao_roteirizados_bloco_4.columns:
-                df_nao_roteirizados_bloco_4["origem_bloco"] = "M4"
-            if "segue_para_proximo_bloco" not in df_nao_roteirizados_bloco_4.columns:
-                df_nao_roteirizados_bloco_4["segue_para_proximo_bloco"] = True
-            if "motivo_nao_roteirizado" not in df_nao_roteirizados_bloco_4.columns:
-                df_nao_roteirizados_bloco_4["motivo_nao_roteirizado"] = "remanescente_nao_fechado_no_m4"
-
     logs.append(
         _log(
             modulo="m4_manifestos_fechados",
@@ -365,54 +351,12 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
 
     manifestos_fechados = _serializar_dataframe_para_records(df_manifestos_fechados_bloco_4)
     itens_manifestos_fechados = _serializar_dataframe_para_records(df_itens_manifestos_fechados_bloco_4)
-    nao_roteirizados = _serializar_dataframe_para_records(df_nao_roteirizados_bloco_4)
-    remanescente_m4 = nao_roteirizados
-
-    colunas_preferenciais_remanescente = [
-        "nro_documento",
-        "cte",
-        "destinatario",
-        "cidade",
-        "cidade_dest",
-        "uf",
-        "subregiao",
-        "sub_regiao",
-        "mesorregiao",
-        "peso_kg",
-        "peso_calculado",
-        "distancia_rodoviaria_est_km",
-        "data_leadtime",
-        "data_agenda",
-        "agendada",
-        "folga_dias",
-        "prioridade_embarque",
-        "restricao_veiculo",
-        "veiculo_exclusivo",
-        "status_triagem",
-        "motivo_triagem",
-        "status_roteirizacao",
-        "motivo_nao_roteirizado",
-        "origem_bloco",
-        "segue_para_proximo_bloco",
-    ]
-    colunas_existentes_remanescente = [
-        c for c in colunas_preferenciais_remanescente if c in df_nao_roteirizados_bloco_4.columns
-    ]
-
-    if colunas_existentes_remanescente:
-        df_nao_roteirizados_resumido = df_nao_roteirizados_bloco_4[colunas_existentes_remanescente].copy()
-    else:
-        df_nao_roteirizados_resumido = df_nao_roteirizados_bloco_4.head(0).copy()
-
-    nao_roteirizados_resumido = _serializar_dataframe_para_records(df_nao_roteirizados_resumido)
-    remanescente_m4_resumido = nao_roteirizados_resumido
 
     auditoria_m4 = {
         "total_tentativas": _safe_len(df_tentativas_fechamento_bloco_4),
         "total_manifestos_fechados": _safe_len(df_manifestos_fechados_bloco_4),
         "total_itens_manifestados": _safe_len(df_itens_manifestos_fechados_bloco_4),
         "total_remanescentes": _safe_len(df_remanescente_roteirizavel_bloco_4),
-        "total_nao_roteirizados_bloco_4": _safe_len(df_nao_roteirizados_bloco_4),
         "total_uso_frota_registros": _safe_len(df_uso_frota_m4),
     }
 
@@ -461,7 +405,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "total_manifestos_fechados_m4": _safe_len(df_manifestos_fechados_bloco_4),
             "total_itens_manifestados_m4": _safe_len(df_itens_manifestos_fechados_bloco_4),
             "total_remanescentes_m4": _safe_len(df_remanescente_roteirizavel_bloco_4),
-            "total_nao_roteirizados_bloco_4": _safe_len(df_nao_roteirizados_bloco_4),
+            "total_nao_roteirizados_bloco_4": _safe_len(df_remanescente_roteirizavel_bloco_4),
             "resumo_m2": resumo_m2,
             "resumo_m3": resumo_m3,
             "resumo_m31": resumo_m31,
@@ -473,14 +417,9 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         },
         "manifestos_fechados": manifestos_fechados,
         "itens_manifestos_fechados": itens_manifestos_fechados,
-        "remanescente_m4": remanescente_m4,
-        "remanescente_m4_resumido": remanescente_m4_resumido,
-        "remanescente_roteirizavel_resumido": remanescente_m4_resumido,
-        "nao_roteirizados_resumido": nao_roteirizados_resumido,
         "auditoria_m4": auditoria_m4,
         "manifestos_compostos": [],
         "itens_manifestos_compostos": [],
-        "nao_roteirizados": nao_roteirizados,
         "logs": logs,
     }
 
@@ -517,9 +456,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                 "remanescente_roteirizavel_bloco_4": _snapshot_dataframe(
                     df_remanescente_roteirizavel_bloco_4, "df_remanescente_roteirizavel_bloco_4"
                 ),
-                "nao_roteirizados_bloco_4": _snapshot_dataframe(
-                    df_nao_roteirizados_bloco_4, "df_nao_roteirizados_bloco_4"
-                ),
                 "uso_frota_m4": _snapshot_dataframe(df_uso_frota_m4, "df_uso_frota_m4"),
                 "regionalidades": _snapshot_dataframe(contexto.df_geo_raw, "df_geo_raw"),
                 "parametros": _snapshot_dataframe(contexto.df_parametros_raw, "df_parametros_raw"),
@@ -542,12 +478,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                 "remanescente_roteirizavel_bloco_4": _serializar_dataframe_para_records(
                     df_remanescente_roteirizavel_bloco_4, limit=10
                 ),
-                "nao_roteirizados_bloco_4": _serializar_dataframe_para_records(
-                    df_nao_roteirizados_bloco_4, limit=10
-                ),
-                "remanescente_m4": _serializar_dataframe_para_records(
-                    df_nao_roteirizados_bloco_4, limit=10
-                ),
                 "uso_frota_m4": _serializar_dataframe_para_records(df_uso_frota_m4, limit=10),
             },
             "outputs_intermediarios": {
@@ -563,9 +493,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                 ),
                 "df_remanescente_roteirizavel_bloco_4": _serializar_dataframe_para_records(
                     df_remanescente_roteirizavel_bloco_4
-                ),
-                "df_nao_roteirizados_bloco_4": _serializar_dataframe_para_records(
-                    df_nao_roteirizados_bloco_4
                 ),
                 "df_uso_frota_m4": _serializar_dataframe_para_records(df_uso_frota_m4),
             },
