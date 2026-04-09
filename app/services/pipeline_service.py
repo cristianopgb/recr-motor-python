@@ -31,10 +31,6 @@ def _safe_len(obj: Any) -> int:
 
 
 def _is_debug(payload: RoteirizacaoRequest) -> bool:
-    """
-    Não exige mudança imediata no schema.
-    Se no futuro existir payload.modo_debug ou payload.debug, ele passa a funcionar.
-    """
     for attr in ("modo_debug", "debug", "retornar_debug", "incluir_debug"):
         try:
             valor = getattr(payload, attr, False)
@@ -83,9 +79,6 @@ def _serializar_dataframe_para_records(
     df: pd.DataFrame,
     limit: int | None = None,
 ) -> List[Dict[str, Any]]:
-    """
-    Só usar quando realmente precisar devolver linhas no JSON.
-    """
     if df is None or df.empty:
         return []
 
@@ -189,23 +182,22 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     # M1
     # =========================================================================================
     t0 = _agora()
-    outputs_m1, meta_m1 = executar_m1_padronizacao(
+    (
+        df_carteira_tratada,
+        df_geo_tratado,
+        df_parametros_tratados,
+        df_veiculos_tratados,
+        resumo_m1,
+    ) = executar_m1_padronizacao(
         df_carteira_raw=m0["df_carteira_raw"],
         df_geo_raw=m0["df_geo_raw"],
         df_parametros_raw=m0["df_parametros_raw"],
         df_veiculos_raw=m0["df_veiculos_raw"],
-        rodada_id=contexto.rodada_id,
         data_base_roteirizacao=contexto.data_base,
         caminhos_pipeline=contexto.caminhos_pipeline,
     )
     tempo_m1 = _duracao_ms(t0)
     metricas_tempo["m1_padronizacao_ms"] = tempo_m1
-
-    df_carteira_tratada = outputs_m1["df_carteira_tratada"]
-    df_geo_tratado = outputs_m1["df_geo_tratado"]
-    df_parametros_tratado = outputs_m1["df_parametros_tratado"]
-    df_veiculos_tratados = outputs_m1["df_veiculos_tratados"]
-    resumo_m1 = meta_m1["resumo_m1"]
 
     logs.append(
         _log(
@@ -223,19 +215,15 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     # M2
     # =========================================================================================
     t0 = _agora()
-    outputs_m2, meta_m2 = executar_m2_enriquecimento(
+    df_carteira_enriquecida, resumo_m2 = executar_m2_enriquecimento(
         df_carteira_tratada=df_carteira_tratada,
         df_geo_tratado=df_geo_tratado,
-        df_parametros_tratado=df_parametros_tratado,
-        rodada_id=contexto.rodada_id,
+        df_parametros_tratados=df_parametros_tratados,
         data_base_roteirizacao=contexto.data_base,
         caminhos_pipeline=contexto.caminhos_pipeline,
     )
     tempo_m2 = _duracao_ms(t0)
     metricas_tempo["m2_enriquecimento_ms"] = tempo_m2
-
-    df_carteira_enriquecida = outputs_m2["df_carteira_enriquecida"]
-    resumo_m2 = meta_m2["resumo_m2"]
 
     logs.append(
         _log(
@@ -253,21 +241,21 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     # M3
     # =========================================================================================
     t0 = _agora()
-    outputs_m3, meta_m3 = executar_m3_triagem(
+    df_carteira_triagem, meta_m3 = executar_m3_triagem(
         df_carteira_enriquecida=df_carteira_enriquecida,
-        rodada_id=contexto.rodada_id,
         data_base_roteirizacao=contexto.data_base,
         caminhos_pipeline=contexto.caminhos_pipeline,
     )
     tempo_m3 = _duracao_ms(t0)
     metricas_tempo["m3_triagem_ms"] = tempo_m3
 
-    df_carteira_triagem = outputs_m3["df_carteira_triagem"]
+    outputs_m3 = meta_m3["outputs_m3"]
+    resumo_m3 = meta_m3["resumo_m3"]
+
     df_carteira_roteirizavel = outputs_m3["df_carteira_roteirizavel"]
     df_carteira_agendamento_futuro = outputs_m3["df_carteira_agendamento_futuro"]
     df_carteira_agendas_vencidas = outputs_m3["df_carteira_agendas_vencidas"]
-    df_carteira_excecoes_triagem = outputs_m3["df_carteira_excecoes_triagem"]
-    resumo_m3 = meta_m3["resumo_m3"]
+    df_carteira_excecoes_triagem = outputs_m3.get("df_carteira_excecoes_triagem", pd.DataFrame())
 
     logs.append(
         _log(
@@ -285,16 +273,14 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     # M3.1
     # =========================================================================================
     t0 = _agora()
-    outputs_m31, meta_m31 = executar_m3_1_validacao_fronteira(
+    df_input_oficial_bloco_4, meta_m31 = executar_m3_1_validacao_fronteira(
         df_carteira_roteirizavel=df_carteira_roteirizavel,
-        rodada_id=contexto.rodada_id,
         data_base_roteirizacao=contexto.data_base,
         caminhos_pipeline=contexto.caminhos_pipeline,
     )
     tempo_m31 = _duracao_ms(t0)
     metricas_tempo["m3_1_validacao_fronteira_ms"] = tempo_m31
 
-    df_input_oficial_bloco_4 = outputs_m31["df_input_oficial_bloco_4"]
     resumo_m31 = meta_m31["resumo_m31"]
 
     logs.append(
@@ -355,7 +341,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         rodada_id=contexto.rodada_id,
         data_base_roteirizacao=contexto.data_base,
         tipo_roteirizacao=contexto.tipo_roteirizacao,
-        configuracao_frota=payload.configuracao_frota,
+        configuracao_frota=getattr(payload, "configuracao_frota", None),
         df_uso_frota_m4=df_uso_frota_m4,
         caminhos_pipeline=contexto.caminhos_pipeline,
     )
@@ -407,7 +393,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     if isinstance(meta_m4, dict):
         if "auditoria_m4" in meta_m4 and isinstance(meta_m4["auditoria_m4"], dict):
             auditoria_m4.update(meta_m4["auditoria_m4"])
-
         if "metricas_m4" in meta_m4 and isinstance(meta_m4["metricas_m4"], dict):
             auditoria_m4["metricas_m4"] = meta_m4["metricas_m4"]
 
@@ -423,7 +408,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     if isinstance(meta_m5_1, dict):
         if "auditoria_m5_1" in meta_m5_1 and isinstance(meta_m5_1["auditoria_m5_1"], dict):
             auditoria_m5_1.update(meta_m5_1["auditoria_m5_1"])
-
         if "metricas_m5_1" in meta_m5_1 and isinstance(meta_m5_1["metricas_m5_1"], dict):
             auditoria_m5_1["metricas_m5_1"] = meta_m5_1["metricas_m5_1"]
 
@@ -433,9 +417,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     tempo_total = _duracao_ms(inicio_total)
     metricas_tempo["tempo_total_pipeline_ms"] = tempo_total
 
-    # =========================================================================================
-    # RESPOSTA PADRÃO
-    # =========================================================================================
     resposta: Dict[str, Any] = {
         "status": "ok",
         "mensagem": "Motor executou com sucesso até o M5.1.",
@@ -469,6 +450,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "total_itens_pre_manifestados_m5_1": _safe_len(df_itens_premanifestos_m5_1),
             "total_remanescentes_m5_1": _safe_len(df_remanescente_m5_1),
             "total_nao_roteirizados_bloco_5_1": _safe_len(df_nao_roteirizados_bloco_5_1),
+            "resumo_m1": resumo_m1,
             "resumo_m2": resumo_m2,
             "resumo_m3": resumo_m3,
             "resumo_m31": resumo_m31,
@@ -492,9 +474,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         "logs": logs,
     }
 
-    # =========================================================================================
-    # RESPOSTA DEBUG (OPCIONAL)
-    # =========================================================================================
     if debug:
         resposta["debug"] = {
             "snapshots": {
