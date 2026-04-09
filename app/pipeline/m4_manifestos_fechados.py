@@ -1,6 +1,4 @@
-from pathlib import Path
-
-content = r'''from __future__ import annotations
+from __future__ import annotations
 
 import json
 import re
@@ -1000,6 +998,14 @@ def _motivo_final_remanescente(
 
 
 def _montar_df_nao_roteirizados_bloco_4(df_remanescente: pd.DataFrame) -> pd.DataFrame:
+    """
+    Monta uma visão auditável do remanescente oficial do M4.
+
+    IMPORTANTE:
+    - isto NÃO representa o "não roteirizado final" do pipeline inteiro;
+    - isto representa o que sobrou após o fechamento do bloco 4 e seguirá para o M5;
+    - o objetivo é dar visibilidade no Swagger para auditoria operacional.
+    """
     if df_remanescente is None or len(df_remanescente) == 0:
         return pd.DataFrame()
 
@@ -1092,6 +1098,9 @@ def executar_m4_manifestos_fechados(
 
     persistir_artefatos = bool(caminhos_pipeline.get("persistir_artefatos", False))
 
+    # =========================================================================================
+    # PREPARAÇÃO
+    # =========================================================================================
     t0 = _agora()
 
     fila = _garantir_coluna_por_alias(fila, "destinatario", ["Destinatário", "cliente"], default=np.nan)
@@ -1222,6 +1231,9 @@ def executar_m4_manifestos_fechados(
     fila_ordenada = _ordenar_fila(fila)
     tempos_m4["preparacao_validacao_ms"] = _duracao_ms(t0)
 
+    # =========================================================================================
+    # EXECUÇÃO
+    # =========================================================================================
     manifestos_fechados: List[Dict[str, Any]] = []
     itens_manifestos_fechados: List[pd.DataFrame] = []
     tentativas_fechamento: List[Dict[str, Any]] = []
@@ -1303,6 +1315,9 @@ def executar_m4_manifestos_fechados(
         ids_alocados.update(ids_combo)
         _consumir_veiculo_catalogo(catalogo_veiculos, catalogo_idx, tipo_roteirizacao)
 
+    # -----------------------------------------
+    # 4B1 - EXCLUSIVOS
+    # -----------------------------------------
     t0 = _agora()
     exclusivos = _filtrar_nao_alocados(fila_ordenada)
     exclusivos = exclusivos.loc[exclusivos["veiculo_exclusivo_flag"] == True].copy().reset_index(drop=True)
@@ -1344,9 +1359,14 @@ def executar_m4_manifestos_fechados(
 
     tempos_m4["4B1_exclusivos_ms"] = _duracao_ms(t0)
 
+    # -----------------------------------------
+    # 4B2/4C - CLIENTES NÃO EXCLUSIVOS
+    # -----------------------------------------
     t0 = _agora()
+
     fila_nao_exclusiva = _filtrar_nao_alocados(fila_ordenada)
     fila_nao_exclusiva = fila_nao_exclusiva.loc[fila_nao_exclusiva["veiculo_exclusivo_flag"] == False].copy()
+
     clientes = list(dict.fromkeys(fila_nao_exclusiva["destinatario"].astype(str).tolist()))
     contadores_m4["qtd_clientes_nao_exclusivos"] = int(len(clientes))
 
@@ -1419,7 +1439,11 @@ def executar_m4_manifestos_fechados(
 
     tempos_m4["4B2_4C_clientes_ms"] = _duracao_ms(t0)
 
+    # -----------------------------------------
+    # VALIDAÇÃO DURA PÓS-M4
+    # -----------------------------------------
     t0 = _agora()
+
     df_manifestos_fechados_bloco_4 = pd.DataFrame(manifestos_fechados)
 
     df_itens_manifestos_fechados_bloco_4 = (
@@ -1429,6 +1453,7 @@ def executar_m4_manifestos_fechados(
     )
 
     df_tentativas_fechamento_bloco_4 = pd.DataFrame(tentativas_fechamento)
+
     df_remanescente_roteirizavel_bloco_4 = _filtrar_nao_alocados(fila).copy().reset_index(drop=True)
 
     if len(df_itens_manifestos_fechados_bloco_4) > 0:
@@ -1478,7 +1503,11 @@ def executar_m4_manifestos_fechados(
 
     tempos_m4["validacao_pos_m4_ms"] = _duracao_ms(t0)
 
+    # =========================================================================================
+    # PERSISTÊNCIA OPCIONAL
+    # =========================================================================================
     t0 = _agora()
+
     if persistir_artefatos:
         try:
             pasta_saida_base_str = caminhos_pipeline.get("pasta_saida_base")
@@ -1554,7 +1583,7 @@ def executar_m4_manifestos_fechados(
             }
 
             with open(arq_metadata_json, "w", encoding="utf-8") as f:
-                json.dump(metadata, f, ensure_ascii=False, indent=2, default=str)
+                json.dump(metadata, f, ensure_ascii=False, indent=4, default=str)
 
             caminhos_pipeline["df_manifestos_fechados_bloco_4_xlsx"] = str(arq_manifestos_xlsx)
             caminhos_pipeline["df_itens_manifestos_fechados_bloco_4_csv"] = str(arq_itens_csv)
@@ -1569,6 +1598,9 @@ def executar_m4_manifestos_fechados(
     tempos_m4["persistencia_artefatos_ms"] = _duracao_ms(t0)
     tempos_m4["tempo_total_m4_ms"] = _duracao_ms(inicio_total)
 
+    # =========================================================================================
+    # RESUMOS E METADADOS
+    # =========================================================================================
     resumo_m4 = {
         "modulo": "M4",
         "data_base_roteirizacao": pd.Timestamp(data_base_roteirizacao).isoformat(),
@@ -1582,6 +1614,7 @@ def executar_m4_manifestos_fechados(
         "exclusivos_entrada_m4": int((fila["veiculo_exclusivo_flag"] == True).sum()),
         "prioridade_embarque_1_entrada_m4": int((pd.to_numeric(fila["prioridade_embarque"], errors="coerce") == 1).sum()),
         "ocupacao_minima_padrao_perc": round(OCUPACAO_MINIMA_PADRAO * 100, 2),
+        "ocupacao_maxima_padrao_perc": round(OCUPACAO_MAXIMA_PADRAO * 100, 2),
         "persistiu_artefatos": persistir_artefatos,
         "caminhos_pipeline": caminhos_pipeline,
     }
@@ -1618,8 +1651,3 @@ def executar_m4_manifestos_fechados(
     }
 
     return outputs, meta
-'''
-path = Path('/mnt/data/m4_manifestos_fechados_corrigido.py')
-path.write_text(content, encoding='utf-8')
-print(path)
-
