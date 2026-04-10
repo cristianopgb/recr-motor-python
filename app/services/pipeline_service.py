@@ -15,6 +15,13 @@ from app.schemas import RoteirizacaoRequest
 from app.services.payload_service import PipelineContext, normalizar_payload_para_pipeline
 
 
+AMOSTRA_PADRAO_MANIFESTOS = 20
+AMOSTRA_PADRAO_ITENS = 50
+AMOSTRA_PADRAO_REMANESCENTE = 50
+AMOSTRA_PADRAO_TENTATIVAS = 30
+AMOSTRA_PADRAO_DEBUG = 10
+
+
 def _agora() -> float:
     return time.perf_counter()
 
@@ -71,6 +78,14 @@ def _log(
 
 
 def _snapshot_dataframe(df: pd.DataFrame, nome: str, max_colunas: int = 30) -> Dict[str, Any]:
+    if df is None:
+        return {
+            "nome": nome,
+            "linhas": 0,
+            "colunas": [],
+            "qtd_colunas_total": 0,
+        }
+
     return {
         "nome": nome,
         "linhas": int(len(df)),
@@ -85,11 +100,14 @@ def _serializar_dataframe_para_records(
 ) -> List[Dict[str, Any]]:
     """
     Só usar quando realmente precisar devolver linhas no JSON.
+    Nesta versão de diagnóstico, o padrão é sempre serializar amostras
+    e não o DataFrame inteiro, para reduzir peso da resposta.
     """
     if df is None or df.empty:
         return []
 
     df2 = df.copy()
+
     if limit is not None:
         df2 = df2.head(limit)
 
@@ -99,6 +117,28 @@ def _serializar_dataframe_para_records(
 
     df2 = df2.where(pd.notnull(df2), None)
     return df2.to_dict(orient="records")
+
+
+def _montar_resumo_dataframe(df: pd.DataFrame, nome: str) -> Dict[str, Any]:
+    return {
+        "nome": nome,
+        "total_linhas": _safe_len(df),
+        "qtd_colunas": int(len(df.columns)) if isinstance(df, pd.DataFrame) else 0,
+    }
+
+
+def _montar_bloco_saida_leve(
+    *,
+    nome: str,
+    df: pd.DataFrame,
+    limite_amostra: int,
+) -> Dict[str, Any]:
+    return {
+        "nome": nome,
+        "total_linhas": _safe_len(df),
+        "amostra_limite": limite_amostra,
+        "amostra": _serializar_dataframe_para_records(df, limit=limite_amostra),
+    }
 
 
 def _executar_m0_adapter(contexto: PipelineContext) -> Dict[str, Any]:
@@ -126,11 +166,6 @@ def _executar_m0_adapter(contexto: PipelineContext) -> Dict[str, Any]:
         "df_geo_raw": contexto.df_geo_raw,
         "df_parametros_raw": contexto.df_parametros_raw,
         "df_veiculos_raw": contexto.df_veiculos_raw,
-        "DATA_BASE": contexto.data_base,
-        "filial_rodada": contexto.filial,
-        "parametros_rodada": contexto.parametros_rodada,
-        "caminhos_pipeline": contexto.caminhos_pipeline,
-        "metadados_rodada": contexto.metadados_rodada,
     }
 
 
@@ -380,23 +415,19 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             quantidade_entrada=_safe_len(df_remanescente_roteirizavel_bloco_4),
             quantidade_saida=_safe_len(df_remanescente_m5_1),
             tempo_ms=tempo_m5_1,
-            extra=resumo_m5_1,
+            extra={
+                **resumo_m5_1,
+                "total_tentativas_m5_1": _safe_len(df_tentativas_m5_1),
+                "total_premanifestos_m5_1": _safe_len(df_premanifestos_m5_1),
+                "total_itens_premanifestos_m5_1": _safe_len(df_itens_premanifestos_m5_1),
+                "total_remanescente_m5_1": _safe_len(df_remanescente_m5_1),
+            },
         )
     )
 
     # =========================================================================================
-    # SERIALIZAÇÃO FINAL
+    # AUDITORIA M4
     # =========================================================================================
-    t0 = _agora()
-
-    manifestos_fechados = _serializar_dataframe_para_records(df_manifestos_fechados_bloco_4)
-    itens_manifestos_fechados = _serializar_dataframe_para_records(df_itens_manifestos_fechados_bloco_4)
-
-    pre_manifestos_m5_1 = _serializar_dataframe_para_records(df_premanifestos_m5_1)
-    itens_pre_manifestos_m5_1 = _serializar_dataframe_para_records(df_itens_premanifestos_m5_1)
-    remanescente_m5_1 = _serializar_dataframe_para_records(df_remanescente_m5_1)
-    nao_roteirizados_bloco_5_1 = _serializar_dataframe_para_records(df_nao_roteirizados_bloco_5_1)
-
     auditoria_m4 = {
         "total_tentativas": _safe_len(df_tentativas_fechamento_bloco_4),
         "total_manifestos_fechados": _safe_len(df_manifestos_fechados_bloco_4),
@@ -412,6 +443,9 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         if "metricas_m4" in meta_m4 and isinstance(meta_m4["metricas_m4"], dict):
             auditoria_m4["metricas_m4"] = meta_m4["metricas_m4"]
 
+    # =========================================================================================
+    # AUDITORIA M5.1
+    # =========================================================================================
     auditoria_m5_1 = {
         "total_tentativas": _safe_len(df_tentativas_m5_1),
         "total_pre_manifestos": _safe_len(df_premanifestos_m5_1),
@@ -428,6 +462,45 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         if "metricas_m5_1" in meta_m5_1 and isinstance(meta_m5_1["metricas_m5_1"], dict):
             auditoria_m5_1["metricas_m5_1"] = meta_m5_1["metricas_m5_1"]
 
+    # =========================================================================================
+    # SERIALIZAÇÃO FINAL LEVE
+    # =========================================================================================
+    t0 = _agora()
+
+    manifestos_fechados = _serializar_dataframe_para_records(
+        df_manifestos_fechados_bloco_4,
+        limit=AMOSTRA_PADRAO_MANIFESTOS,
+    )
+    itens_manifestos_fechados = _serializar_dataframe_para_records(
+        df_itens_manifestos_fechados_bloco_4,
+        limit=AMOSTRA_PADRAO_ITENS,
+    )
+    pre_manifestos_m5_1 = _serializar_dataframe_para_records(
+        df_premanifestos_m5_1,
+        limit=AMOSTRA_PADRAO_MANIFESTOS,
+    )
+    itens_pre_manifestos_m5_1 = _serializar_dataframe_para_records(
+        df_itens_premanifestos_m5_1,
+        limit=AMOSTRA_PADRAO_ITENS,
+    )
+    remanescente_m5_1 = _serializar_dataframe_para_records(
+        df_remanescente_m5_1,
+        limit=AMOSTRA_PADRAO_REMANESCENTE,
+    )
+
+    # Evita duplicar peso: este campo continua existindo por compatibilidade,
+    # mas leva a mesma amostra leve do remanescente do M5.1.
+    nao_roteirizados_bloco_5_1 = remanescente_m5_1
+
+    tentativas_m4_amostra = _serializar_dataframe_para_records(
+        df_tentativas_fechamento_bloco_4,
+        limit=AMOSTRA_PADRAO_TENTATIVAS,
+    )
+    tentativas_m5_1_amostra = _serializar_dataframe_para_records(
+        df_tentativas_m5_1,
+        limit=AMOSTRA_PADRAO_TENTATIVAS,
+    )
+
     tempo_serializacao = _duracao_ms(t0)
     metricas_tempo["serializacao_resposta_ms"] = tempo_serializacao
 
@@ -438,6 +511,8 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         "status": "ok",
         "mensagem": "Motor executou com sucesso até o M5.1.",
         "pipeline_real_ate": "M5.1",
+        "modo_resposta": "leve_diagnostico",
+        "resposta_truncada": True,
         "resumo_execucao": {
             "rodada_id": contexto.rodada_id,
             "upload_id": contexto.upload_id,
@@ -484,10 +559,26 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         "itens_pre_manifestos_m5_1": itens_pre_manifestos_m5_1,
         "remanescente_m5_1": remanescente_m5_1,
         "nao_roteirizados_bloco_5_1": nao_roteirizados_bloco_5_1,
-        "auditoria_m4": auditoria_m4,
-        "auditoria_m5_1": auditoria_m5_1,
         "manifestos_compostos": pre_manifestos_m5_1,
         "itens_manifestos_compostos": itens_pre_manifestos_m5_1,
+        "auditoria_m4": auditoria_m4,
+        "auditoria_m5_1": auditoria_m5_1,
+        "auditoria_serializacao": {
+            "manifestos_fechados_total": _safe_len(df_manifestos_fechados_bloco_4),
+            "manifestos_fechados_amostra": len(manifestos_fechados),
+            "itens_manifestos_fechados_total": _safe_len(df_itens_manifestos_fechados_bloco_4),
+            "itens_manifestos_fechados_amostra": len(itens_manifestos_fechados),
+            "pre_manifestos_m5_1_total": _safe_len(df_premanifestos_m5_1),
+            "pre_manifestos_m5_1_amostra": len(pre_manifestos_m5_1),
+            "itens_pre_manifestos_m5_1_total": _safe_len(df_itens_premanifestos_m5_1),
+            "itens_pre_manifestos_m5_1_amostra": len(itens_pre_manifestos_m5_1),
+            "remanescente_m5_1_total": _safe_len(df_remanescente_m5_1),
+            "remanescente_m5_1_amostra": len(remanescente_m5_1),
+        },
+        "amostras_auditoria": {
+            "tentativas_m4": tentativas_m4_amostra,
+            "tentativas_m5_1": tentativas_m5_1_amostra,
+        },
         "logs": logs,
     }
 
@@ -501,26 +592,32 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                 "carteira_roteirizavel": _snapshot_dataframe(df_carteira_roteirizavel, "df_carteira_roteirizavel"),
                 "input_oficial_bloco_4": _snapshot_dataframe(df_input_oficial_bloco_4, "df_input_oficial_bloco_4"),
                 "manifestos_fechados_bloco_4": _snapshot_dataframe(
-                    df_manifestos_fechados_bloco_4, "df_manifestos_fechados_bloco_4"
+                    df_manifestos_fechados_bloco_4,
+                    "df_manifestos_fechados_bloco_4",
                 ),
                 "itens_manifestos_fechados_bloco_4": _snapshot_dataframe(
-                    df_itens_manifestos_fechados_bloco_4, "df_itens_manifestos_fechados_bloco_4"
+                    df_itens_manifestos_fechados_bloco_4,
+                    "df_itens_manifestos_fechados_bloco_4",
                 ),
                 "tentativas_fechamento_bloco_4": _snapshot_dataframe(
-                    df_tentativas_fechamento_bloco_4, "df_tentativas_fechamento_bloco_4"
+                    df_tentativas_fechamento_bloco_4,
+                    "df_tentativas_fechamento_bloco_4",
                 ),
                 "remanescente_roteirizavel_bloco_4": _snapshot_dataframe(
-                    df_remanescente_roteirizavel_bloco_4, "df_remanescente_roteirizavel_bloco_4"
+                    df_remanescente_roteirizavel_bloco_4,
+                    "df_remanescente_roteirizavel_bloco_4",
                 ),
                 "uso_frota_m4": _snapshot_dataframe(df_uso_frota_m4, "df_uso_frota_m4"),
                 "pre_manifestos_m5_1": _snapshot_dataframe(df_premanifestos_m5_1, "df_premanifestos_m5_1"),
                 "itens_pre_manifestos_m5_1": _snapshot_dataframe(
-                    df_itens_premanifestos_m5_1, "df_itens_premanifestos_m5_1"
+                    df_itens_premanifestos_m5_1,
+                    "df_itens_premanifestos_m5_1",
                 ),
                 "tentativas_m5_1": _snapshot_dataframe(df_tentativas_m5_1, "df_tentativas_m5_1"),
                 "remanescente_m5_1": _snapshot_dataframe(df_remanescente_m5_1, "df_remanescente_m5_1"),
                 "nao_roteirizados_bloco_5_1": _snapshot_dataframe(
-                    df_nao_roteirizados_bloco_5_1, "df_nao_roteirizados_bloco_5_1"
+                    df_nao_roteirizados_bloco_5_1,
+                    "df_nao_roteirizados_bloco_5_1",
                 ),
                 "uso_frota_m5_1": _snapshot_dataframe(df_uso_frota_m5_1, "df_uso_frota_m5_1"),
                 "regionalidades": _snapshot_dataframe(contexto.df_geo_raw, "df_geo_raw"),
@@ -528,55 +625,119 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                 "veiculos": _snapshot_dataframe(contexto.df_veiculos_raw, "df_veiculos_raw"),
             },
             "amostras": {
-                "carteira_tratada": _serializar_dataframe_para_records(df_carteira_tratada, limit=5),
-                "carteira_enriquecida": _serializar_dataframe_para_records(df_carteira_enriquecida, limit=5),
-                "carteira_roteirizavel": _serializar_dataframe_para_records(df_carteira_roteirizavel, limit=5),
-                "input_oficial_bloco_4": _serializar_dataframe_para_records(df_input_oficial_bloco_4, limit=5),
+                "carteira_tratada": _serializar_dataframe_para_records(df_carteira_tratada, limit=AMOSTRA_PADRAO_DEBUG),
+                "carteira_enriquecida": _serializar_dataframe_para_records(
+                    df_carteira_enriquecida,
+                    limit=AMOSTRA_PADRAO_DEBUG,
+                ),
+                "carteira_roteirizavel": _serializar_dataframe_para_records(
+                    df_carteira_roteirizavel,
+                    limit=AMOSTRA_PADRAO_DEBUG,
+                ),
+                "input_oficial_bloco_4": _serializar_dataframe_para_records(
+                    df_input_oficial_bloco_4,
+                    limit=AMOSTRA_PADRAO_DEBUG,
+                ),
                 "manifestos_fechados_bloco_4": _serializar_dataframe_para_records(
-                    df_manifestos_fechados_bloco_4, limit=10
+                    df_manifestos_fechados_bloco_4,
+                    limit=AMOSTRA_PADRAO_DEBUG,
                 ),
                 "itens_manifestos_fechados_bloco_4": _serializar_dataframe_para_records(
-                    df_itens_manifestos_fechados_bloco_4, limit=10
+                    df_itens_manifestos_fechados_bloco_4,
+                    limit=AMOSTRA_PADRAO_DEBUG,
                 ),
                 "remanescente_roteirizavel_bloco_4": _serializar_dataframe_para_records(
-                    df_remanescente_roteirizavel_bloco_4, limit=10
+                    df_remanescente_roteirizavel_bloco_4,
+                    limit=AMOSTRA_PADRAO_DEBUG,
                 ),
-                "pre_manifestos_m5_1": _serializar_dataframe_para_records(df_premanifestos_m5_1, limit=10),
+                "pre_manifestos_m5_1": _serializar_dataframe_para_records(
+                    df_premanifestos_m5_1,
+                    limit=AMOSTRA_PADRAO_DEBUG,
+                ),
                 "itens_pre_manifestos_m5_1": _serializar_dataframe_para_records(
-                    df_itens_premanifestos_m5_1, limit=10
+                    df_itens_premanifestos_m5_1,
+                    limit=AMOSTRA_PADRAO_DEBUG,
                 ),
-                "tentativas_m5_1": _serializar_dataframe_para_records(df_tentativas_m5_1, limit=10),
-                "remanescente_m5_1": _serializar_dataframe_para_records(df_remanescente_m5_1, limit=10),
-                "nao_roteirizados_bloco_5_1": _serializar_dataframe_para_records(
-                    df_nao_roteirizados_bloco_5_1, limit=10
+                "tentativas_m5_1": _serializar_dataframe_para_records(
+                    df_tentativas_m5_1,
+                    limit=AMOSTRA_PADRAO_DEBUG,
                 ),
-                "uso_frota_m5_1": _serializar_dataframe_para_records(df_uso_frota_m5_1, limit=10),
+                "remanescente_m5_1": _serializar_dataframe_para_records(
+                    df_remanescente_m5_1,
+                    limit=AMOSTRA_PADRAO_DEBUG,
+                ),
+                "uso_frota_m5_1": _serializar_dataframe_para_records(
+                    df_uso_frota_m5_1,
+                    limit=AMOSTRA_PADRAO_DEBUG,
+                ),
             },
-            "outputs_intermediarios": {
-                "df_input_oficial_bloco_4": _serializar_dataframe_para_records(df_input_oficial_bloco_4),
-                "df_manifestos_fechados_bloco_4": _serializar_dataframe_para_records(
-                    df_manifestos_fechados_bloco_4
+            "resumos_dataframes": {
+                "carteira_raw": _montar_resumo_dataframe(contexto.df_carteira_raw, "df_carteira_raw"),
+                "carteira_tratada": _montar_resumo_dataframe(df_carteira_tratada, "df_carteira_tratada"),
+                "carteira_enriquecida": _montar_resumo_dataframe(df_carteira_enriquecida, "df_carteira_enriquecida"),
+                "carteira_triagem": _montar_resumo_dataframe(df_carteira_triagem, "df_carteira_triagem"),
+                "carteira_roteirizavel": _montar_resumo_dataframe(
+                    df_carteira_roteirizavel,
+                    "df_carteira_roteirizavel",
                 ),
-                "df_itens_manifestos_fechados_bloco_4": _serializar_dataframe_para_records(
-                    df_itens_manifestos_fechados_bloco_4
+                "input_oficial_bloco_4": _montar_resumo_dataframe(
+                    df_input_oficial_bloco_4,
+                    "df_input_oficial_bloco_4",
                 ),
-                "df_tentativas_fechamento_bloco_4": _serializar_dataframe_para_records(
-                    df_tentativas_fechamento_bloco_4
+                "manifestos_fechados_bloco_4": _montar_resumo_dataframe(
+                    df_manifestos_fechados_bloco_4,
+                    "df_manifestos_fechados_bloco_4",
                 ),
-                "df_remanescente_roteirizavel_bloco_4": _serializar_dataframe_para_records(
-                    df_remanescente_roteirizavel_bloco_4
+                "itens_manifestos_fechados_bloco_4": _montar_resumo_dataframe(
+                    df_itens_manifestos_fechados_bloco_4,
+                    "df_itens_manifestos_fechados_bloco_4",
                 ),
-                "df_uso_frota_m4": _serializar_dataframe_para_records(df_uso_frota_m4),
-                "df_premanifestos_m5_1": _serializar_dataframe_para_records(df_premanifestos_m5_1),
-                "df_itens_premanifestos_m5_1": _serializar_dataframe_para_records(
-                    df_itens_premanifestos_m5_1
+                "tentativas_fechamento_bloco_4": _montar_resumo_dataframe(
+                    df_tentativas_fechamento_bloco_4,
+                    "df_tentativas_fechamento_bloco_4",
                 ),
-                "df_tentativas_m5_1": _serializar_dataframe_para_records(df_tentativas_m5_1),
-                "df_remanescente_m5_1": _serializar_dataframe_para_records(df_remanescente_m5_1),
-                "df_nao_roteirizados_bloco_5_1": _serializar_dataframe_para_records(
-                    df_nao_roteirizados_bloco_5_1
+                "remanescente_roteirizavel_bloco_4": _montar_resumo_dataframe(
+                    df_remanescente_roteirizavel_bloco_4,
+                    "df_remanescente_roteirizavel_bloco_4",
                 ),
-                "df_uso_frota_m5_1": _serializar_dataframe_para_records(df_uso_frota_m5_1),
+                "pre_manifestos_m5_1": _montar_resumo_dataframe(
+                    df_premanifestos_m5_1,
+                    "df_premanifestos_m5_1",
+                ),
+                "itens_pre_manifestos_m5_1": _montar_resumo_dataframe(
+                    df_itens_premanifestos_m5_1,
+                    "df_itens_premanifestos_m5_1",
+                ),
+                "tentativas_m5_1": _montar_resumo_dataframe(df_tentativas_m5_1, "df_tentativas_m5_1"),
+                "remanescente_m5_1": _montar_resumo_dataframe(df_remanescente_m5_1, "df_remanescente_m5_1"),
+                "uso_frota_m5_1": _montar_resumo_dataframe(df_uso_frota_m5_1, "df_uso_frota_m5_1"),
+            },
+            "blocos_saida_leve": {
+                "manifestos_fechados": _montar_bloco_saida_leve(
+                    nome="manifestos_fechados",
+                    df=df_manifestos_fechados_bloco_4,
+                    limite_amostra=AMOSTRA_PADRAO_MANIFESTOS,
+                ),
+                "itens_manifestos_fechados": _montar_bloco_saida_leve(
+                    nome="itens_manifestos_fechados",
+                    df=df_itens_manifestos_fechados_bloco_4,
+                    limite_amostra=AMOSTRA_PADRAO_ITENS,
+                ),
+                "pre_manifestos_m5_1": _montar_bloco_saida_leve(
+                    nome="pre_manifestos_m5_1",
+                    df=df_premanifestos_m5_1,
+                    limite_amostra=AMOSTRA_PADRAO_MANIFESTOS,
+                ),
+                "itens_pre_manifestos_m5_1": _montar_bloco_saida_leve(
+                    nome="itens_pre_manifestos_m5_1",
+                    df=df_itens_premanifestos_m5_1,
+                    limite_amostra=AMOSTRA_PADRAO_ITENS,
+                ),
+                "remanescente_m5_1": _montar_bloco_saida_leve(
+                    nome="remanescente_m5_1",
+                    df=df_remanescente_m5_1,
+                    limite_amostra=AMOSTRA_PADRAO_REMANESCENTE,
+                ),
             },
         }
 
