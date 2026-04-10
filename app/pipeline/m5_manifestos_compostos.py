@@ -1,74 +1,38 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
 
 # =========================================================================================
-# M5.1 - MANIFESTOS COMPOSTOS
+# M5 - BLOCO DE COMPOSIÇÃO (VERSÃO ENXUTA PARA VALIDAÇÃO)
 # -----------------------------------------------------------------------------------------
-# CONTRATO:
-# - compatível com pipeline_service.py
-# - função principal: executar_m5_manifestos_compostos(...)
-# - retorno: outputs_m5_1, meta_m5_1
+# OBJETIVO DESTA VERSÃO
+# - manter contrato com pipeline_service.py
+# - receber SOMENTE o remanescente do M4
+# - executar composição por MESMA CIDADE
+# - eliminar cedo combinações inviáveis
+# - reduzir drasticamente a quantidade de cálculo
 #
-# LÓGICA DE NEGÓCIO PRESERVADA:
-# 1) entrada dura: só remanescente do M4
-# 2) fase 1: consolidação por mesmo cliente
-# 3) fase 2: saldo -> cidade -> subregião -> mesorregião
-# 4) regionalidade é UNIVERSO ELEGÍVEL, não bloco indivisível
-# 5) quando grupo cheio não fecha, tenta subconjunto viável
+# LÓGICA DESTA VERSÃO
+# 1) entrada dura = apenas remanescente do M4
+# 2) agrupa por cidade
+# 3) tenta primeiro o cluster completo
+# 4) testa veículos do MAIOR para o MENOR
+# 5) se cluster completo não fecha por capacidade / entregas / ocupação:
+#    vai retirando a última entrega do cluster e testa novamente
+# 6) se fechar, gera pré-manifesto
+# 7) se não fechar, volta para o saldo
 #
-# OTIMIZAÇÕES:
-# - pré-cálculo de colunas de ordenação e elegibilidade
-# - eliminação de apply(axis=1) nos loops críticos
-# - subconjunto viável incremental, sem recriar DataFrame a cada linha
-# - normalização de chaves e restrições uma vez só
-# - limpeza de colunas auxiliares antes de devolver as saídas
+# OBSERVAÇÃO
+# - esta versão não faz cidade -> subregião -> mesorregião no mesmo bloco
+# - ela é propositalmente mais simples para validar performance com dataset real
 # =========================================================================================
 
 
 # -----------------------------------------------------------------------------------------
-# Constantes
-# -----------------------------------------------------------------------------------------
-AUX_COLS_M5_1 = [
-    "_id_str_m5_1",
-    "_cliente_chave_m5_1",
-    "_cidade_key_m5_1",
-    "_subregiao_key_m5_1",
-    "_mesorregiao_key_m5_1",
-    "_destinatario_key_m5_1",
-    "_restricao_norm_m5_1",
-    "_peso_calc_m5_1",
-    "_vol_m3_m5_1",
-    "_km_ref_m5_1",
-    "_folga_m5_1",
-    "_prioridade_embarque_ord_m5_1",
-    "_ranking_oper_ord_m5_1",
-    "_agendada_bool_m5_1",
-    "_bucket_m5_1",
-    "_prioridade_ord_m5_1",
-    "_folga_ord_m5_1",
-    "_km_ord_m5_1",
-    "_peso_ord_m5_1",
-    "_elegivel_fase2_m5_1",
-    "_anchor_attempted_m5_1",
-]
-
-SORT_COLS_M5_1 = [
-    "_bucket_m5_1",
-    "_prioridade_ord_m5_1",
-    "_folga_ord_m5_1",
-    "_ranking_oper_ord_m5_1",
-    "_km_ord_m5_1",
-    "_peso_ord_m5_1",
-    "_id_str_m5_1",
-]
-
-
-# -----------------------------------------------------------------------------------------
-# Helpers
+# Helpers básicos
 # -----------------------------------------------------------------------------------------
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -103,21 +67,30 @@ def _safe_text(value: Any) -> str:
     return str(value).strip()
 
 
-def _safe_text_upper(value: Any) -> str:
-    return _safe_text(value).upper()
-
-
 def _ensure_column(df: pd.DataFrame, col: str, default: Any) -> None:
     if col not in df.columns:
         df[col] = default
 
 
-def _drop_aux_cols(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or not isinstance(df, pd.DataFrame):
-        return pd.DataFrame()
-    if df.empty:
+def _drop_internal_cols(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+    cols_internal = [
+        "_id_str_m5",
+        "_cidade_key_m5",
+        "_cliente_key_m5",
+        "_bucket_m5",
+        "_prioridade_ord_m5",
+        "_folga_ord_m5",
+        "_ranking_ord_m5",
+        "_km_ord_m5",
+        "_peso_ord_m5",
+    ]
+    existentes = [c for c in cols_internal if c in df.columns]
+    if not existentes:
         return df.copy()
-    return df.drop(columns=[c for c in AUX_COLS_M5_1 if c in df.columns], errors="ignore").copy()
+    return df.drop(columns=existentes, errors="ignore").copy()
 
 
 # -----------------------------------------------------------------------------------------
@@ -163,12 +136,14 @@ def _normalizar_inputs(
         "ranking_prioridade_operacional": pd.NA,
         "cte": pd.NA,
         "nro_documento": pd.NA,
+        "veiculo_exclusivo": False,
+        "veiculo_exclusivo_flag": False,
     }
     for col, default in defaults.items():
         _ensure_column(df, col, default)
 
     if df["id_linha_pipeline"].isna().any():
-        raise ValueError("M5.1 exige id_linha_pipeline em todas as linhas do remanescente do M4.")
+        raise ValueError("M5 exige id_linha_pipeline em todas as linhas do remanescente do M4.")
 
     if "peso_calculado" not in df.columns and "peso_c" in df.columns:
         df["peso_calculado"] = df["peso_c"]
@@ -199,7 +174,7 @@ def _normalizar_inputs(
             df[col] = df[col].apply(_safe_bool)
 
     if veic.empty:
-        raise ValueError("M5.1 exige df_veiculos_tratados.")
+        raise ValueError("M5 exige df_veiculos_tratados.")
 
     if "tipo" not in veic.columns and "perfil" in veic.columns:
         veic["tipo"] = veic["perfil"]
@@ -226,133 +201,124 @@ def _normalizar_inputs(
 
 
 # -----------------------------------------------------------------------------------------
-# Pré-cálculo
+# Ordenação operacional
 # -----------------------------------------------------------------------------------------
-def _precompute_df_inputs(df: pd.DataFrame) -> pd.DataFrame:
+def _fase_bucket(row: pd.Series) -> int:
+    prioridade_embarque = pd.to_numeric(
+        row.get("prioridade_embarque_num", row.get("prioridade_embarque", pd.NA)),
+        errors="coerce",
+    )
+    agendada = _safe_bool(row.get("agendada"))
+    folga = _safe_float(row.get("folga_dias"), 999)
+
+    if not pd.isna(prioridade_embarque) and _safe_float(prioridade_embarque, 0) > 0:
+        return 0
+    if agendada and folga == 0:
+        return 1
+    if agendada and folga == 1:
+        return 2
+    if (not agendada) and folga == 0:
+        return 3
+    if (not agendada) and folga == 1:
+        return 4
+    return 99
+
+
+def _precalcular_ordenacao(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df.copy()
 
-    out = df.copy()
+    temp = df.copy()
+    temp["_id_str_m5"] = temp["id_linha_pipeline"].astype(str)
+    temp["_cidade_key_m5"] = temp["cidade"].fillna("").astype(str).str.strip()
+    temp["_cliente_key_m5"] = temp["destinatario"].fillna("").astype(str).str.strip()
 
-    out["_id_str_m5_1"] = out["id_linha_pipeline"].astype(str)
-    out["_cliente_chave_m5_1"] = out["destinatario"].fillna("").astype(str).str.strip()
-    out["_cidade_key_m5_1"] = out["cidade"].fillna("").astype(str).str.strip()
-    out["_subregiao_key_m5_1"] = out["subregiao"].fillna("").astype(str).str.strip()
-    out["_mesorregiao_key_m5_1"] = out["mesorregiao"].fillna("").astype(str).str.strip()
-    out["_destinatario_key_m5_1"] = out["destinatario"].fillna("").astype(str).str.strip()
-    out["_restricao_norm_m5_1"] = out["restricao_veiculo"].fillna("").astype(str).str.strip().str.upper()
-
-    out["_peso_calc_m5_1"] = pd.to_numeric(out["peso_calculado"], errors="coerce").fillna(0.0)
-    out["_vol_m3_m5_1"] = pd.to_numeric(out["vol_m3"], errors="coerce").fillna(0.0)
-    out["_km_ref_m5_1"] = pd.to_numeric(out["distancia_rodoviaria_est_km"], errors="coerce").fillna(0.0)
-    out["_folga_m5_1"] = pd.to_numeric(out["folga_dias"], errors="coerce").fillna(999.0)
-
-    prioridade_num = pd.to_numeric(out["prioridade_embarque_num"], errors="coerce")
-    prioridade_raw = pd.to_numeric(out["prioridade_embarque"], errors="coerce")
-    out["_prioridade_embarque_ord_m5_1"] = prioridade_num.fillna(prioridade_raw)
-
-    ranking_oper = pd.to_numeric(out["ranking_prioridade_operacional"], errors="coerce")
-    out["_ranking_oper_ord_m5_1"] = ranking_oper.fillna(999.0)
-
-    out["_agendada_bool_m5_1"] = out["agendada"].apply(_safe_bool)
-
-    cond_prioridade_embarque = out["_prioridade_embarque_ord_m5_1"].notna() & (
-        out["_prioridade_embarque_ord_m5_1"] > 0
+    prioridade = pd.to_numeric(
+        temp["prioridade_embarque_num"].where(
+            temp["prioridade_embarque_num"].notna(),
+            temp["prioridade_embarque"],
+        ),
+        errors="coerce",
     )
-    cond_agendada = out["_agendada_bool_m5_1"]
-    cond_folga_0 = out["_folga_m5_1"] == 0
-    cond_folga_1 = out["_folga_m5_1"] == 1
+    folga = pd.to_numeric(temp["folga_dias"], errors="coerce").fillna(999)
+    ranking = pd.to_numeric(temp["ranking_prioridade_operacional"], errors="coerce").fillna(999)
+    km = pd.to_numeric(temp["distancia_rodoviaria_est_km"], errors="coerce").fillna(999999)
+    peso = pd.to_numeric(temp["peso_calculado"], errors="coerce").fillna(0.0)
 
-    out["_bucket_m5_1"] = 99
-    out.loc[cond_prioridade_embarque, "_bucket_m5_1"] = 0
-    out.loc[~cond_prioridade_embarque & cond_agendada & cond_folga_0, "_bucket_m5_1"] = 1
-    out.loc[~cond_prioridade_embarque & cond_agendada & cond_folga_1, "_bucket_m5_1"] = 2
-    out.loc[~cond_prioridade_embarque & ~cond_agendada & cond_folga_0, "_bucket_m5_1"] = 3
-    out.loc[~cond_prioridade_embarque & ~cond_agendada & cond_folga_1, "_bucket_m5_1"] = 4
+    buckets: List[int] = []
+    prioridade_ord: List[float] = []
 
-    out["_prioridade_ord_m5_1"] = out["_prioridade_embarque_ord_m5_1"].fillna(999.0)
-    out["_folga_ord_m5_1"] = out["_folga_m5_1"]
-    out["_km_ord_m5_1"] = out["_km_ref_m5_1"]
-    out["_peso_ord_m5_1"] = -out["_peso_calc_m5_1"]
-    out["_elegivel_fase2_m5_1"] = out["_bucket_m5_1"] < 99
+    for _, row in temp.iterrows():
+        buckets.append(_fase_bucket(row))
+        p = pd.to_numeric(
+            row.get("prioridade_embarque_num", row.get("prioridade_embarque", pd.NA)),
+            errors="coerce",
+        )
+        prioridade_ord.append(_safe_float(p, 999.0) if not pd.isna(p) else 999.0)
 
-    return out
+    temp["_bucket_m5"] = buckets
+    temp["_prioridade_ord_m5"] = prioridade_ord
+    temp["_folga_ord_m5"] = folga
+    temp["_ranking_ord_m5"] = ranking
+    temp["_km_ord_m5"] = km
+    temp["_peso_ord_m5"] = -peso
 
-
-def _precompute_df_veiculos(df_veiculos: pd.DataFrame) -> pd.DataFrame:
-    if df_veiculos.empty:
-        return df_veiculos.copy()
-
-    out = df_veiculos.copy()
-    out["_tipo_upper_m5_1"] = out["tipo"].fillna("").astype(str).str.strip().str.upper()
-    out["_perfil_upper_m5_1"] = out["perfil"].fillna("").astype(str).str.strip().str.upper()
-    out["_cap_peso_m5_1"] = pd.to_numeric(out["capacidade_peso_kg"], errors="coerce").fillna(0.0)
-    out["_cap_vol_m5_1"] = pd.to_numeric(out["capacidade_vol_m3"], errors="coerce").fillna(0.0)
-    out["_max_entregas_m5_1"] = pd.to_numeric(out["max_entregas"], errors="coerce").fillna(0).astype(int)
-    out["_max_km_m5_1"] = pd.to_numeric(out["max_km_distancia"], errors="coerce").fillna(0.0)
-    out["_ocup_min_m5_1"] = pd.to_numeric(out["ocupacao_minima_perc"], errors="coerce").fillna(70.0)
-    out["_ocup_max_m5_1"] = pd.to_numeric(out["ocupacao_maxima_perc"], errors="coerce").fillna(100.0)
-    return out
+    return temp
 
 
-# -----------------------------------------------------------------------------------------
-# Ordenação / veículos
-# -----------------------------------------------------------------------------------------
 def _ordenar_operacional(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df.copy()
-    presentes = [c for c in SORT_COLS_M5_1 if c in df.columns]
-    if not presentes:
-        return df.reset_index(drop=True)
-    return df.sort_values(presentes, ascending=[True] * len(presentes), kind="mergesort").reset_index(drop=True)
+
+    if "_bucket_m5" not in df.columns:
+        df = _precalcular_ordenacao(df)
+
+    return (
+        df.sort_values(
+            by=[
+                "_bucket_m5",
+                "_prioridade_ord_m5",
+                "_folga_ord_m5",
+                "_ranking_ord_m5",
+                "_km_ord_m5",
+                "_peso_ord_m5",
+                "_id_str_m5",
+            ],
+            ascending=[True, True, True, True, True, True, True],
+            kind="mergesort",
+        )
+        .reset_index(drop=True)
+        .copy()
+    )
 
 
+# -----------------------------------------------------------------------------------------
+# Veículos
+# -----------------------------------------------------------------------------------------
 def _veiculos_maior_para_menor(df_veiculos: pd.DataFrame) -> pd.DataFrame:
     temp = df_veiculos.copy()
-    temp = temp.sort_values(
-        ["_cap_peso_m5_1", "_cap_vol_m5_1"],
-        ascending=[False, False],
-        kind="mergesort",
+    temp["_cap_peso"] = temp["capacidade_peso_kg"].fillna(0)
+    temp["_cap_vol"] = temp["capacidade_vol_m3"].fillna(0)
+    temp = (
+        temp.sort_values(["_cap_peso", "_cap_vol"], ascending=[False, False], kind="mergesort")
+        .drop(columns=["_cap_peso", "_cap_vol"])
+        .reset_index(drop=True)
     )
-    return temp.reset_index(drop=True)
+    return temp
 
 
-# -----------------------------------------------------------------------------------------
-# Restrições
-# -----------------------------------------------------------------------------------------
-def _restricao_compatível(df_itens: pd.DataFrame, vehicle_row: pd.Series) -> bool:
-    if "restricao_veiculo" not in df_itens.columns and "_restricao_norm_m5_1" not in df_itens.columns:
+def _veiculo_compatível_com_restricoes(df_itens: pd.DataFrame, vehicle_row: pd.Series) -> bool:
+    if "restricao_veiculo" not in df_itens.columns:
         return True
 
-    if "_restricao_norm_m5_1" in df_itens.columns:
-        restricoes = {
-            v for v in df_itens["_restricao_norm_m5_1"].tolist() if isinstance(v, str) and v.strip()
-        }
-    else:
-        restricoes = set()
-        for value in df_itens["restricao_veiculo"].tolist():
-            txt = _safe_text_upper(value)
-            if txt:
-                restricoes.add(txt)
+    tipo = _safe_text(vehicle_row.get("tipo")).upper()
+    perfil = _safe_text(vehicle_row.get("perfil")).upper()
 
-    if not restricoes:
-        return True
-
-    tipo = _safe_text_upper(vehicle_row.get("tipo"))
-    perfil = _safe_text_upper(vehicle_row.get("perfil"))
-
-    for restr in restricoes:
-        if restr not in {tipo, perfil}:
+    for value in df_itens["restricao_veiculo"].tolist():
+        txt = _safe_text(value).upper()
+        if txt and txt not in {tipo, perfil}:
             return False
     return True
-
-
-def _restricao_item_compativel_com_veiculo(restricao_norm: str, vehicle_row: pd.Series) -> bool:
-    if not restricao_norm:
-        return True
-    tipo = _safe_text_upper(vehicle_row.get("tipo"))
-    perfil = _safe_text_upper(vehicle_row.get("perfil"))
-    return restricao_norm in {tipo, perfil}
 
 
 # -----------------------------------------------------------------------------------------
@@ -361,32 +327,24 @@ def _restricao_item_compativel_com_veiculo(restricao_norm: str, vehicle_row: pd.
 def _qtd_paradas(df_itens: pd.DataFrame) -> int:
     if df_itens.empty:
         return 0
-    if "_destinatario_key_m5_1" in df_itens.columns:
-        return int(df_itens["_destinatario_key_m5_1"].nunique())
     return int(df_itens["destinatario"].fillna("").astype(str).nunique())
 
 
 def _peso_total(df_itens: pd.DataFrame) -> float:
     if df_itens.empty:
         return 0.0
-    if "_peso_calc_m5_1" in df_itens.columns:
-        return float(df_itens["_peso_calc_m5_1"].sum())
     return float(df_itens["peso_calculado"].fillna(0).sum())
 
 
 def _volume_total(df_itens: pd.DataFrame) -> float:
     if df_itens.empty:
         return 0.0
-    if "_vol_m3_m5_1" in df_itens.columns:
-        return float(df_itens["_vol_m3_m5_1"].sum())
     return float(df_itens["vol_m3"].fillna(0).sum())
 
 
 def _km_referencia(df_itens: pd.DataFrame) -> float:
     if df_itens.empty:
         return 0.0
-    if "_km_ref_m5_1" in df_itens.columns:
-        return float(df_itens["_km_ref_m5_1"].max())
     return float(df_itens["distancia_rodoviaria_est_km"].fillna(0).max())
 
 
@@ -404,7 +362,7 @@ def _validar_hard_constraints(df_itens: pd.DataFrame, vehicle_row: pd.Series) ->
     if df_itens.empty:
         return False, "grupo_vazio"
 
-    if not _restricao_compatível(df_itens, vehicle_row):
+    if not _veiculo_compatível_com_restricoes(df_itens, vehicle_row):
         return False, "restricao_veiculo_incompativel"
 
     peso_total = _peso_total(df_itens)
@@ -448,44 +406,13 @@ def _validar_fechamento(df_itens: pd.DataFrame, vehicle_row: pd.Series) -> Tuple
     return True, "ok"
 
 
-def _validar_metricas_incrementais_hard(
-    *,
-    peso_total: float,
-    volume_total: float,
-    qtd_paradas: int,
-    km_ref: float,
-    vehicle_row: pd.Series,
-) -> Tuple[bool, str]:
-    cap_peso = _safe_float(vehicle_row.get("capacidade_peso_kg"), 0.0)
-    cap_vol = _safe_float(vehicle_row.get("capacidade_vol_m3"), 0.0)
-    max_entregas = _safe_int(vehicle_row.get("max_entregas"), 0)
-    max_km = _safe_float(vehicle_row.get("max_km_distancia"), 0.0)
-    ocup_max = _safe_float(vehicle_row.get("ocupacao_maxima_perc"), 100.0)
-
-    if cap_peso > 0 and peso_total > cap_peso:
-        return False, "excede_capacidade_peso"
-    if cap_vol > 0 and volume_total > cap_vol:
-        return False, "excede_capacidade_volume"
-    if max_entregas > 0 and qtd_paradas > max_entregas:
-        return False, "excede_max_entregas"
-    if max_km > 0 and km_ref > max_km:
-        return False, "excede_max_km"
-
-    if cap_peso > 0:
-        ocup = (peso_total / cap_peso) * 100.0
-        if ocup > ocup_max:
-            return False, "excede_ocupacao_maxima"
-
-    return True, "ok"
-
-
 # -----------------------------------------------------------------------------------------
 # Auditoria
 # -----------------------------------------------------------------------------------------
 def _tentativa_dict(
     fase: str,
     camada: str,
-    anchor_id: Optional[str],
+    cluster_chave: Optional[str],
     vehicle_row: Optional[pd.Series],
     resultado: str,
     motivo: str,
@@ -495,7 +422,7 @@ def _tentativa_dict(
     return {
         "fase": fase,
         "camada": camada,
-        "anchor_id_linha_pipeline": anchor_id,
+        "cluster_chave": cluster_chave,
         "veiculo_tipo_tentado": None if vehicle_row is None else _safe_text(vehicle_row.get("tipo")),
         "resultado": resultado,
         "motivo": motivo,
@@ -524,8 +451,10 @@ def _build_manifesto(
     fase: str,
     camada: str,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    qtd_itens = int(len(df_itens))
-    qtd_ctes = int(df_itens["cte"].nunique(dropna=True)) if "cte" in df_itens.columns else qtd_itens
+    df_itens_limpo = _drop_internal_cols(df_itens)
+
+    qtd_itens = int(len(df_itens_limpo))
+    qtd_ctes = int(df_itens_limpo["cte"].nunique(dropna=True)) if "cte" in df_itens_limpo.columns else qtd_itens
 
     manifesto = {
         "manifesto_id": manifesto_id,
@@ -533,12 +462,12 @@ def _build_manifesto(
         "veiculo_tipo": _safe_text(vehicle_row.get("tipo")),
         "qtd_itens": qtd_itens,
         "qtd_ctes": qtd_ctes,
-        "qtd_paradas": _qtd_paradas(df_itens),
-        "base_carga_oficial": round(_peso_total(df_itens), 3),
-        "peso_total_kg": round(_peso_total(df_itens), 3),
-        "vol_total_m3": round(_volume_total(df_itens), 3),
-        "km_referencia": round(_km_referencia(df_itens), 2),
-        "ocupacao_oficial_perc": round(_ocupacao_perc(df_itens, vehicle_row), 2),
+        "qtd_paradas": _qtd_paradas(df_itens_limpo),
+        "base_carga_oficial": round(_peso_total(df_itens_limpo), 3),
+        "peso_total_kg": round(_peso_total(df_itens_limpo), 3),
+        "vol_total_m3": round(_volume_total(df_itens_limpo), 3),
+        "km_referencia": round(_km_referencia(df_itens_limpo), 2),
+        "ocupacao_oficial_perc": round(_ocupacao_perc(df_itens_limpo, vehicle_row), 2),
         "capacidade_peso_kg_veiculo": _safe_float(vehicle_row.get("capacidade_peso_kg"), 0.0),
         "capacidade_vol_m3_veiculo": _safe_float(vehicle_row.get("capacidade_vol_m3"), 0.0),
         "max_entregas_veiculo": _safe_int(vehicle_row.get("max_entregas"), 0),
@@ -549,7 +478,7 @@ def _build_manifesto(
     }
 
     df_manifesto = pd.DataFrame([manifesto])
-    df_itens_saida = df_itens.copy()
+    df_itens_saida = df_itens_limpo.copy()
     for k, v in manifesto.items():
         df_itens_saida[k] = v
 
@@ -557,191 +486,173 @@ def _build_manifesto(
 
 
 # -----------------------------------------------------------------------------------------
-# Fase 1
+# Batida mínima de viabilidade do cluster
 # -----------------------------------------------------------------------------------------
-def _tentar_fechar_grupo_inteiro(
-    df_grupo: pd.DataFrame,
+def _motivo_cluster_impossivel_por_raio(cluster_df: pd.DataFrame, veiculos_ordenados: pd.DataFrame) -> Optional[str]:
+    km_cluster = _km_referencia(cluster_df)
+    if veiculos_ordenados.empty:
+        return "sem_veiculos"
+
+    compativeis = veiculos_ordenados[
+        pd.to_numeric(veiculos_ordenados["max_km_distancia"], errors="coerce").fillna(0) >= km_cluster
+    ].copy()
+
+    if compativeis.empty:
+        return "sem_veiculo_compativel_por_raio"
+
+    return None
+
+
+def _menor_veiculo_compativel_por_raio(cluster_df: pd.DataFrame, veiculos_ordenados: pd.DataFrame) -> Optional[pd.Series]:
+    km_cluster = _km_referencia(cluster_df)
+    compativeis = veiculos_ordenados[
+        pd.to_numeric(veiculos_ordenados["max_km_distancia"], errors="coerce").fillna(0) >= km_cluster
+    ].copy()
+
+    if compativeis.empty:
+        return None
+
+    compativeis["_cap_tmp"] = pd.to_numeric(compativeis["capacidade_peso_kg"], errors="coerce").fillna(0)
+    compativeis = compativeis.sort_values("_cap_tmp", ascending=True, kind="mergesort").drop(columns=["_cap_tmp"])
+    return compativeis.iloc[0].copy()
+
+
+def _cluster_cheio_nem_atinge_minimo_do_menor(cluster_df: pd.DataFrame, veiculos_ordenados: pd.DataFrame) -> bool:
+    menor = _menor_veiculo_compativel_por_raio(cluster_df, veiculos_ordenados)
+    if menor is None:
+        return False
+
+    cap_peso = _safe_float(menor.get("capacidade_peso_kg"), 0.0)
+    ocup_min = _safe_float(menor.get("ocupacao_minima_perc"), 70.0)
+    peso_total = _peso_total(cluster_df)
+
+    if cap_peso <= 0:
+        return False
+
+    peso_minimo = cap_peso * (ocup_min / 100.0)
+    return peso_total < peso_minimo
+
+
+# -----------------------------------------------------------------------------------------
+# Tenta cluster da cidade
+# -----------------------------------------------------------------------------------------
+def _tentar_cluster_cidade(
+    cluster_df: pd.DataFrame,
     veiculos_ordenados: pd.DataFrame,
     tentativas: List[Dict[str, Any]],
 ) -> Tuple[Optional[pd.DataFrame], Optional[pd.Series], str]:
-    melhor_motivo = "nenhum_veiculo_compativel"
+    cidade_chave = _safe_text(cluster_df["_cidade_key_m5"].iloc[0]) if not cluster_df.empty else ""
 
-    for _, vehicle_row in veiculos_ordenados.iterrows():
-        ok, motivo = _validar_fechamento(df_grupo, vehicle_row)
+    if cluster_df.empty:
+        return None, None, "cluster_vazio"
+
+    motivo_raio = _motivo_cluster_impossivel_por_raio(cluster_df, veiculos_ordenados)
+    if motivo_raio is not None:
         tentativas.append(
             _tentativa_dict(
-                fase="fase_1_mesmo_cliente",
-                camada="mesmo_cliente",
-                anchor_id=None,
+                fase="fase_2_mesma_cidade",
+                camada="cidade_cluster_inteiro",
+                cluster_chave=cidade_chave,
+                vehicle_row=None,
+                resultado="falhou",
+                motivo=motivo_raio,
+                df_candidato=cluster_df,
+            )
+        )
+        return None, None, motivo_raio
+
+    if _cluster_cheio_nem_atinge_minimo_do_menor(cluster_df, veiculos_ordenados):
+        tentativas.append(
+            _tentativa_dict(
+                fase="fase_2_mesma_cidade",
+                camada="cidade_cluster_inteiro",
+                cluster_chave=cidade_chave,
+                vehicle_row=None,
+                resultado="falhou",
+                motivo="cluster_cheio_nem_atinge_ocupacao_minima_do_menor_veiculo",
+                df_candidato=cluster_df,
+            )
+        )
+        return None, None, "cluster_cheio_nem_atinge_ocupacao_minima_do_menor_veiculo"
+
+    cluster_ordenado = _ordenar_operacional(cluster_df.copy())
+    melhor_motivo = "nenhum_veiculo_compativel"
+
+    # primeiro tenta o cluster cheio
+    for _, vehicle_row in veiculos_ordenados.iterrows():
+        ok, motivo = _validar_fechamento(cluster_ordenado, vehicle_row)
+        tentativas.append(
+            _tentativa_dict(
+                fase="fase_2_mesma_cidade",
+                camada="cidade_cluster_inteiro",
+                cluster_chave=cidade_chave,
                 vehicle_row=vehicle_row,
                 resultado="fechado" if ok else "falhou",
                 motivo=motivo,
-                df_candidato=df_grupo,
+                df_candidato=cluster_ordenado,
             )
         )
         melhor_motivo = motivo
         if ok:
-            return df_grupo.copy(), vehicle_row.copy(), "ok"
+            return cluster_ordenado.copy(), vehicle_row.copy(), "ok"
 
-    return None, None, melhor_motivo
+    # se não fechou, vai reduzindo o cluster
+    n = len(cluster_ordenado)
+    if n <= 1:
+        return None, None, melhor_motivo
 
+    for k in range(n - 1, 0, -1):
+        candidato = cluster_ordenado.head(k).copy()
 
-# -----------------------------------------------------------------------------------------
-# Fase 2
-# -----------------------------------------------------------------------------------------
-def _montar_subconjunto_regional_para_veiculo(
-    pool_regional: pd.DataFrame,
-    anchor_row: pd.Series,
-    vehicle_row: pd.Series,
-) -> pd.DataFrame:
-    """
-    Regionalidade = pool elegível.
-    O algoritmo monta subconjunto viável dentro do pool.
-    Implementação incremental: acumula métricas sem recriar DataFrame.
-    """
-    if pool_regional.empty:
-        return pd.DataFrame(columns=pool_regional.columns)
-
-    anchor_id = str(
-        anchor_row["_id_str_m5_1"] if "_id_str_m5_1" in anchor_row.index else anchor_row["id_linha_pipeline"]
-    )
-
-    temp = _ordenar_operacional(pool_regional.copy())
-    temp["_anchor_first_m5_1"] = temp["_id_str_m5_1"] == anchor_id
-    temp = (
-        temp.sort_values(["_anchor_first_m5_1"], ascending=[False], kind="mergesort")
-        .drop(columns=["_anchor_first_m5_1"])
-        .reset_index(drop=True)
-    )
-
-    selected_positions: List[int] = []
-    selected_ids: Set[str] = set()
-    selected_dests: Set[str] = set()
-
-    peso_total = 0.0
-    volume_total = 0.0
-    km_ref = 0.0
-
-    records = temp.to_dict(orient="records")
-
-    for pos, row in enumerate(records):
-        row_id = str(row.get("_id_str_m5_1", ""))
-        if not row_id or row_id in selected_ids:
-            continue
-
-        restr_norm = _safe_text(row.get("_restricao_norm_m5_1"))
-        if not _restricao_item_compativel_com_veiculo(restr_norm, vehicle_row):
-            continue
-
-        novo_peso = peso_total + _safe_float(row.get("_peso_calc_m5_1"), 0.0)
-        novo_volume = volume_total + _safe_float(row.get("_vol_m3_m5_1"), 0.0)
-        novo_km = max(km_ref, _safe_float(row.get("_km_ref_m5_1"), 0.0))
-
-        dest_key = _safe_text(row.get("_destinatario_key_m5_1"))
-        novo_qtd_paradas = len(selected_dests | {dest_key})
-
-        ok_hard, _ = _validar_metricas_incrementais_hard(
-            peso_total=novo_peso,
-            volume_total=novo_volume,
-            qtd_paradas=novo_qtd_paradas,
-            km_ref=novo_km,
-            vehicle_row=vehicle_row,
-        )
-        if not ok_hard:
-            continue
-
-        selected_positions.append(pos)
-        selected_ids.add(row_id)
-        selected_dests.add(dest_key)
-        peso_total = novo_peso
-        volume_total = novo_volume
-        km_ref = novo_km
-
-    if not selected_positions:
-        return pd.DataFrame(columns=pool_regional.columns)
-
-    df_sel = temp.iloc[selected_positions].copy().reset_index(drop=True)
-
-    if anchor_id not in set(df_sel["_id_str_m5_1"].tolist()):
-        df_anchor = pool_regional[pool_regional["_id_str_m5_1"] == anchor_id].copy()
-        if not df_anchor.empty:
-            tentativa = pd.concat([df_anchor, df_sel], ignore_index=True).drop_duplicates(
-                subset=["id_linha_pipeline"], keep="first"
-            )
-            ok_hard, _ = _validar_hard_constraints(tentativa, vehicle_row)
-            if ok_hard:
-                df_sel = tentativa.copy()
-
-    return _ordenar_operacional(df_sel.reset_index(drop=True))
-
-
-def _tentar_pool_regional(
-    pool_regional: pd.DataFrame,
-    anchor_row: pd.Series,
-    veiculos_ordenados: pd.DataFrame,
-    camada: str,
-    tentativas: List[Dict[str, Any]],
-) -> Tuple[Optional[pd.DataFrame], Optional[pd.Series], str]:
-    melhor_motivo = "nenhum_veiculo_compativel"
-    anchor_id = str(
-        anchor_row["_id_str_m5_1"] if "_id_str_m5_1" in anchor_row.index else anchor_row["id_linha_pipeline"]
-    )
-
-    for _, vehicle_row in veiculos_ordenados.iterrows():
-        ok_cheio, motivo_cheio = _validar_fechamento(pool_regional, vehicle_row)
-        tentativas.append(
-            _tentativa_dict(
-                fase="fase_2_regional",
-                camada=f"{camada}_grupo_cheio",
-                anchor_id=anchor_id,
-                vehicle_row=vehicle_row,
-                resultado="fechado" if ok_cheio else "falhou",
-                motivo=motivo_cheio,
-                df_candidato=pool_regional,
-            )
-        )
-        if ok_cheio:
-            return pool_regional.copy(), vehicle_row.copy(), "ok"
-        melhor_motivo = motivo_cheio
-
-    for _, vehicle_row in veiculos_ordenados.iterrows():
-        candidato = _montar_subconjunto_regional_para_veiculo(
-            pool_regional=pool_regional,
-            anchor_row=anchor_row,
-            vehicle_row=vehicle_row,
-        )
-
-        if candidato.empty:
+        # eliminação rápida por raio
+        motivo_raio_candidato = _motivo_cluster_impossivel_por_raio(candidato, veiculos_ordenados)
+        if motivo_raio_candidato is not None:
             tentativas.append(
                 _tentativa_dict(
-                    fase="fase_2_regional",
-                    camada=f"{camada}_subconjunto",
-                    anchor_id=anchor_id,
-                    vehicle_row=vehicle_row,
+                    fase="fase_2_mesma_cidade",
+                    camada="cidade_subcluster",
+                    cluster_chave=cidade_chave,
+                    vehicle_row=None,
                     resultado="falhou",
-                    motivo="sem_subconjunto_viavel_hard_constraints",
+                    motivo=motivo_raio_candidato,
                     df_candidato=candidato,
                 )
             )
-            melhor_motivo = "sem_subconjunto_viavel_hard_constraints"
+            melhor_motivo = motivo_raio_candidato
             continue
 
-        ok, motivo = _validar_fechamento(candidato, vehicle_row)
-        tentativas.append(
-            _tentativa_dict(
-                fase="fase_2_regional",
-                camada=f"{camada}_subconjunto",
-                anchor_id=anchor_id,
-                vehicle_row=vehicle_row,
-                resultado="fechado" if ok else "falhou",
-                motivo=motivo,
-                df_candidato=candidato,
+        # se nem o menor veículo por raio bate ocupação mínima com o cluster cheio do candidato, pula
+        if _cluster_cheio_nem_atinge_minimo_do_menor(candidato, veiculos_ordenados):
+            tentativas.append(
+                _tentativa_dict(
+                    fase="fase_2_mesma_cidade",
+                    camada="cidade_subcluster",
+                    cluster_chave=cidade_chave,
+                    vehicle_row=None,
+                    resultado="falhou",
+                    motivo="subcluster_nem_atinge_ocupacao_minima_do_menor_veiculo",
+                    df_candidato=candidato,
+                )
             )
-        )
-        melhor_motivo = motivo
+            melhor_motivo = "subcluster_nem_atinge_ocupacao_minima_do_menor_veiculo"
+            continue
 
-        if ok:
-            return candidato.copy(), vehicle_row.copy(), "ok"
+        for _, vehicle_row in veiculos_ordenados.iterrows():
+            ok, motivo = _validar_fechamento(candidato, vehicle_row)
+            tentativas.append(
+                _tentativa_dict(
+                    fase="fase_2_mesma_cidade",
+                    camada="cidade_subcluster",
+                    cluster_chave=cidade_chave,
+                    vehicle_row=vehicle_row,
+                    resultado="fechado" if ok else "falhou",
+                    motivo=motivo,
+                    df_candidato=candidato,
+                )
+            )
+            melhor_motivo = motivo
+            if ok:
+                return candidato.copy(), vehicle_row.copy(), "ok"
 
     return None, None, melhor_motivo
 
@@ -778,7 +689,7 @@ def executar_m5_manifestos_compostos(
         }
         meta_vazio = {
             "resumo_m5_1": {
-                "modulo": "M5.1",
+                "modulo": "M5.2",
                 "data_base_roteirizacao": str(data_base_roteirizacao) if data_base_roteirizacao is not None else None,
                 "tipo_roteirizacao": tipo_roteirizacao,
                 "remanescente_entrada_m5_1": 0,
@@ -788,15 +699,16 @@ def executar_m5_manifestos_compostos(
                 "nao_roteirizados_bloco_5_1": 0,
                 "coluna_tipo_veiculo_utilizada": "tipo",
                 "estrategia_m5_1": [
-                    "fase_1_mesmo_cliente",
-                    "saldo_para_cidade_subregiao_mesorregiao",
-                    "regionalidade_como_pool_elegivel",
-                    "subconjunto_viavel_ativo",
-                    "VERSAO_M5_1_2026_04_10_FIX_01",
+                    "entrada_dura_remanescente_m4",
+                    "cluster_mesma_cidade",
+                    "cluster_inteiro_primeiro",
+                    "reducao_progressiva_do_cluster",
+                    "veiculo_maior_para_menor",
+                    "VERSAO_M5_CIDADE_2026_04_10",
                 ],
                 "ocupacao_minima_padrao_perc": 70,
                 "ocupacao_maxima_padrao_perc": 100,
-                "anchors_geradas_m5_1": 0,
+                "clusters_cidade_processados": 0,
                 "persistiu_artefatos": False,
                 "caminhos_pipeline": caminhos_pipeline or {},
             },
@@ -805,42 +717,40 @@ def executar_m5_manifestos_compostos(
                 "total_pre_manifestos": 0,
                 "total_itens_pre_manifestados": 0,
                 "total_remanescentes": 0,
-                "anchors_geradas_m5_1": 0,
-                "regionalidade_tratada_como_pool": True,
-                "subconjunto_viavel_ativo": True,
+                "clusters_cidade_processados": 0,
             },
         }
         return outputs_vazio, meta_vazio
 
-    df_input = _precompute_df_inputs(df_input)
-    df_veic = _precompute_df_veiculos(df_veic)
-
     veiculos_ordenados = _veiculos_maior_para_menor(df_veic)
-    saldo = _ordenar_operacional(df_input.copy())
+    saldo = _precalcular_ordenacao(df_input.copy())
+    saldo = _ordenar_operacional(saldo)
 
     tentativas: List[Dict[str, Any]] = []
     manifestos_list: List[pd.DataFrame] = []
     itens_manifestados_list: List[pd.DataFrame] = []
 
     manifest_seq = 1
-    anchors_geradas = 0
+    clusters_cidade_processados = 0
 
-    # =====================================================================================
-    # FASE 1 - MESMO CLIENTE
-    # =====================================================================================
-    ids_consumidos_fase1: Set[str] = set()
+    # agrupa por cidade uma única vez, do jeito mais barato possível
+    cidades = [
+        cidade
+        for cidade in saldo["_cidade_key_m5"].dropna().astype(str).tolist()
+        if cidade.strip()
+    ]
+    cidades_ordenadas = list(dict.fromkeys(cidades))  # preserva ordem
 
-    for _, grp in saldo.groupby("_cliente_chave_m5_1", sort=False):
-        df_grupo = _ordenar_operacional(grp.copy())
-        ids_grupo = set(df_grupo["_id_str_m5_1"].tolist())
-
-        if ids_consumidos_fase1 & ids_grupo:
+    for cidade_key in cidades_ordenadas:
+        cluster = saldo[saldo["_cidade_key_m5"] == cidade_key].copy()
+        if cluster.empty:
             continue
 
-        cliente_chave = df_grupo["_cliente_chave_m5_1"].iloc[0] if not df_grupo.empty else ""
+        cluster = _ordenar_operacional(cluster)
+        clusters_cidade_processados += 1
 
-        candidato, vehicle_row, motivo = _tentar_fechar_grupo_inteiro(
-            df_grupo=df_grupo,
+        candidato, vehicle_row, motivo = _tentar_cluster_cidade(
+            cluster_df=cluster,
             veiculos_ordenados=veiculos_ordenados,
             tentativas=tentativas,
         )
@@ -853,161 +763,41 @@ def executar_m5_manifestos_compostos(
                 df_itens=candidato,
                 vehicle_row=vehicle_row,
                 manifesto_id=manifesto_id,
-                fase="fase_1_mesmo_cliente",
-                camada="mesmo_cliente",
+                fase="fase_2_mesma_cidade",
+                camada="cidade",
             )
+
             manifestos_list.append(df_manifesto)
             itens_manifestados_list.append(df_itens)
-            ids_consumidos_fase1.update(ids_grupo)
+
+            ids_consumidos = set(candidato["_id_str_m5"].tolist())
+            saldo = saldo[~saldo["_id_str_m5"].isin(ids_consumidos)].copy()
+            saldo = _ordenar_operacional(saldo)
         else:
             tentativas.append(
                 {
-                    "fase": "fase_1_mesmo_cliente",
-                    "camada": "mesmo_cliente",
-                    "anchor_id_linha_pipeline": None,
+                    "fase": "fase_2_mesma_cidade",
+                    "camada": "cidade_fim_cluster",
+                    "cluster_chave": cidade_key,
                     "veiculo_tipo_tentado": None,
                     "resultado": "saldo",
                     "motivo": motivo,
-                    "qtd_itens_candidato": int(len(df_grupo)),
-                    "qtd_paradas_candidato": _qtd_paradas(df_grupo),
-                    "peso_total_candidato": round(_peso_total(df_grupo), 3),
-                    "volume_total_candidato": round(_volume_total(df_grupo), 3),
-                    "km_referencia_candidato": round(_km_referencia(df_grupo), 2),
-                    "ocupacao_perc_candidato": 0.0,
-                    "cliente_chave": cliente_chave,
-                }
-            )
-
-    if ids_consumidos_fase1:
-        saldo = saldo[~saldo["_id_str_m5_1"].isin(ids_consumidos_fase1)].copy()
-        saldo = _ordenar_operacional(saldo)
-
-    # =====================================================================================
-    # FASE 2 - SALDO -> CIDADE / SUB / MESO
-    # =====================================================================================
-    saldo["_anchor_attempted_m5_1"] = False
-
-    camada_to_col = {
-        "cidade": "_cidade_key_m5_1",
-        "subregiao": "_subregiao_key_m5_1",
-        "mesorregiao": "_mesorregiao_key_m5_1",
-    }
-
-    while True:
-        elegiveis = saldo[
-            (saldo["_anchor_attempted_m5_1"] == False)  # noqa: E712
-            & (saldo["_elegivel_fase2_m5_1"] == True)  # noqa: E712
-        ].copy()
-
-        if elegiveis.empty:
-            break
-
-        elegiveis = _ordenar_operacional(elegiveis)
-        anchor_row = elegiveis.iloc[0].copy()
-        anchor_id = str(anchor_row["_id_str_m5_1"])
-        anchors_geradas += 1
-
-        saldo.loc[saldo["_id_str_m5_1"] == anchor_id, "_anchor_attempted_m5_1"] = True
-
-        fechou_anchor = False
-        melhor_motivo_anchor = "sem_pool_regional"
-
-        for camada in ["cidade", "subregiao", "mesorregiao"]:
-            col_key = camada_to_col[camada]
-            valor = _safe_text(anchor_row.get(col_key))
-
-            if not valor:
-                tentativas.append(
-                    _tentativa_dict(
-                        fase="fase_2_regional",
-                        camada=camada,
-                        anchor_id=anchor_id,
-                        vehicle_row=None,
-                        resultado="falhou",
-                        motivo=f"{camada}_vazia",
-                        df_candidato=None,
-                    )
-                )
-                melhor_motivo_anchor = f"{camada}_vazia"
-                continue
-
-            pool = saldo[saldo[col_key] == valor].copy()
-            pool = _ordenar_operacional(pool)
-
-            if pool.empty:
-                tentativas.append(
-                    _tentativa_dict(
-                        fase="fase_2_regional",
-                        camada=camada,
-                        anchor_id=anchor_id,
-                        vehicle_row=None,
-                        resultado="falhou",
-                        motivo="pool_regional_vazio",
-                        df_candidato=None,
-                    )
-                )
-                melhor_motivo_anchor = "pool_regional_vazio"
-                continue
-
-            candidato, vehicle_row, motivo = _tentar_pool_regional(
-                pool_regional=pool,
-                anchor_row=anchor_row,
-                veiculos_ordenados=veiculos_ordenados,
-                camada=camada,
-                tentativas=tentativas,
-            )
-            melhor_motivo_anchor = motivo
-
-            if candidato is not None and vehicle_row is not None:
-                manifesto_id = _build_manifesto_id(manifest_seq)
-                manifest_seq += 1
-
-                df_manifesto, df_itens = _build_manifesto(
-                    df_itens=candidato,
-                    vehicle_row=vehicle_row,
-                    manifesto_id=manifesto_id,
-                    fase="fase_2_regional",
-                    camada=camada,
-                )
-                manifestos_list.append(df_manifesto)
-                itens_manifestados_list.append(df_itens)
-
-                consumed_ids = set(candidato["_id_str_m5_1"].tolist())
-                saldo = saldo[~saldo["_id_str_m5_1"].isin(consumed_ids)].copy()
-                saldo = _ordenar_operacional(saldo)
-                fechou_anchor = True
-                break
-
-        if not fechou_anchor:
-            tentativas.append(
-                {
-                    "fase": "fase_2_regional",
-                    "camada": "fim_anchor",
-                    "anchor_id_linha_pipeline": anchor_id,
-                    "veiculo_tipo_tentado": None,
-                    "resultado": "saldo",
-                    "motivo": melhor_motivo_anchor,
-                    "qtd_itens_candidato": 1,
-                    "qtd_paradas_candidato": 1,
-                    "peso_total_candidato": round(_safe_float(anchor_row.get("_peso_calc_m5_1"), 0.0), 3),
-                    "volume_total_candidato": round(_safe_float(anchor_row.get("_vol_m3_m5_1"), 0.0), 3),
-                    "km_referencia_candidato": round(_safe_float(anchor_row.get("_km_ref_m5_1"), 0.0), 2),
+                    "qtd_itens_candidato": int(len(cluster)),
+                    "qtd_paradas_candidato": _qtd_paradas(cluster),
+                    "peso_total_candidato": round(_peso_total(cluster), 3),
+                    "volume_total_candidato": round(_volume_total(cluster), 3),
+                    "km_referencia_candidato": round(_km_referencia(cluster), 2),
                     "ocupacao_perc_candidato": 0.0,
                 }
             )
 
-    # =====================================================================================
-    # SAÍDAS
-    # =====================================================================================
     df_premanifestos_m5_1 = pd.concat(manifestos_list, ignore_index=True) if manifestos_list else pd.DataFrame()
     df_itens_premanifestos_m5_1 = (
         pd.concat(itens_manifestados_list, ignore_index=True) if itens_manifestados_list else pd.DataFrame()
     )
     df_tentativas_m5_1 = pd.DataFrame(tentativas)
 
-    df_itens_premanifestos_m5_1 = _drop_aux_cols(df_itens_premanifestos_m5_1)
-    saldo = _drop_aux_cols(saldo)
-
+    saldo = _drop_internal_cols(saldo.reset_index(drop=True))
     df_remanescente_m5_1 = saldo.copy()
     df_nao_roteirizados_bloco_5_1 = saldo.copy()
 
@@ -1028,41 +818,37 @@ def executar_m5_manifestos_compostos(
         )
 
     resumo_m5_1 = {
-        "modulo": "M5.1",
+        "modulo": "M5.2",
         "data_base_roteirizacao": str(data_base_roteirizacao) if data_base_roteirizacao is not None else None,
         "tipo_roteirizacao": tipo_roteirizacao,
         "remanescente_entrada_m5_1": int(len(df_input)),
-        "pre_manifestos_gerados_m5_1": int(df_premanifestos_m5_1["manifesto_id"].nunique())
-        if not df_premanifestos_m5_1.empty
-        else 0,
+        "pre_manifestos_gerados_m5_1": int(df_premanifestos_m5_1["manifesto_id"].nunique()) if not df_premanifestos_m5_1.empty else 0,
         "itens_pre_manifestados_m5_1": int(len(df_itens_premanifestos_m5_1)),
         "remanescente_saida_m5_1": int(len(df_remanescente_m5_1)),
         "nao_roteirizados_bloco_5_1": int(len(df_nao_roteirizados_bloco_5_1)),
         "coluna_tipo_veiculo_utilizada": "tipo",
         "estrategia_m5_1": [
-            "fase_1_mesmo_cliente",
-            "saldo_para_cidade_subregiao_mesorregiao",
-            "regionalidade_como_pool_elegivel",
-            "subconjunto_viavel_ativo",
-            "VERSAO_M5_1_2026_04_10_FIX_01",
+            "entrada_dura_remanescente_m4",
+            "cluster_mesma_cidade",
+            "cluster_inteiro_primeiro",
+            "reducao_progressiva_do_cluster",
+            "veiculo_maior_para_menor",
+            "eliminacao_precoce_por_raio_e_ocupacao_minima",
+            "VERSAO_M5_CIDADE_2026_04_10",
         ],
         "ocupacao_minima_padrao_perc": 70,
         "ocupacao_maxima_padrao_perc": 100,
-        "anchors_geradas_m5_1": int(anchors_geradas),
+        "clusters_cidade_processados": int(clusters_cidade_processados),
         "persistiu_artefatos": False,
         "caminhos_pipeline": caminhos_pipeline or {},
     }
 
     auditoria_m5_1 = {
         "total_tentativas": int(len(df_tentativas_m5_1)),
-        "total_pre_manifestos": int(df_premanifestos_m5_1["manifesto_id"].nunique())
-        if not df_premanifestos_m5_1.empty
-        else 0,
+        "total_pre_manifestos": int(df_premanifestos_m5_1["manifesto_id"].nunique()) if not df_premanifestos_m5_1.empty else 0,
         "total_itens_pre_manifestados": int(len(df_itens_premanifestos_m5_1)),
         "total_remanescentes": int(len(df_remanescente_m5_1)),
-        "anchors_geradas_m5_1": int(anchors_geradas),
-        "regionalidade_tratada_como_pool": True,
-        "subconjunto_viavel_ativo": True,
+        "clusters_cidade_processados": int(clusters_cidade_processados),
     }
 
     outputs_m5_1 = {
@@ -1082,9 +868,7 @@ def executar_m5_manifestos_compostos(
     return outputs_m5_1, meta_m5_1
 
 
-# -----------------------------------------------------------------------------------------
 # Aliases defensivos
-# -----------------------------------------------------------------------------------------
 def executar_m5_1(*args: Any, **kwargs: Any):
     return executar_m5_manifestos_compostos(*args, **kwargs)
 
