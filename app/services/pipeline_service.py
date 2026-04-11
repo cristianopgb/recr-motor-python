@@ -12,6 +12,7 @@ from app.pipeline.m3_1_validacao_fronteira import executar_m3_1_validacao_fronte
 from app.pipeline.m4_manifestos_fechados import executar_m4_manifestos_fechados
 from app.pipeline.m5_1_triagem_cidades import executar_m5_1_triagem_cidades
 from app.pipeline.m5_2_composicao_cidades import executar_m5_2_composicao_cidades
+from app.pipeline.m5_3_composicao_subregioes import executar_m5_3_composicao_subregioes
 from app.schemas import RoteirizacaoRequest
 from app.services.payload_service import PipelineContext, normalizar_payload_para_pipeline
 
@@ -437,6 +438,62 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     )
 
     # =========================================================================================
+    # SALDO GLOBAL PÓS-CIDADE
+    # =========================================================================================
+    if _safe_len(df_saldo_excluido_triagem_m5_1) > 0 and _safe_len(df_remanescente_m5_2) > 0:
+        df_saldo_global_pos_cidade_m5 = pd.concat(
+            [df_saldo_excluido_triagem_m5_1, df_remanescente_m5_2],
+            ignore_index=True,
+            sort=False,
+        )
+    elif _safe_len(df_saldo_excluido_triagem_m5_1) > 0:
+        df_saldo_global_pos_cidade_m5 = df_saldo_excluido_triagem_m5_1.copy()
+    elif _safe_len(df_remanescente_m5_2) > 0:
+        df_saldo_global_pos_cidade_m5 = df_remanescente_m5_2.copy()
+    else:
+        df_saldo_global_pos_cidade_m5 = pd.DataFrame()
+
+    # =========================================================================================
+    # M5.3 - COMPOSIÇÃO POR SUBREGIÃO
+    # =========================================================================================
+    t0 = _agora()
+    outputs_m5_3, meta_m5_3 = executar_m5_3_composicao_subregioes(
+        df_saldo_global_pos_cidade_m5=df_saldo_global_pos_cidade_m5,
+        df_perfis_base_m5=df_perfis_viaveis_por_cidade_m5_1,
+        rodada_id=contexto.rodada_id,
+        data_base_roteirizacao=contexto.data_base,
+        tipo_roteirizacao=contexto.tipo_roteirizacao,
+        caminhos_pipeline=contexto.caminhos_pipeline,
+    )
+    tempo_m5_3 = _duracao_ms(t0)
+    metricas_tempo["m5_3_composicao_subregioes_ms"] = tempo_m5_3
+
+    resumo_m5_3 = meta_m5_3["resumo_m5_3"]
+
+    df_premanifestos_m5_3 = outputs_m5_3["df_premanifestos_m5_3"]
+    df_itens_premanifestos_m5_3 = outputs_m5_3["df_itens_premanifestos_m5_3"]
+    df_tentativas_m5_3 = outputs_m5_3["df_tentativas_m5_3"]
+    df_remanescente_m5_3 = outputs_m5_3["df_remanescente_m5_3"]
+
+    logs.append(
+        _log(
+            modulo="m5_3_composicao_subregioes",
+            status="ok",
+            mensagem="M5.3 executado com sucesso",
+            quantidade_entrada=_safe_len(df_saldo_global_pos_cidade_m5),
+            quantidade_saida=_safe_len(df_remanescente_m5_3),
+            tempo_ms=tempo_m5_3,
+            extra={
+                **resumo_m5_3,
+                "total_tentativas_m5_3": _safe_len(df_tentativas_m5_3),
+                "total_premanifestos_m5_3": _safe_len(df_premanifestos_m5_3),
+                "total_itens_premanifestos_m5_3": _safe_len(df_itens_premanifestos_m5_3),
+                "total_remanescente_m5_3": _safe_len(df_remanescente_m5_3),
+            },
+        )
+    )
+
+    # =========================================================================================
     # AUDITORIAS
     # =========================================================================================
     auditoria_m4 = {
@@ -474,6 +531,17 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         if "auditoria_m5_2" in meta_m5_2 and isinstance(meta_m5_2["auditoria_m5_2"], dict):
             auditoria_m5_2.update(meta_m5_2["auditoria_m5_2"])
 
+    auditoria_m5_3 = {
+        "total_tentativas": _safe_len(df_tentativas_m5_3),
+        "total_pre_manifestos": _safe_len(df_premanifestos_m5_3),
+        "total_itens_pre_manifestados": _safe_len(df_itens_premanifestos_m5_3),
+        "total_remanescentes": _safe_len(df_remanescente_m5_3),
+    }
+
+    if isinstance(meta_m5_3, dict):
+        if "auditoria_m5_3" in meta_m5_3 and isinstance(meta_m5_3["auditoria_m5_3"], dict):
+            auditoria_m5_3.update(meta_m5_3["auditoria_m5_3"])
+
     # =========================================================================================
     # SERIALIZAÇÃO FINAL
     # =========================================================================================
@@ -498,12 +566,12 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         df_saldo_excluido_triagem_m5_1,
         limit=None,
     )
-    premanifestos_m5_2 = _serializar_dataframe_para_records(
-        df_premanifestos_m5_2,
+    premanifestos_m5_3 = _serializar_dataframe_para_records(
+        df_premanifestos_m5_3,
         limit=None,
     )
-    remanescentes_m5_2 = _serializar_dataframe_para_records(
-        df_remanescente_m5_2,
+    remanescentes_m5_3 = _serializar_dataframe_para_records(
+        df_remanescente_m5_3,
         limit=None,
     )
 
@@ -511,8 +579,8 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         df_tentativas_fechamento_bloco_4,
         limit=AMOSTRA_PADRAO_TENTATIVAS,
     )
-    tentativas_m5_2_amostra = _serializar_dataframe_para_records(
-        df_tentativas_m5_2,
+    tentativas_m5_3_amostra = _serializar_dataframe_para_records(
+        df_tentativas_m5_3,
         limit=AMOSTRA_PADRAO_TENTATIVAS,
     )
 
@@ -524,9 +592,9 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
 
     resposta: Dict[str, Any] = {
         "status": "ok",
-        "mensagem": "Motor executou com sucesso até o M5.2.",
-        "pipeline_real_ate": "M5.2",
-        "modo_resposta": "validacao_manual_m5_2",
+        "mensagem": "Motor executou com sucesso até o M5.3.",
+        "pipeline_real_ate": "M5.3",
+        "modo_resposta": "validacao_manual_m5_3",
         "resposta_truncada": False,
         "resumo_execucao": {
             "rodada_id": contexto.rodada_id,
@@ -555,9 +623,10 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "total_remanescentes_m4": _safe_len(df_remanescente_roteirizavel_bloco_4),
             "total_elegiveis_m5_1": _safe_len(df_saldo_elegivel_composicao_m5_1),
             "total_nao_elegiveis_m5_1": _safe_len(df_saldo_excluido_triagem_m5_1),
-            "total_premanifestos_m5_2": _safe_len(df_premanifestos_m5_2),
-            "total_itens_premanifestados_m5_2": _safe_len(df_itens_premanifestos_m5_2),
-            "total_remanescentes_m5_2": _safe_len(df_remanescente_m5_2),
+            "total_saldo_global_pos_cidade_m5": _safe_len(df_saldo_global_pos_cidade_m5),
+            "total_premanifestos_m5_3": _safe_len(df_premanifestos_m5_3),
+            "total_itens_premanifestados_m5_3": _safe_len(df_itens_premanifestos_m5_3),
+            "total_remanescentes_m5_3": _safe_len(df_remanescente_m5_3),
             "resumo_m1": resumo_m1,
             "resumo_m2": resumo_m2,
             "resumo_m3": resumo_m3,
@@ -565,6 +634,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "resumo_m4": resumo_m4,
             "resumo_m5_1_triagem": resumo_m5_1_triagem,
             "resumo_m5_2": resumo_m5_2,
+            "resumo_m5_3": resumo_m5_3,
         },
         "contexto_rodada": {
             "filial": contexto.filial,
@@ -574,25 +644,26 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         "itens_manifestos_fechados": itens_manifestos_fechados,
         "elegiveis_m5_1": elegiveis_m5_1,
         "nao_elegiveis_m5_1": nao_elegiveis_m5_1,
-        "premanifestos_m5_2": premanifestos_m5_2,
-        "remanescentes_m5_2": remanescentes_m5_2,
-        "manifestos_compostos": premanifestos_m5_2,
+        "premanifestos_m5_3": premanifestos_m5_3,
+        "remanescentes_m5_3": remanescentes_m5_3,
+        "manifestos_compostos": premanifestos_m5_3,
         "auditoria_m4": auditoria_m4,
         "auditoria_m5_1_triagem": auditoria_m5_1_triagem,
         "auditoria_m5_2": auditoria_m5_2,
+        "auditoria_m5_3": auditoria_m5_3,
         "auditoria_serializacao": {
             "elegiveis_m5_1_total": _safe_len(df_saldo_elegivel_composicao_m5_1),
             "elegiveis_m5_1_retornado": len(elegiveis_m5_1),
             "nao_elegiveis_m5_1_total": _safe_len(df_saldo_excluido_triagem_m5_1),
             "nao_elegiveis_m5_1_retornado": len(nao_elegiveis_m5_1),
-            "premanifestos_m5_2_total": _safe_len(df_premanifestos_m5_2),
-            "premanifestos_m5_2_retornado": len(premanifestos_m5_2),
-            "remanescentes_m5_2_total": _safe_len(df_remanescente_m5_2),
-            "remanescentes_m5_2_retornado": len(remanescentes_m5_2),
+            "premanifestos_m5_3_total": _safe_len(df_premanifestos_m5_3),
+            "premanifestos_m5_3_retornado": len(premanifestos_m5_3),
+            "remanescentes_m5_3_total": _safe_len(df_remanescente_m5_3),
+            "remanescentes_m5_3_retornado": len(remanescentes_m5_3),
         },
         "amostras_auditoria": {
             "tentativas_m4": tentativas_m4_amostra,
-            "tentativas_m5_2": tentativas_m5_2_amostra,
+            "tentativas_m5_3": tentativas_m5_3_amostra,
         },
         "logs": logs,
     }
@@ -612,28 +683,29 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                     df_saldo_excluido_triagem_m5_1,
                     "df_saldo_excluido_triagem_m5_1",
                 ),
-                "perfis_viaveis_por_cidade_m5_1": _snapshot_dataframe(
-                    df_perfis_viaveis_por_cidade_m5_1,
-                    "df_perfis_viaveis_por_cidade_m5_1",
+                "saldo_global_pos_cidade_m5": _snapshot_dataframe(
+                    df_saldo_global_pos_cidade_m5,
+                    "df_saldo_global_pos_cidade_m5",
                 ),
-                "premanifestos_m5_2": _snapshot_dataframe(
-                    df_premanifestos_m5_2,
-                    "df_premanifestos_m5_2",
+                "premanifestos_m5_3": _snapshot_dataframe(
+                    df_premanifestos_m5_3,
+                    "df_premanifestos_m5_3",
                 ),
-                "itens_premanifestos_m5_2": _snapshot_dataframe(
-                    df_itens_premanifestos_m5_2,
-                    "df_itens_premanifestos_m5_2",
+                "itens_premanifestos_m5_3": _snapshot_dataframe(
+                    df_itens_premanifestos_m5_3,
+                    "df_itens_premanifestos_m5_3",
                 ),
-                "remanescente_m5_2": _snapshot_dataframe(
-                    df_remanescente_m5_2,
-                    "df_remanescente_m5_2",
+                "remanescente_m5_3": _snapshot_dataframe(
+                    df_remanescente_m5_3,
+                    "df_remanescente_m5_3",
                 ),
             },
             "resumos_dataframes": {
                 "elegiveis_m5_1": _montar_resumo_dataframe(df_saldo_elegivel_composicao_m5_1, "elegiveis_m5_1"),
                 "nao_elegiveis_m5_1": _montar_resumo_dataframe(df_saldo_excluido_triagem_m5_1, "nao_elegiveis_m5_1"),
-                "premanifestos_m5_2": _montar_resumo_dataframe(df_premanifestos_m5_2, "premanifestos_m5_2"),
-                "remanescentes_m5_2": _montar_resumo_dataframe(df_remanescente_m5_2, "remanescentes_m5_2"),
+                "saldo_global_pos_cidade_m5": _montar_resumo_dataframe(df_saldo_global_pos_cidade_m5, "saldo_global_pos_cidade_m5"),
+                "premanifestos_m5_3": _montar_resumo_dataframe(df_premanifestos_m5_3, "premanifestos_m5_3"),
+                "remanescentes_m5_3": _montar_resumo_dataframe(df_remanescente_m5_3, "remanescentes_m5_3"),
             },
         }
 
