@@ -12,8 +12,17 @@ import pandas as pd
 # - receber o saldo global pós-etapa cidade
 # - agrupar por subregião
 # - eliminar subregiões inviáveis antes da composição
-# - identificar perfis viáveis por subregião
 # - devolver base auditável para a próxima etapa (M5.4)
+#
+# REGRA ATUAL DE VALIDAÇÃO
+# - nesta etapa NÃO olhar raio
+# - nesta etapa NÃO subir perfil
+# - nesta etapa NÃO compor
+# - usar SOMENTE o menor perfil cadastrado como régua base
+# - se o peso total da subregião atingir a ocupação mínima do menor perfil cadastrado:
+#       => elegível para M5.4
+# - se não atingir:
+#       => remanescente / excluído da triagem M5.3
 #
 # ESTA ETAPA NÃO GERA PRÉ-MANIFESTO
 # =========================================================================================
@@ -169,7 +178,7 @@ def _normalizar_inputs(
         perfis[col] = pd.to_numeric(perfis[col], errors="coerce")
 
     for col in ["perfil", "tipo"]:
-        perfis[col] = perfis[col].fillna("").astype(str)
+        perfis[col] = perfis[col].fillna("").astype(str).str.strip()
 
     perfis = (
         perfis[
@@ -235,11 +244,11 @@ def _precalcular_ordenacao(df: pd.DataFrame) -> pd.DataFrame:
 
     for _, row in temp.iterrows():
         buckets.append(_fase_bucket(row))
-        p = pd.to_numeric(
+        prioridade = pd.to_numeric(
             row.get("prioridade_embarque_num", row.get("prioridade_embarque", pd.NA)),
             errors="coerce",
         )
-        prioridade_ord.append(_safe_float(p, 999.0) if not pd.isna(p) else 999.0)
+        prioridade_ord.append(_safe_float(prioridade, 999.0) if not pd.isna(prioridade) else 999.0)
 
     temp["_bucket_m5_3"] = buckets
     temp["_prioridade_ord_m5_3"] = prioridade_ord
@@ -297,25 +306,31 @@ def _veiculos_menor_para_maior(df_perfis: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def _menor_perfil_cadastrado(veiculos_menor_maior: pd.DataFrame) -> pd.Series:
+    if veiculos_menor_maior.empty:
+        raise ValueError("M5.3 exige ao menos um perfil de veículo cadastrado.")
+    return veiculos_menor_maior.iloc[0].copy()
+
+
 # -----------------------------------------------------------------------------------------
 # Métricas
 # -----------------------------------------------------------------------------------------
 def _peso_total(df_itens: pd.DataFrame) -> float:
     if df_itens.empty:
         return 0.0
-    return float(df_itens["peso_calculado"].fillna(0).sum())
+    return float(pd.to_numeric(df_itens["peso_calculado"], errors="coerce").fillna(0).sum())
 
 
 def _volume_total(df_itens: pd.DataFrame) -> float:
     if df_itens.empty:
         return 0.0
-    return float(df_itens["vol_m3"].fillna(0).sum())
+    return float(pd.to_numeric(df_itens["vol_m3"], errors="coerce").fillna(0).sum())
 
 
 def _km_referencia(df_itens: pd.DataFrame) -> float:
     if df_itens.empty:
         return 0.0
-    return float(df_itens["distancia_rodoviaria_est_km"].fillna(0).max())
+    return float(pd.to_numeric(df_itens["distancia_rodoviaria_est_km"], errors="coerce").fillna(0).max())
 
 
 def _qtd_paradas(df_itens: pd.DataFrame) -> int:
@@ -331,40 +346,6 @@ def _ocupacao_minima_kg(vehicle_row: pd.Series) -> float:
 
 
 # -----------------------------------------------------------------------------------------
-# Regras de viabilidade
-# -----------------------------------------------------------------------------------------
-def _perfil_compativel_por_raio(group_df: pd.DataFrame, vehicle_row: pd.Series) -> bool:
-    km_group = _km_referencia(group_df)
-    max_km = _safe_float(vehicle_row.get("max_km_distancia"), 0.0)
-    if max_km <= 0:
-        return False
-    return km_group <= max_km
-
-
-def _perfil_viavel_na_subregiao(group_df: pd.DataFrame, vehicle_row: pd.Series) -> Tuple[bool, str]:
-    if not _perfil_compativel_por_raio(group_df, vehicle_row):
-        return False, "raio_incompativel"
-
-    peso_group = _peso_total(group_df)
-    peso_minimo = _ocupacao_minima_kg(vehicle_row)
-
-    if peso_group < peso_minimo:
-        return False, "abaixo_ocupacao_minima"
-
-    return True, "ok"
-
-
-def _menor_perfil_compativel_por_raio(
-    group_df: pd.DataFrame,
-    veiculos_menor_maior: pd.DataFrame,
-) -> Optional[pd.Series]:
-    for _, vehicle_row in veiculos_menor_maior.iterrows():
-        if _perfil_compativel_por_raio(group_df, vehicle_row):
-            return vehicle_row.copy()
-    return None
-
-
-# -----------------------------------------------------------------------------------------
 # Auditoria por subregião
 # -----------------------------------------------------------------------------------------
 def _registro_subregiao(
@@ -373,7 +354,7 @@ def _registro_subregiao(
     group_df: pd.DataFrame,
     status_triagem: str,
     motivo: str,
-    menor_perfil_compativel: Optional[pd.Series],
+    menor_perfil_base: pd.Series,
 ) -> Dict[str, Any]:
     peso_group = _peso_total(group_df)
     volume_group = _volume_total(group_df)
@@ -390,18 +371,10 @@ def _registro_subregiao(
         "peso_total_subregiao": round(peso_group, 3),
         "volume_total_subregiao": round(volume_group, 3),
         "km_referencia_subregiao": round(km_group, 2),
-        "menor_perfil_compativel_por_raio": None
-        if menor_perfil_compativel is None
-        else _safe_text(menor_perfil_compativel.get("tipo")),
-        "ocupacao_minima_kg_menor_perfil": None
-        if menor_perfil_compativel is None
-        else round(_ocupacao_minima_kg(menor_perfil_compativel), 3),
-        "capacidade_peso_kg_menor_perfil": None
-        if menor_perfil_compativel is None
-        else round(_safe_float(menor_perfil_compativel.get("capacidade_peso_kg"), 0.0), 3),
-        "ocupacao_minima_perc_menor_perfil": None
-        if menor_perfil_compativel is None
-        else round(_safe_float(menor_perfil_compativel.get("ocupacao_minima_perc"), 70.0), 3),
+        "perfil_base_triagem": _safe_text(menor_perfil_base.get("tipo")) or _safe_text(menor_perfil_base.get("perfil")),
+        "ocupacao_minima_kg_perfil_base": round(_ocupacao_minima_kg(menor_perfil_base), 3),
+        "capacidade_peso_kg_perfil_base": round(_safe_float(menor_perfil_base.get("capacidade_peso_kg"), 0.0), 3),
+        "ocupacao_minima_perc_perfil_base": round(_safe_float(menor_perfil_base.get("ocupacao_minima_perc"), 70.0), 3),
     }
 
 
@@ -446,9 +419,11 @@ def executar_m5_3_triagem_subregioes(
                 "perfis_viaveis_total": 0,
                 "estrategia_m5_3_triagem": [
                     "agrupamento_por_subregiao",
-                    "eliminacao_subregioes_inviaveis",
-                    "eliminacao_perfis_inviaveis",
-                    "VERSAO_M5_3_TRIAGEM_2026_04_11",
+                    "triagem_somente_por_peso_agregado",
+                    "uso_do_menor_perfil_cadastrado",
+                    "sem_validacao_de_raio",
+                    "sem_subida_de_perfil",
+                    "VERSAO_M5_3_TRIAGEM_SIMPLIFICADA_2026_04_11",
                 ],
                 "caminhos_pipeline": caminhos_pipeline or {},
             },
@@ -465,7 +440,10 @@ def executar_m5_3_triagem_subregioes(
 
     saldo = _precalcular_ordenacao(saldo)
     saldo = _ordenar_operacional(saldo)
+
     veiculos_menor_maior = _veiculos_menor_para_maior(perfis)
+    menor_perfil_base = _menor_perfil_cadastrado(veiculos_menor_maior)
+    piso_minimo_menor_perfil = _ocupacao_minima_kg(menor_perfil_base)
 
     subregioes_viaveis_rows: List[Dict[str, Any]] = []
     subregioes_inviaveis_rows: List[Dict[str, Any]] = []
@@ -490,45 +468,34 @@ def executar_m5_3_triagem_subregioes(
         if group_df.empty:
             continue
 
-        menor_perfil = _menor_perfil_compativel_por_raio(
-            group_df=group_df,
-            veiculos_menor_maior=veiculos_menor_maior,
-        )
-
-        if menor_perfil is None:
-            subregioes_inviaveis_rows.append(
-                _registro_subregiao(
-                    subregiao_key=subregiao_key,
-                    uf_key=uf_key,
-                    group_df=group_df,
-                    status_triagem="inviavel",
-                    motivo="sem_perfil_compativel_por_raio",
-                    menor_perfil_compativel=None,
-                )
-            )
-            group_df["status_triagem_m5_3"] = "subregiao_inviavel"
-            group_df["motivo_triagem_m5_3"] = "sem_perfil_compativel_por_raio"
-            df_excluidas_list.append(group_df)
-            continue
-
         peso_group = _peso_total(group_df)
-        peso_minimo_menor = _ocupacao_minima_kg(menor_perfil)
 
-        if peso_group < peso_minimo_menor:
+        if peso_group < piso_minimo_menor_perfil:
             subregioes_inviaveis_rows.append(
                 _registro_subregiao(
                     subregiao_key=subregiao_key,
                     uf_key=uf_key,
                     group_df=group_df,
                     status_triagem="inviavel",
-                    motivo="peso_total_subregiao_abaixo_da_ocupacao_minima_do_menor_perfil_compativel",
-                    menor_perfil_compativel=menor_perfil,
+                    motivo="peso_total_subregiao_abaixo_do_piso_minimo_do_menor_perfil_cadastrado",
+                    menor_perfil_base=menor_perfil_base,
                 )
             )
             group_df["status_triagem_m5_3"] = "subregiao_inviavel"
             group_df["motivo_triagem_m5_3"] = (
-                "peso_total_subregiao_abaixo_da_ocupacao_minima_do_menor_perfil_compativel"
+                "peso_total_subregiao_abaixo_do_piso_minimo_do_menor_perfil_cadastrado"
             )
+            group_df["perfil_base_triagem_m5_3"] = _safe_text(menor_perfil_base.get("tipo")) or _safe_text(
+                menor_perfil_base.get("perfil")
+            )
+            group_df["capacidade_peso_kg_perfil_base_m5_3"] = round(
+                _safe_float(menor_perfil_base.get("capacidade_peso_kg"), 0.0), 3
+            )
+            group_df["ocupacao_minima_perc_perfil_base_m5_3"] = round(
+                _safe_float(menor_perfil_base.get("ocupacao_minima_perc"), 70.0), 3
+            )
+            group_df["piso_minimo_kg_perfil_base_m5_3"] = round(piso_minimo_menor_perfil, 3)
+            group_df["peso_total_subregiao_m5_3"] = round(peso_group, 3)
             df_excluidas_list.append(group_df)
             continue
 
@@ -539,48 +506,56 @@ def executar_m5_3_triagem_subregioes(
                 group_df=group_df,
                 status_triagem="viavel",
                 motivo="ok",
-                menor_perfil_compativel=menor_perfil,
+                menor_perfil_base=menor_perfil_base,
             )
         )
 
         group_df["status_triagem_m5_3"] = "subregiao_viavel"
         group_df["motivo_triagem_m5_3"] = "ok"
+        group_df["perfil_base_triagem_m5_3"] = _safe_text(menor_perfil_base.get("tipo")) or _safe_text(
+            menor_perfil_base.get("perfil")
+        )
+        group_df["capacidade_peso_kg_perfil_base_m5_3"] = round(
+            _safe_float(menor_perfil_base.get("capacidade_peso_kg"), 0.0), 3
+        )
+        group_df["ocupacao_minima_perc_perfil_base_m5_3"] = round(
+            _safe_float(menor_perfil_base.get("ocupacao_minima_perc"), 70.0), 3
+        )
+        group_df["piso_minimo_kg_perfil_base_m5_3"] = round(piso_minimo_menor_perfil, 3)
+        group_df["peso_total_subregiao_m5_3"] = round(peso_group, 3)
         df_elegiveis_list.append(group_df)
 
-        for _, vehicle_row in veiculos_menor_maior.iterrows():
-            ok, motivo = _perfil_viavel_na_subregiao(group_df, vehicle_row)
-
-            if ok:
-                perfis_viaveis_rows.append(
-                    {
-                        "subregiao": subregiao_key,
-                        "uf": uf_key,
-                        "perfil": _safe_text(vehicle_row.get("perfil")),
-                        "tipo": _safe_text(vehicle_row.get("tipo")),
-                        "capacidade_peso_kg": round(
-                            _safe_float(vehicle_row.get("capacidade_peso_kg"), 0.0),
-                            3,
-                        ),
-                        "capacidade_vol_m3": round(
-                            _safe_float(vehicle_row.get("capacidade_vol_m3"), 0.0),
-                            3,
-                        ),
-                        "max_entregas": _safe_int(vehicle_row.get("max_entregas"), 0),
-                        "max_km_distancia": round(
-                            _safe_float(vehicle_row.get("max_km_distancia"), 0.0),
-                            3,
-                        ),
-                        "ocupacao_minima_perc": round(
-                            _safe_float(vehicle_row.get("ocupacao_minima_perc"), 70.0),
-                            3,
-                        ),
-                        "ocupacao_minima_kg": round(_ocupacao_minima_kg(vehicle_row), 3),
-                        "peso_total_subregiao": round(peso_group, 3),
-                        "km_referencia_subregiao": round(_km_referencia(group_df), 2),
-                        "status_perfil_subregiao": "viavel",
-                        "motivo_status_perfil_subregiao": "ok",
-                    }
-                )
+        perfis_viaveis_rows.append(
+            {
+                "subregiao": subregiao_key,
+                "uf": uf_key,
+                "perfil": _safe_text(menor_perfil_base.get("perfil")),
+                "tipo": _safe_text(menor_perfil_base.get("tipo")),
+                "capacidade_peso_kg": round(
+                    _safe_float(menor_perfil_base.get("capacidade_peso_kg"), 0.0),
+                    3,
+                ),
+                "capacidade_vol_m3": round(
+                    _safe_float(menor_perfil_base.get("capacidade_vol_m3"), 0.0),
+                    3,
+                ),
+                "max_entregas": _safe_int(menor_perfil_base.get("max_entregas"), 0),
+                "max_km_distancia": round(
+                    _safe_float(menor_perfil_base.get("max_km_distancia"), 0.0),
+                    3,
+                ),
+                "ocupacao_minima_perc": round(
+                    _safe_float(menor_perfil_base.get("ocupacao_minima_perc"), 70.0),
+                    3,
+                ),
+                "ocupacao_minima_kg": round(piso_minimo_menor_perfil, 3),
+                "peso_total_subregiao": round(peso_group, 3),
+                "km_referencia_subregiao": round(_km_referencia(group_df), 2),
+                "status_perfil_subregiao": "viavel",
+                "motivo_status_perfil_subregiao": "ok",
+                "regra_triagem_m5_3": "somente_menor_perfil_cadastrado_sem_raio",
+            }
+        )
 
     df_saldo_elegivel_composicao_m5_3 = (
         pd.concat(df_elegiveis_list, ignore_index=True) if df_elegiveis_list else pd.DataFrame()
@@ -630,11 +605,17 @@ def executar_m5_3_triagem_subregioes(
         "linhas_elegiveis_composicao": int(len(df_saldo_elegivel_composicao_m5_3)),
         "linhas_excluidas_triagem": int(len(df_saldo_excluido_triagem_m5_3)),
         "perfis_viaveis_total": int(len(df_perfis_viaveis_por_subregiao_m5_3)),
+        "perfil_base_triagem": _safe_text(menor_perfil_base.get("tipo")) or _safe_text(menor_perfil_base.get("perfil")),
+        "capacidade_peso_kg_perfil_base": round(_safe_float(menor_perfil_base.get("capacidade_peso_kg"), 0.0), 3),
+        "ocupacao_minima_perc_perfil_base": round(_safe_float(menor_perfil_base.get("ocupacao_minima_perc"), 70.0), 3),
+        "piso_minimo_kg_perfil_base": round(piso_minimo_menor_perfil, 3),
         "estrategia_m5_3_triagem": [
             "agrupamento_por_subregiao",
-            "eliminacao_subregioes_inviaveis",
-            "eliminacao_perfis_inviaveis",
-            "VERSAO_M5_3_TRIAGEM_2026_04_11",
+            "triagem_somente_por_peso_agregado",
+            "uso_do_menor_perfil_cadastrado",
+            "sem_validacao_de_raio",
+            "sem_subida_de_perfil",
+            "VERSAO_M5_3_TRIAGEM_SIMPLIFICADA_2026_04_11",
         ],
         "caminhos_pipeline": caminhos_pipeline or {},
     }
