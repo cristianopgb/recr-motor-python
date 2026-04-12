@@ -13,7 +13,7 @@ from app.pipeline.m4_manifestos_fechados import executar_m4_manifestos_fechados
 from app.pipeline.m5_1_triagem_cidades import executar_m5_1_triagem_cidades
 from app.pipeline.m5_2_composicao_cidades import executar_m5_2_composicao_cidades
 from app.pipeline.m5_3_triagem_subregioes import executar_m5_3_triagem_subregioes
-from app.pipeline.m5_4_composicao_subregioes import executar_m5_4_composicao_subregioes
+from app.pipeline.m5_4a_preparacao_subregioes import executar_m5_4a_preparacao_subregioes
 from app.schemas import RoteirizacaoRequest
 from app.services.payload_service import PipelineContext, normalizar_payload_para_pipeline
 
@@ -353,7 +353,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     )
 
     # =========================================================================================
-    # M5.1A - TRIAGEM CIDADE
+    # M5.1A
     # =========================================================================================
     t0 = _agora()
     outputs_m5_1, meta_m5_1 = executar_m5_1_triagem_cidades(
@@ -391,7 +391,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     )
 
     # =========================================================================================
-    # M5.2 - COMPOSIÇÃO CIDADE
+    # M5.2
     # =========================================================================================
     t0 = _agora()
     outputs_m5_2, meta_m5_2 = executar_m5_2_composicao_cidades(
@@ -422,7 +422,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             extra={
                 **resumo_m5_2,
                 "total_premanifestos_m5_2": _safe_len(df_premanifestos_m5_2),
-                "total_itens_premanifestos_m5_2": _safe_len(df_itens_premanifestos_m5_2),
+                "total_itens_premanifestados_m5_2": _safe_len(df_itens_premanifestos_m5_2),
                 "total_remanescente_m5_2": _safe_len(df_remanescente_m5_2),
             },
         )
@@ -445,7 +445,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         df_saldo_global_pos_cidade_m5 = pd.DataFrame()
 
     # =========================================================================================
-    # M5.3 - TRIAGEM SUBREGIÃO
+    # M5.3
     # =========================================================================================
     t0 = _agora()
     outputs_m5_3, meta_m5_3 = executar_m5_3_triagem_subregioes(
@@ -487,43 +487,40 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     )
 
     # =========================================================================================
-    # M5.4 - COMPOSIÇÃO SUBREGIÃO
+    # M5.4A
     # =========================================================================================
     t0 = _agora()
-    outputs_m5_4, meta_m5_4 = executar_m5_4_composicao_subregioes(
+    outputs_m5_4a, meta_m5_4a = executar_m5_4a_preparacao_subregioes(
         df_saldo_elegivel_composicao_m5_3=df_saldo_elegivel_composicao_m5_3,
-        df_perfis_base_m5=df_veiculos_tratados,
         rodada_id=contexto.rodada_id,
         data_base_roteirizacao=contexto.data_base,
         tipo_roteirizacao=contexto.tipo_roteirizacao,
         caminhos_pipeline=contexto.caminhos_pipeline,
     )
-    tempo_m5_4 = _duracao_ms(t0)
-    metricas_tempo["m5_4_composicao_subregioes_ms"] = tempo_m5_4
+    tempo_m5_4a = _duracao_ms(t0)
+    metricas_tempo["m5_4a_preparacao_subregioes_ms"] = tempo_m5_4a
 
-    resumo_m5_4 = meta_m5_4["resumo_m5_4"]
+    resumo_m5_4a = meta_m5_4a["resumo_m5_4a"]
 
-    df_premanifestos_m5_4 = outputs_m5_4["df_premanifestos_m5_4"]
-    df_itens_premanifestados_m5_4 = outputs_m5_4["df_itens_premanifestados_m5_4"]
-    df_remanescente_m5_4 = outputs_m5_4["df_remanescente_m5_4"]
-    df_subregioes_processadas_m5_4 = outputs_m5_4["df_subregioes_processadas_m5_4"]
-    df_tentativas_perfis_m5_4 = outputs_m5_4["df_tentativas_perfis_m5_4"]
+    df_base_preparada_m5_4a = outputs_m5_4a["df_base_preparada_m5_4a"]
+    df_subregioes_ordenadas_m5_4a = outputs_m5_4a["df_subregioes_ordenadas_m5_4a"]
+    df_cidades_ordenadas_m5_4a = outputs_m5_4a["df_cidades_ordenadas_m5_4a"]
+    df_clientes_ordenados_m5_4a = outputs_m5_4a["df_clientes_ordenados_m5_4a"]
 
     logs.append(
         _log(
-            modulo="m5_4_composicao_subregioes",
+            modulo="m5_4a_preparacao_subregioes",
             status="ok",
-            mensagem="M5.4 executado com sucesso",
+            mensagem="M5.4A executado com sucesso",
             quantidade_entrada=_safe_len(df_saldo_elegivel_composicao_m5_3),
-            quantidade_saida=_safe_len(df_remanescente_m5_4),
-            tempo_ms=tempo_m5_4,
+            quantidade_saida=_safe_len(df_base_preparada_m5_4a),
+            tempo_ms=tempo_m5_4a,
             extra={
-                **resumo_m5_4,
-                "total_premanifestos_m5_4": _safe_len(df_premanifestos_m5_4),
-                "total_itens_premanifestados_m5_4": _safe_len(df_itens_premanifestados_m5_4),
-                "total_remanescente_m5_4": _safe_len(df_remanescente_m5_4),
-                "total_subregioes_processadas_m5_4": _safe_len(df_subregioes_processadas_m5_4),
-                "total_tentativas_perfis_m5_4": _safe_len(df_tentativas_perfis_m5_4),
+                **resumo_m5_4a,
+                "total_subregioes_ordenadas_m5_4a": _safe_len(df_subregioes_ordenadas_m5_4a),
+                "total_cidades_ordenadas_m5_4a": _safe_len(df_cidades_ordenadas_m5_4a),
+                "total_clientes_ordenados_m5_4a": _safe_len(df_clientes_ordenados_m5_4a),
+                "total_base_preparada_m5_4a": _safe_len(df_base_preparada_m5_4a),
             },
         )
     )
@@ -537,14 +534,20 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         df_saldo_elegivel_composicao_m5_3,
         limit=None,
     )
-
-    premanifestos_m5_4 = _serializar_dataframe_para_records(
-        df_itens_premanifestados_m5_4,
+    subregioes_ordenadas_m5_4a = _serializar_dataframe_para_records(
+        df_subregioes_ordenadas_m5_4a,
         limit=None,
     )
-
-    remanescentes_m5_4 = _serializar_dataframe_para_records(
-        df_remanescente_m5_4,
+    cidades_ordenadas_m5_4a = _serializar_dataframe_para_records(
+        df_cidades_ordenadas_m5_4a,
+        limit=None,
+    )
+    clientes_ordenados_m5_4a = _serializar_dataframe_para_records(
+        df_clientes_ordenados_m5_4a,
+        limit=None,
+    )
+    base_preparada_m5_4a = _serializar_dataframe_para_records(
+        df_base_preparada_m5_4a,
         limit=None,
     )
 
@@ -556,9 +559,9 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
 
     resposta: Dict[str, Any] = {
         "status": "ok",
-        "mensagem": "Motor executou com sucesso até o M5.4 composição de subregiões.",
-        "pipeline_real_ate": "M5.4",
-        "modo_resposta": "validacao_manual_m5_4_composicao",
+        "mensagem": "Motor executou com sucesso até o M5.4A preparação de subregiões.",
+        "pipeline_real_ate": "M5.4A",
+        "modo_resposta": "validacao_manual_m5_4a_preparacao",
         "resposta_truncada": False,
         "resumo_execucao": {
             "rodada_id": contexto.rodada_id,
@@ -596,11 +599,10 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "total_subregioes_viaveis_m5_3": _safe_len(df_subregioes_viaveis_m5_3),
             "total_subregioes_inviaveis_m5_3": _safe_len(df_subregioes_inviaveis_m5_3),
             "total_perfis_viaveis_por_subregiao_m5_3": _safe_len(df_perfis_viaveis_por_subregiao_m5_3),
-            "total_premanifestos_m5_4": _safe_len(df_premanifestos_m5_4),
-            "total_itens_premanifestados_m5_4": _safe_len(df_itens_premanifestados_m5_4),
-            "total_remanescentes_m5_4": _safe_len(df_remanescente_m5_4),
-            "total_subregioes_processadas_m5_4": _safe_len(df_subregioes_processadas_m5_4),
-            "total_tentativas_perfis_m5_4": _safe_len(df_tentativas_perfis_m5_4),
+            "total_subregioes_ordenadas_m5_4a": _safe_len(df_subregioes_ordenadas_m5_4a),
+            "total_cidades_ordenadas_m5_4a": _safe_len(df_cidades_ordenadas_m5_4a),
+            "total_clientes_ordenados_m5_4a": _safe_len(df_clientes_ordenados_m5_4a),
+            "total_base_preparada_m5_4a": _safe_len(df_base_preparada_m5_4a),
             "resumo_m1": resumo_m1,
             "resumo_m2": resumo_m2,
             "resumo_m3": resumo_m3,
@@ -609,22 +611,28 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "resumo_m5_1": resumo_m5_1,
             "resumo_m5_2": resumo_m5_2,
             "resumo_m5_3": resumo_m5_3,
-            "resumo_m5_4": resumo_m5_4,
+            "resumo_m5_4a": resumo_m5_4a,
         },
         "contexto_rodada": {
             "filial": contexto.filial,
             "parametros_rodada": contexto.parametros_rodada,
         },
         "elegiveis_m5_3": elegiveis_m5_3,
-        "premanifestos_m5_4": premanifestos_m5_4,
-        "remanescentes_m5_4": remanescentes_m5_4,
+        "subregioes_ordenadas_m5_4a": subregioes_ordenadas_m5_4a,
+        "cidades_ordenadas_m5_4a": cidades_ordenadas_m5_4a,
+        "clientes_ordenados_m5_4a": clientes_ordenados_m5_4a,
+        "base_preparada_m5_4a": base_preparada_m5_4a,
         "auditoria_serializacao": {
             "elegiveis_m5_3_total": _safe_len(df_saldo_elegivel_composicao_m5_3),
             "elegiveis_m5_3_retornado": len(elegiveis_m5_3),
-            "premanifestos_m5_4_total": _safe_len(df_itens_premanifestados_m5_4),
-            "premanifestos_m5_4_retornado": len(premanifestos_m5_4),
-            "remanescentes_m5_4_total": _safe_len(df_remanescente_m5_4),
-            "remanescentes_m5_4_retornado": len(remanescentes_m5_4),
+            "subregioes_ordenadas_m5_4a_total": _safe_len(df_subregioes_ordenadas_m5_4a),
+            "subregioes_ordenadas_m5_4a_retornado": len(subregioes_ordenadas_m5_4a),
+            "cidades_ordenadas_m5_4a_total": _safe_len(df_cidades_ordenadas_m5_4a),
+            "cidades_ordenadas_m5_4a_retornado": len(cidades_ordenadas_m5_4a),
+            "clientes_ordenados_m5_4a_total": _safe_len(df_clientes_ordenados_m5_4a),
+            "clientes_ordenados_m5_4a_retornado": len(clientes_ordenados_m5_4a),
+            "base_preparada_m5_4a_total": _safe_len(df_base_preparada_m5_4a),
+            "base_preparada_m5_4a_retornado": len(base_preparada_m5_4a),
         },
         "logs": logs,
     }
@@ -640,25 +648,21 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                     df_saldo_elegivel_composicao_m5_3,
                     "df_saldo_elegivel_composicao_m5_3",
                 ),
-                "saldo_excluido_triagem_m5_3": _snapshot_dataframe(
-                    df_saldo_excluido_triagem_m5_3,
-                    "df_saldo_excluido_triagem_m5_3",
+                "subregioes_ordenadas_m5_4a": _snapshot_dataframe(
+                    df_subregioes_ordenadas_m5_4a,
+                    "df_subregioes_ordenadas_m5_4a",
                 ),
-                "premanifestos_m5_4": _snapshot_dataframe(
-                    df_itens_premanifestados_m5_4,
-                    "df_itens_premanifestados_m5_4",
+                "cidades_ordenadas_m5_4a": _snapshot_dataframe(
+                    df_cidades_ordenadas_m5_4a,
+                    "df_cidades_ordenadas_m5_4a",
                 ),
-                "remanescente_m5_4": _snapshot_dataframe(
-                    df_remanescente_m5_4,
-                    "df_remanescente_m5_4",
+                "clientes_ordenados_m5_4a": _snapshot_dataframe(
+                    df_clientes_ordenados_m5_4a,
+                    "df_clientes_ordenados_m5_4a",
                 ),
-                "subregioes_processadas_m5_4": _snapshot_dataframe(
-                    df_subregioes_processadas_m5_4,
-                    "df_subregioes_processadas_m5_4",
-                ),
-                "tentativas_perfis_m5_4": _snapshot_dataframe(
-                    df_tentativas_perfis_m5_4,
-                    "df_tentativas_perfis_m5_4",
+                "base_preparada_m5_4a": _snapshot_dataframe(
+                    df_base_preparada_m5_4a,
+                    "df_base_preparada_m5_4a",
                 ),
             },
             "resumos_dataframes": {
@@ -666,13 +670,21 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                     df_saldo_elegivel_composicao_m5_3,
                     "elegiveis_m5_3",
                 ),
-                "premanifestos_m5_4": _montar_resumo_dataframe(
-                    df_itens_premanifestados_m5_4,
-                    "premanifestos_m5_4",
+                "subregioes_ordenadas_m5_4a": _montar_resumo_dataframe(
+                    df_subregioes_ordenadas_m5_4a,
+                    "subregioes_ordenadas_m5_4a",
                 ),
-                "remanescentes_m5_4": _montar_resumo_dataframe(
-                    df_remanescente_m5_4,
-                    "remanescentes_m5_4",
+                "cidades_ordenadas_m5_4a": _montar_resumo_dataframe(
+                    df_cidades_ordenadas_m5_4a,
+                    "cidades_ordenadas_m5_4a",
+                ),
+                "clientes_ordenados_m5_4a": _montar_resumo_dataframe(
+                    df_clientes_ordenados_m5_4a,
+                    "clientes_ordenados_m5_4a",
+                ),
+                "base_preparada_m5_4a": _montar_resumo_dataframe(
+                    df_base_preparada_m5_4a,
+                    "base_preparada_m5_4a",
                 ),
             },
         }
