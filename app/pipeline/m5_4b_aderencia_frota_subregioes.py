@@ -19,14 +19,12 @@ import pandas as pd
 # - não fecha pré-manifesto
 # - não remove itens do pool
 #
-# REGRAS CONSOLIDADAS
-# 1. análise por subregião
-# 2. perfis do maior para o menor
-# 3. elimina por ocupação mínima da massa útil
-# 4. elimina por limite de entregas com teste simples
-# 5. raio é filtro parcial:
-#    - cidade fora do raio não elimina o perfil
-#    - só sai da base útil daquele perfil
+# REGRA CONSOLIDADA DESTA VERSÃO
+# - o raio fino NÃO derruba perfil no M5.4B
+# - o raio fino fica para o M5.4C
+# - no M5.4B a análise é:
+#   1. massa total da subregião
+#   2. combinação simples pelo limite de entregas
 # =========================================================================================
 
 
@@ -81,6 +79,12 @@ def _qtd_clientes(df: pd.DataFrame) -> int:
     if df.empty:
         return 0
     return int(df["destinatario"].fillna("").astype(str).nunique())
+
+
+def _qtd_cidades(df: pd.DataFrame) -> int:
+    if df.empty:
+        return 0
+    return int(df["cidade"].fillna("").astype(str).nunique())
 
 
 def _ocupacao_minima_kg(vehicle_row: pd.Series) -> float:
@@ -244,11 +248,11 @@ def _blocos_clientes_subregiao(df_sub: pd.DataFrame) -> pd.DataFrame:
 def _existe_combinacao_simples_viavel(
     blocos: pd.DataFrame,
     vehicle_row: pd.Series,
-    max_trocas: int = 12,
+    max_trocas: int = 20,
 ) -> Tuple[bool, Dict[str, Any]]:
     if blocos.empty:
         return False, {
-            "motivo": "sem_blocos_dentro_do_raio",
+            "motivo": "sem_blocos_na_subregiao",
             "peso_melhor_combinacao": 0.0,
             "qtd_entregas_melhor_combinacao": 0,
         }
@@ -275,26 +279,40 @@ def _existe_combinacao_simples_viavel(
             "qtd_entregas_melhor_combinacao": 0,
         }
 
-    # tentativa 1: maiores blocos
-    escolhidos = list(range(k))
-    soma = sum(pesos[i] for i in escolhidos)
-
     melhor_soma_abaixo = 0.0
     melhor_qtd_abaixo = 0
+
+    # tentativa 1: top k maiores
+    escolhidos = list(range(k))
+    soma = sum(pesos[i] for i in escolhidos)
 
     if ocup_min_kg <= soma <= ocup_max_kg:
         return True, {
             "motivo": "ok_com_maiores_blocos",
             "peso_melhor_combinacao": round(soma, 3),
-            "qtd_entregas_melhor_combinacao": len(escolhidos),
+            "qtd_entregas_melhor_combinacao": k,
         }
 
     if soma < ocup_min_kg:
         melhor_soma_abaixo = soma
-        melhor_qtd_abaixo = len(escolhidos)
+        melhor_qtd_abaixo = k
 
-    # tentativa 2: se passou de 100, substitui últimos blocos por menores
-    # isso segue exatamente a lógica que você descreveu
+    # tentativa 2: menores quantidades até k
+    for qtd in range(1, k + 1):
+        soma_qtd = sum(pesos[:qtd])
+
+        if ocup_min_kg <= soma_qtd <= ocup_max_kg:
+            return True, {
+                "motivo": "ok_com_quantidade_menor_entregas",
+                "peso_melhor_combinacao": round(soma_qtd, 3),
+                "qtd_entregas_melhor_combinacao": qtd,
+            }
+
+        if soma_qtd < ocup_min_kg and soma_qtd > melhor_soma_abaixo:
+            melhor_soma_abaixo = soma_qtd
+            melhor_qtd_abaixo = qtd
+
+    # tentativa 3: se top k passou do máximo, troca o último por blocos menores
     if soma > ocup_max_kg and n > k:
         base_idxs = list(range(k))
         reserva_idxs = list(range(k, n))
@@ -328,20 +346,6 @@ def _existe_combinacao_simples_viavel(
 
             if tentativas > max_trocas:
                 break
-
-    # tentativa 3: menor quantidade de entregas até k
-    for qtd in range(1, k + 1):
-        soma_qtd = sum(pesos[:qtd])
-        if ocup_min_kg <= soma_qtd <= ocup_max_kg:
-            return True, {
-                "motivo": "ok_com_quantidade_menor_entregas",
-                "peso_melhor_combinacao": round(soma_qtd, 3),
-                "qtd_entregas_melhor_combinacao": qtd,
-            }
-
-        if soma_qtd < ocup_min_kg and soma_qtd > melhor_soma_abaixo:
-            melhor_soma_abaixo = soma_qtd
-            melhor_qtd_abaixo = qtd
 
     return False, {
         "motivo": "nao_ha_combinacao_simples_dentro_limite_entregas",
@@ -385,9 +389,9 @@ def executar_m5_4b_aderencia_frota_subregioes(
                 "estrategia_m5_4b": [
                     "analise_por_subregiao",
                     "perfis_do_maior_para_o_menor",
-                    "raio_como_filtro_parcial",
+                    "sem_filtro_fino_de_raio_no_m5_4b",
                     "teste_simples_por_limite_de_entregas",
-                    "VERSAO_M5_4B_2026_04_12_B",
+                    "VERSAO_M5_4B_2026_04_12_C",
                 ],
                 "caminhos_pipeline": caminhos_pipeline or {},
             }
@@ -428,6 +432,7 @@ def executar_m5_4b_aderencia_frota_subregioes(
 
         peso_total_sub = _peso_total(df_sub)
         qtd_clientes_sub = _qtd_clientes(df_sub)
+        qtd_cidades_sub = _qtd_cidades(df_sub)
         km_max_sub = _km_max(df_sub)
 
         blocos_sub = _blocos_clientes_subregiao(df_sub)
@@ -441,18 +446,6 @@ def executar_m5_4b_aderencia_frota_subregioes(
             max_km = _safe_float(vehicle_row.get("max_km_distancia"), 0.0)
             ocup_min_kg = _ocupacao_minima_kg(vehicle_row)
             ocup_max_kg = _ocupacao_maxima_kg(vehicle_row)
-
-            # 1) filtro por raio é parcial
-            if max_km > 0:
-                df_sub_dentro_raio = df_sub[
-                    pd.to_numeric(df_sub["distancia_rodoviaria_est_km"], errors="coerce").fillna(0) <= max_km
-                ].copy()
-            else:
-                df_sub_dentro_raio = df_sub.copy()
-
-            peso_total_util = _peso_total(df_sub_dentro_raio)
-            qtd_clientes_util = _qtd_clientes(df_sub_dentro_raio)
-            km_max_util = _km_max(df_sub_dentro_raio)
 
             registro_base = {
                 "subregiao": subregiao,
@@ -470,42 +463,29 @@ def executar_m5_4b_aderencia_frota_subregioes(
                 "ocupacao_maxima_kg": round(ocup_max_kg, 3),
                 "peso_total_subregiao": round(peso_total_sub, 3),
                 "qtd_clientes_subregiao": qtd_clientes_sub,
+                "qtd_cidades_subregiao": qtd_cidades_sub,
                 "km_max_subregiao": round(km_max_sub, 2),
-                "peso_total_util_raio": round(peso_total_util, 3),
-                "qtd_clientes_util_raio": qtd_clientes_util,
-                "km_max_util_raio": round(km_max_util, 2),
-                "qtd_cidades_fora_do_raio": int(
-                    df_sub["cidade"].nunique() - df_sub_dentro_raio["cidade"].nunique()
-                ),
+                # mantidos só para auditoria visual, sem corte de lógica no 5.4B
+                "peso_total_util_raio": round(peso_total_sub, 3),
+                "qtd_clientes_util_raio": qtd_clientes_sub,
+                "km_max_util_raio": round(km_max_sub, 2),
+                "qtd_cidades_fora_do_raio": 0,
             }
 
-            # 2) se não sobrou nada no raio, perfil cai
-            if df_sub_dentro_raio.empty:
+            # 1) elimina por ocupação mínima da subregião inteira
+            if peso_total_sub < ocup_min_kg:
                 nao_aderentes_rows.append(
                     {
                         **registro_base,
                         "status_aderencia_m5_4b": "nao_aderente",
-                        "motivo_aderencia_m5_4b": "sem_massa_util_dentro_do_raio",
+                        "motivo_aderencia_m5_4b": "peso_total_subregiao_abaixo_ocupacao_minima",
                     }
                 )
                 continue
 
-            # 3) ocupação mínima na massa útil
-            if peso_total_util < ocup_min_kg:
-                nao_aderentes_rows.append(
-                    {
-                        **registro_base,
-                        "status_aderencia_m5_4b": "nao_aderente",
-                        "motivo_aderencia_m5_4b": "peso_total_util_abaixo_ocupacao_minima",
-                    }
-                )
-                continue
-
-            # 4) blocos de cliente dentro do raio
-            blocos_util = _blocos_clientes_subregiao(df_sub_dentro_raio)
-
+            # 2) elimina por combinação simples de entregas
             ok_entregas, info_combo = _existe_combinacao_simples_viavel(
-                blocos=blocos_util,
+                blocos=blocos_sub,
                 vehicle_row=vehicle_row,
             )
 
@@ -546,9 +526,9 @@ def executar_m5_4b_aderencia_frota_subregioes(
         "estrategia_m5_4b": [
             "analise_por_subregiao",
             "perfis_do_maior_para_o_menor",
-            "raio_como_filtro_parcial",
+            "sem_filtro_fino_de_raio_no_m5_4b",
             "teste_simples_por_limite_de_entregas",
-            "VERSAO_M5_4B_2026_04_12_B",
+            "VERSAO_M5_4B_2026_04_12_C",
         ],
         "caminhos_pipeline": caminhos_pipeline or {},
     }
