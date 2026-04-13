@@ -41,6 +41,10 @@ def executar_m2_enriquecimento(
     - mesorregiao do dataset equivale à mesorregiao da base fallback
     - fallback só preenche quando o campo da carteira vier vazio
     - regiao permanece como dado original da carteira, sem fallback automático
+
+    Regra crítica preservada:
+    - este módulo NÃO recalcula peso operacional
+    - peso_calculado entra do M1 e apenas segue adiante
     """
 
     carteira = df_carteira_tratada.copy()
@@ -71,28 +75,34 @@ def executar_m2_enriquecimento(
     if pd.isna(data_base):
         raise Exception("data_base_roteirizacao inválida no M2.")
 
+    parametros_dict = _extrair_parametros_dict(parametros)
+
     fator_km_rodoviario = _obter_valor_parametro(
         parametros,
         ["fator_km_rodoviario", "fator_rodoviario", "fator_km_rodoviario_estimado"],
         FATOR_KM_RODOVIARIO_PADRAO,
+        parametros_dict=parametros_dict,
     )
 
     velocidade_media_km_h = _obter_valor_parametro(
         parametros,
         ["velocidade_media_km_h"],
         VELOCIDADE_MEDIA_KM_H_PADRAO,
+        parametros_dict=parametros_dict,
     )
 
     horas_direcao_dia = _obter_valor_parametro(
         parametros,
         ["horas_direcao_dia"],
         HORAS_DIRECAO_DIA_PADRAO,
+        parametros_dict=parametros_dict,
     )
 
     km_dia_operacional = _obter_valor_parametro(
         parametros,
         ["km_dia_operacional", "km_dia_max", "km_max_dia", "km_dia"],
         KM_DIA_OPERACIONAL_PADRAO,
+        parametros_dict=parametros_dict,
     )
 
     if pd.isna(km_dia_operacional) or float(km_dia_operacional) <= 0:
@@ -418,6 +428,8 @@ def _validar_colunas_minimas(carteira: pd.DataFrame, geo: pd.DataFrame) -> None:
         "agendada",
         "data_agenda",
         "data_leadtime",
+        "peso_kg",
+        "peso_calculado",
     ]
     faltam_carteira = [c for c in colunas_minimas_carteira if c not in carteira.columns]
     if faltam_carteira:
@@ -451,6 +463,8 @@ def _validar_saida_m2(df: pd.DataFrame) -> None:
         "folga_dias",
         "faixa_km_cd",
         "quadrante",
+        "peso_kg",
+        "peso_calculado",
     ]
     faltam = [c for c in colunas_obrigatorias_saida if c not in df.columns]
     if faltam:
@@ -460,11 +474,50 @@ def _validar_saida_m2(df: pd.DataFrame) -> None:
         )
 
 
+def _extrair_parametros_dict(df_parametros: pd.DataFrame) -> Dict[str, Any]:
+    """
+    Suporta:
+    1) formato antigo: colunas parametro / valor
+    2) formato novo: registro único com colunas do contexto
+    """
+    if df_parametros is None or df_parametros.empty:
+        return {}
+
+    if "parametro" in df_parametros.columns and "valor" in df_parametros.columns:
+        dfp = df_parametros.copy()
+        dfp["parametro"] = dfp["parametro"].astype(str).str.strip().str.lower()
+        return dict(zip(dfp["parametro"], dfp["valor"]))
+
+    if len(df_parametros) == 1:
+        linha = df_parametros.iloc[0].to_dict()
+        saida: Dict[str, Any] = {}
+        for chave, valor in linha.items():
+            chave_norm = str(chave).strip().lower()
+            saida[chave_norm] = valor
+        return saida
+
+    return {}
+
+
 def _obter_valor_parametro(
     df_parametros: pd.DataFrame,
     chaves_possiveis: list[str],
     default: Any = None,
+    parametros_dict: Dict[str, Any] | None = None,
 ) -> Any:
+    if parametros_dict is None:
+        parametros_dict = _extrair_parametros_dict(df_parametros)
+
+    for chave in chaves_possiveis:
+        chave_norm = str(chave).strip().lower()
+        if chave_norm in parametros_dict:
+            valor = parametros_dict.get(chave_norm)
+            if pd.notna(valor):
+                try:
+                    return float(valor)
+                except Exception:
+                    return valor
+
     if df_parametros.empty or "parametro" not in df_parametros.columns:
         return default
 
