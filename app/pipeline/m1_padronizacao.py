@@ -1,6 +1,6 @@
 # ============================================================
 # MÓDULO 1 - LIMPEZA, PADRONIZAÇÃO E TIPAGEM
-# (VERSÃO API - AJUSTADA AO DATASET V2 DO SISTEMA 1)
+# (VERSÃO API - AJUSTADA AO CONTRATO NOVO DO SISTEMA 1)
 # ============================================================
 
 from __future__ import annotations
@@ -176,16 +176,11 @@ def _limpar_texto_data(valor: Any) -> Any:
 
     texto = str(valor).replace("\u00a0", " ")
     texto = texto.strip()
-
-    # remove repetições de espaço
     texto = re.sub(r"\s+", " ", texto)
-
-    # remove lixo comum no final/início
     texto = re.sub(r"^[,;]+", "", texto)
     texto = re.sub(r"[,;]+$", "", texto)
     texto = texto.strip()
 
-    # placeholders usuais
     texto_lower = texto.lower()
     if texto_lower in {"", "-", "--", "null", "none", "nan", "nat", "n/a", "na"}:
         return np.nan
@@ -196,10 +191,8 @@ def _limpar_texto_data(valor: Any) -> Any:
 def converter_data(serie: pd.Series) -> pd.Series:
     serie_limpa = serie.apply(_limpar_texto_data)
 
-    # primeira tentativa: formato brasileiro / dataset REC
     convertido = pd.to_datetime(serie_limpa, errors="coerce", dayfirst=True)
 
-    # fallback para o que sobrar em formatos ISO ou variantes
     mask_falha = convertido.isna() & serie_limpa.notna()
     if mask_falha.any():
         convertido.loc[mask_falha] = pd.to_datetime(
@@ -260,8 +253,6 @@ def converter_flag_agendamento(serie: pd.Series) -> pd.Series:
         except Exception:
             pass
 
-        # aqui a regra é simples:
-        # se data_agenda existe após conversão, então é agendada
         return True
 
     return serie.apply(_f)
@@ -354,27 +345,112 @@ def _coalescer_colunas(df: pd.DataFrame, alvo: str, candidatos: list[str]) -> pd
 
 def _garantir_colunas_carteira_v2(carteira: pd.DataFrame) -> pd.DataFrame:
     """
-    Consolida layout novo e antigo em um conjunto estável de colunas brutas.
+    Consolida layout novo, layout antigo e nomes truncados do dataset real
+    em um conjunto estável de colunas brutas.
     """
     carteira = _coalescer_colunas(carteira, "filial_r", ["filial_r", "filial"])
-    carteira = _coalescer_colunas(carteira, "filial_d", ["filial_d", "filial_origem"])
+    carteira = _coalescer_colunas(carteira, "romane", ["romane", "romanei"])
+    carteira = _coalescer_colunas(carteira, "filial_d", ["filial_d", "filial_origem", "filial_1"])
+    carteira = _coalescer_colunas(carteira, "serie", ["serie", "serie_d"])
+    carteira = _coalescer_colunas(carteira, "nro_doc", ["nro_doc", "nro_do"])
+
+    carteira = _coalescer_colunas(carteira, "data_des", ["data_des", "data", "data_d"])
+    carteira = _coalescer_colunas(carteira, "data_nf", ["data_nf", "data_n"])
+    carteira = _coalescer_colunas(carteira, "dle", ["dle"])
+    carteira = _coalescer_colunas(carteira, "agendam", ["agendam"])
+
+    carteira = _coalescer_colunas(carteira, "vlrmerc", ["vlrmerc"])
+    carteira = _coalescer_colunas(carteira, "qtd", ["qtd"])
+    carteira = _coalescer_colunas(carteira, "qtdnf", ["qtdnf"])
     carteira = _coalescer_colunas(carteira, "peso_cub", ["peso_cub", "peso_c"])
-    carteira = _coalescer_colunas(carteira, "classif", ["classif", "classifi"])
+    carteira = _coalescer_colunas(carteira, "peso_calculo", ["peso_calculo", "peso_calculado"])
+
+    carteira = _coalescer_colunas(carteira, "classif", ["classif", "classifi", "classifica"])
     carteira = _coalescer_colunas(carteira, "tomad", ["tomad", "tomador"])
-    carteira = _coalescer_colunas(carteira, "destin", ["destin", "destinatario"])
+    carteira = _coalescer_colunas(carteira, "destin", ["destin", "destinatario", "destina"])
     carteira = _coalescer_colunas(carteira, "cidad", ["cidad", "cida"])
-    carteira = _coalescer_colunas(carteira, "ocorrencias_nf", ["ocorrencias_nf", "ocorrencias_nfs"])
+    carteira = _coalescer_colunas(carteira, "tipo_ca", ["tipo_ca", "tipo_carg"])
+    carteira = _coalescer_colunas(carteira, "tipo_carga", ["tipo_carga", "tipo_c"])
+    carteira = _coalescer_colunas(carteira, "regiao", ["regiao"])
+    carteira = _coalescer_colunas(carteira, "mesoregiao", ["mesoregiao"])
+    carteira = _coalescer_colunas(carteira, "sub_regiao", ["sub_regiao"])
+    carteira = _coalescer_colunas(carteira, "ocorrencias_nf", ["ocorrencias_nf", "ocorrencias_nfs", "ocorrencias_n"])
     carteira = _coalescer_colunas(carteira, "observacao", ["observacao", "observacao_r"])
+    carteira = _coalescer_colunas(carteira, "cidade_dest", ["cidade_dest"])
     carteira = _coalescer_colunas(carteira, "ultima_ocorrencia", ["ultima_ocorrencia", "ultima"])
     carteira = _coalescer_colunas(carteira, "status_r", ["status_r", "status"])
+
     carteira = _coalescer_colunas(carteira, "latitude", ["latitude", "lat"])
     carteira = _coalescer_colunas(carteira, "longitude", ["longitude", "lon"])
-    carteira = _coalescer_colunas(carteira, "peso_calculo", ["peso_calculo", "peso_calculado"])
+
+    carteira = _coalescer_colunas(carteira, "restricao_veiculo", ["restricao_veiculo", "restricao_veic"])
     carteira = _coalescer_colunas(carteira, "carro_dedicado", ["carro_dedicado", "veiculo_exclusivo"])
-    carteira = _coalescer_colunas(carteira, "tipo_carga", ["tipo_carga", "tipo_c"])
+    carteira = _coalescer_colunas(carteira, "inicio_ent", ["inicio_ent"])
     carteira = _coalescer_colunas(carteira, "fim_en", ["fim_en", "fim_ent", "fim_ent_1"])
 
     return carteira
+
+
+def _extrair_parametros_dict(parametros: pd.DataFrame) -> Dict[str, Any]:
+    """
+    Suporta dois formatos de entrada:
+    1) formato antigo: colunas 'parametro' e 'valor'
+    2) formato novo: objeto/registro único com colunas já nomeadas
+    """
+    if parametros.empty:
+        return {}
+
+    if "parametro" in parametros.columns and "valor" in parametros.columns:
+        parametros_local = parametros.copy()
+        parametros_local["parametro"] = parametros_local["parametro"].apply(normalizar_texto_basico)
+        parametros_local["valor"] = parametros_local["valor"].apply(normalizar_valor_parametro)
+        return dict(zip(parametros_local["parametro"], parametros_local["valor"]))
+
+    if len(parametros) == 1:
+        linha = parametros.iloc[0].to_dict()
+        resultado: Dict[str, Any] = {}
+
+        for chave, valor in linha.items():
+            chave_norm = normalizar_texto_basico(chave)
+            if chave_norm is None or (isinstance(chave_norm, float) and pd.isna(chave_norm)):
+                continue
+
+            chave_norm = padronizar_nome_coluna(chave_norm)
+            resultado[chave_norm] = normalizar_valor_parametro(valor)
+
+        return resultado
+
+    raise Exception(
+        "A base de parâmetros não está em formato compatível. "
+        "Esperado: colunas 'parametro' e 'valor' ou registro único com campos do contexto."
+    )
+
+
+def _coerce_float_or_nan(valor: Any) -> float:
+    if valor is None:
+        return np.nan
+
+    try:
+        resultado_isna = pd.isna(valor)
+        if isinstance(resultado_isna, (bool, np.bool_)) and bool(resultado_isna):
+            return np.nan
+    except Exception:
+        pass
+
+    try:
+        texto = str(valor).strip()
+
+        if "." in texto and "," in texto:
+            if texto.rfind(",") > texto.rfind("."):
+                texto = texto.replace(".", "").replace(",", ".")
+            else:
+                texto = texto.replace(",", "")
+        elif "," in texto:
+            texto = texto.replace(",", ".")
+
+        return float(texto)
+    except Exception:
+        return np.nan
 
 
 def executar_m1_padronizacao(
@@ -431,6 +507,7 @@ def executar_m1_padronizacao(
         "tipo_ca": "tipo_ca",
         "tipo_carga": "tipo_carga",
         "qtdnf": "qtd_nf",
+        "regiao": "regiao",
         "sub_regiao": "sub_regiao",
         "ocorrencias_nf": "ocorrencias_nfs",
         "remetente": "remetente",
@@ -487,8 +564,23 @@ def executar_m1_padronizacao(
         if col_valor and col_valor != "valor":
             parametros = parametros.rename(columns={col_valor: "valor"})
 
-    if "parametro" not in parametros.columns or "valor" not in parametros.columns:
-        raise Exception("A base de parâmetros não contém as colunas obrigatórias 'parametro' e 'valor'.")
+    param_dict = _extrair_parametros_dict(parametros)
+
+    # normaliza aliases esperados do contrato novo
+    origem_cidade = param_dict.get("origem_cidade")
+    origem_uf = param_dict.get("origem_uf")
+
+    origem_latitude = param_dict.get("origem_latitude")
+    if origem_latitude is None:
+        origem_latitude = param_dict.get("latitude_filial")
+
+    origem_longitude = param_dict.get("origem_longitude")
+    if origem_longitude is None:
+        origem_longitude = param_dict.get("longitude_filial")
+
+    data_base_roteirizacao = param_dict.get("data_base_roteirizacao")
+    if data_base_roteirizacao is None:
+        data_base_roteirizacao = param_dict.get("data_execucao")
 
     # --------------------------------------------------------
     # 6) MAPA VEÍCULOS
@@ -550,7 +642,6 @@ def executar_m1_padronizacao(
         if c in carteira.columns:
             carteira[c] = converter_coordenada(carteira[c])
 
-    # normaliza textos antes do parse das datas, especialmente Agendam.
     for c in ["data_descarga", "data_nf", "data_leadtime", "data_agenda"]:
         if c in carteira.columns:
             carteira[c] = converter_data(carteira[c])
@@ -570,6 +661,7 @@ def executar_m1_padronizacao(
         "nf_serie",
         "tipo_ca",
         "tipo_carga",
+        "regiao",
         "sub_regiao",
         "ocorrencias_nfs",
         "remetente",
@@ -599,6 +691,12 @@ def executar_m1_padronizacao(
     else:
         carteira["veiculo_exclusivo_flag"] = False
 
+    # --------------------------------------------------------
+    # REGRA OFICIAL DE PESO DO MOTOR
+    # peso_calculado = Peso Calculo
+    # fallback = Peso
+    # PROIBIDO usar cubagem/volume como fallback de peso
+    # --------------------------------------------------------
     if "peso_calculado" not in carteira.columns:
         carteira["peso_calculado"] = np.nan
 
@@ -633,16 +731,17 @@ def executar_m1_padronizacao(
     # --------------------------------------------------------
     # 9) TIPAGEM PARÂMETROS
     # --------------------------------------------------------
-    parametros["parametro"] = parametros["parametro"].apply(normalizar_texto_basico)
-    parametros["valor"] = parametros["valor"].apply(normalizar_valor_parametro)
+    if "parametro" in parametros.columns:
+        parametros["parametro"] = parametros["parametro"].apply(normalizar_texto_basico)
 
-    param_dict = dict(zip(parametros["parametro"], parametros["valor"]))
+    if "valor" in parametros.columns:
+        parametros["valor"] = parametros["valor"].apply(normalizar_valor_parametro)
 
-    carteira["origem_cidade"] = param_dict.get("origem_cidade")
-    carteira["origem_uf"] = param_dict.get("origem_uf")
-    carteira["latitude_filial"] = float(param_dict.get("origem_latitude", 0) or 0)
-    carteira["longitude_filial"] = float(param_dict.get("origem_longitude", 0) or 0)
-    carteira["data_base_roteirizacao"] = param_dict.get("data_base_roteirizacao")
+    carteira["origem_cidade"] = origem_cidade
+    carteira["origem_uf"] = origem_uf
+    carteira["latitude_filial"] = _coerce_float_or_nan(origem_latitude)
+    carteira["longitude_filial"] = _coerce_float_or_nan(origem_longitude)
+    carteira["data_base_roteirizacao"] = data_base_roteirizacao
 
     # --------------------------------------------------------
     # 10) CHAVES GEO
@@ -700,6 +799,7 @@ def executar_m1_padronizacao(
         "destinatario",
         "cidade",
         "uf",
+        "regiao",
         "mesorregiao",
         "sub_regiao",
         "latitude_destinatario",
