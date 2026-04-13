@@ -12,34 +12,6 @@ import numpy as np
 import pandas as pd
 
 
-# ============================================================
-# MÓDULO 4 - GERAÇÃO DE MANIFESTOS FECHADOS
-#
-# REGRAS DE NEGÓCIO IMPLEMENTADAS:
-# 1) entrada = somente carteira roteirizável
-# 2) exclusivos:
-#    - saem primeiro
-#    - ignoram ocupação mínima
-#    - respeitam capacidade / km / paradas
-#    - podem puxar outros docs do MESMO cliente, se couberem
-# 3) não exclusivos:
-#    - NUNCA misturam clientes
-#    - primeiro tentam consolidar o cluster inteiro do mesmo cliente
-#      do MAIOR para o MENOR, respeitando ocupação entre 70% e 100%
-#    - se o cluster inteiro não fechar em nenhum perfil, quebram o cluster
-#      e tentam subconjuntos do mesmo cliente do MENOR para o MAIOR
-#    - o que não fechar no M4 segue para o próximo bloco
-# 4) o que não fechar no M4 fica para o M5
-#
-# AJUSTES IMPORTANTES NESTA VERSÃO:
-# - respeita Restrição Veículo do novo dataset
-# - lê Carro Dedicado como alias operacional de exclusividade
-# - aceita Prioridade numérica ou textual na ordenação
-# - impede reutilização de item em mais de um manifesto
-# - resumo do manifesto calculado uma única vez
-# - expõe remanescente auditável no output do módulo
-# ============================================================
-
 OCUPACAO_MINIMA_PADRAO = 0.70
 OCUPACAO_MAXIMA_PADRAO = 1.00
 
@@ -55,10 +27,13 @@ def _duracao_ms(inicio: float) -> float:
 def _to_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
     if df is None or len(df) == 0:
         return []
+
     df2 = df.copy()
+
     for col in df2.columns:
         if pd.api.types.is_datetime64_any_dtype(df2[col]):
             df2[col] = df2[col].astype(str)
+
     df2 = df2.where(pd.notnull(df2), None)
     return df2.to_dict(orient="records")
 
@@ -68,7 +43,7 @@ def _resolver_coluna_tipo_veiculo(df_veiculos: pd.DataFrame) -> str:
         return "tipo"
     if "perfil" in df_veiculos.columns:
         return "perfil"
-    raise Exception("Faltam colunas mínimas na base de veículos:\n- tipo ou perfil")
+    raise Exception("Faltam colunas mínimas na base de veículos: tipo ou perfil.")
 
 
 def _scalar_safe(x: Any) -> Any:
@@ -188,73 +163,6 @@ def _normalizar_configuracao_frota(configuracao_frota: Any) -> pd.DataFrame:
     return cfg.reset_index(drop=True)
 
 
-def _preparar_catalogo_veiculos(
-    df_veic: pd.DataFrame,
-    coluna_tipo_veiculo: str,
-    tipo_roteirizacao: str,
-    configuracao_frota: Any,
-) -> pd.DataFrame:
-    cat = df_veic.copy()
-
-    colunas_min = [
-        coluna_tipo_veiculo,
-        "capacidade_peso_kg",
-        "capacidade_vol_m3",
-        "max_entregas",
-        "max_km_distancia",
-    ]
-    cat = cat.loc[cat[colunas_min].notna().all(axis=1)].copy()
-
-    cat["tipo"] = cat[coluna_tipo_veiculo].astype(str).str.strip()
-    cat["capacidade_peso_kg"] = pd.to_numeric(cat["capacidade_peso_kg"], errors="coerce")
-    cat["capacidade_vol_m3"] = pd.to_numeric(cat["capacidade_vol_m3"], errors="coerce")
-    cat["max_entregas"] = pd.to_numeric(cat["max_entregas"], errors="coerce")
-    cat["max_km_distancia"] = pd.to_numeric(cat["max_km_distancia"], errors="coerce")
-
-    cat = (
-        cat.groupby("tipo", as_index=False)
-        .agg(
-            {
-                "capacidade_peso_kg": "max",
-                "capacidade_vol_m3": "max",
-                "max_entregas": "max",
-                "max_km_distancia": "max",
-            }
-        )
-        .sort_values(
-            by=["capacidade_peso_kg", "capacidade_vol_m3", "max_entregas", "max_km_distancia"],
-            ascending=[True, True, True, True],
-        )
-        .reset_index(drop=True)
-    )
-
-    tipo_roteirizacao = _normalizar_tipo_roteirizacao(tipo_roteirizacao)
-
-    if tipo_roteirizacao == "frota":
-        cfg = _normalizar_configuracao_frota(configuracao_frota)
-        if len(cfg) == 0:
-            raise Exception("tipo_roteirizacao = 'frota', mas configuracao_frota está vazia ou inválida.")
-
-        cat = cat.merge(cfg, how="inner", left_on="tipo", right_on="perfil")
-        if len(cat) == 0:
-            raise Exception("Nenhum perfil da configuracao_frota foi encontrado no catálogo de veículos.")
-
-        cat["limite_manifestos"] = pd.to_numeric(cat["quantidade"], errors="coerce").fillna(0).astype(int)
-        cat.drop(columns=["perfil", "quantidade"], inplace=True, errors="ignore")
-    else:
-        cat["limite_manifestos"] = np.nan
-
-    cat["manifestos_utilizados"] = 0
-    cat["ordem_porte"] = np.arange(1, len(cat) + 1)
-    return cat.reset_index(drop=True)
-
-
-def _obter_coluna_id_documento(df: pd.DataFrame) -> str:
-    if "cte" in df.columns:
-        return "cte"
-    return "id_linha_pipeline"
-
-
 def _normalizar_str(x: Any) -> str:
     try:
         if pd.isna(x):
@@ -364,10 +272,6 @@ def _cliente_key(row: pd.Series) -> str:
     return _normalizar_str(row.get("destinatario"))
 
 
-def _cliente_cidade_key(row: pd.Series) -> str:
-    return f"{_normalizar_str(row.get('destinatario'))}|{_normalizar_str(row.get('cidade'))}|{_normalizar_str(row.get('uf'))}"
-
-
 def _chave_parada_df(df_: pd.DataFrame) -> pd.Series:
     return (
         df_["destinatario"].astype(str).fillna("").str.strip().str.upper()
@@ -378,111 +282,10 @@ def _chave_parada_df(df_: pd.DataFrame) -> pd.Series:
     )
 
 
-def _obter_base_carga_oficial(df_combo: pd.DataFrame) -> float:
-    if "peso_calculado" not in df_combo.columns:
-        return 0.0
-    return float(pd.to_numeric(df_combo["peso_calculado"], errors="coerce").fillna(0).sum())
-
-
-def _avaliar_combo_no_veiculo(
-    df_combo: pd.DataFrame,
-    veic: pd.Series,
-    ignorar_ocupacao_minima: bool = False,
-) -> Dict[str, Any]:
-    base_carga_total = _obter_base_carga_oficial(df_combo)
-    peso_total_kg = float(pd.to_numeric(df_combo["peso_kg"], errors="coerce").fillna(0).sum())
-    vol_total_m3 = float(pd.to_numeric(df_combo["vol_m3"], errors="coerce").fillna(0).sum())
-    km_combo = float(pd.to_numeric(df_combo["distancia_rodoviaria_est_km"], errors="coerce").max())
-
-    col_doc = _obter_coluna_id_documento(df_combo)
-    qtd_ctes = int(df_combo[col_doc].astype(str).nunique())
-    qtd_itens = int(len(df_combo))
-    qtd_paradas = int(_chave_parada_df(df_combo).nunique())
-
-    cap_peso = float(veic["capacidade_peso_kg"])
-    cap_vol = float(veic["capacidade_vol_m3"])
-    max_entregas = int(veic["max_entregas"])
-    max_km = float(veic["max_km_distancia"])
-
-    cabe_carga_oficial = base_carga_total <= cap_peso
-    cabe_paradas = qtd_paradas <= max_entregas
-    cabe_km = km_combo <= max_km if pd.notna(km_combo) else False
-    cabe_restricao_veiculo = _combo_respeita_restricao_veiculo(df_combo=df_combo, veic=veic)
-
-    ocupacao_oficial = base_carga_total / cap_peso if pd.notna(cap_peso) and cap_peso > 0 else np.nan
-
-    if ignorar_ocupacao_minima:
-        passa_ocupacao = True
-    else:
-        passa_ocupacao = (
-            pd.notna(ocupacao_oficial)
-            and ocupacao_oficial >= OCUPACAO_MINIMA_PADRAO
-            and ocupacao_oficial <= OCUPACAO_MAXIMA_PADRAO
-        )
-
-    aceito = bool(
-        cabe_carga_oficial
-        and cabe_paradas
-        and cabe_km
-        and passa_ocupacao
-        and cabe_restricao_veiculo
-    )
-
-    return {
-        "veiculo_tipo": veic["tipo"],
-        "capacidade_peso_kg": cap_peso,
-        "capacidade_vol_m3": cap_vol,
-        "max_entregas": max_entregas,
-        "max_km_distancia": max_km,
-        "base_carga_oficial": round(base_carga_total, 3),
-        "peso_total_kg": round(peso_total_kg, 3),
-        "vol_total_m3": round(vol_total_m3, 3),
-        "km_referencia": round(km_combo, 2) if pd.notna(km_combo) else np.nan,
-        "qtd_itens": qtd_itens,
-        "qtd_ctes": qtd_ctes,
-        "qtd_paradas": qtd_paradas,
-        "cabe_carga_oficial": cabe_carga_oficial,
-        "cabe_paradas": cabe_paradas,
-        "cabe_km": cabe_km,
-        "cabe_restricao_veiculo": cabe_restricao_veiculo,
-        "ocupacao_oficial_perc": round(float(ocupacao_oficial * 100), 2) if pd.notna(ocupacao_oficial) else np.nan,
-        "passa_ocupacao": passa_ocupacao,
-        "ignorar_ocupacao_minima": bool(ignorar_ocupacao_minima),
-        "aceito": aceito,
-    }
-
-
-def _veiculo_disponivel_no_modo_frota(veic: pd.Series, tipo_roteirizacao: str) -> bool:
-    tipo_roteirizacao = _normalizar_tipo_roteirizacao(tipo_roteirizacao)
-    if tipo_roteirizacao == "carteira":
-        return True
-
-    limite = _num_safe(veic.get("limite_manifestos"), default=np.nan)
-    usados = _num_safe(veic.get("manifestos_utilizados"), default=0)
-
-    if pd.isna(limite):
-        return True
-
-    return int(usados) < int(limite)
-
-
-def _consumir_veiculo_catalogo(
-    catalogo_veiculos: pd.DataFrame,
-    catalogo_idx: Optional[int],
-    tipo_roteirizacao: str,
-) -> None:
-    if catalogo_idx is None:
-        return
-
-    tipo_roteirizacao = _normalizar_tipo_roteirizacao(tipo_roteirizacao)
-    if tipo_roteirizacao != "frota":
-        return
-
-    if catalogo_idx not in catalogo_veiculos.index:
-        return
-
-    atual = _int_safe(catalogo_veiculos.at[catalogo_idx, "manifestos_utilizados"], default=0)
-    catalogo_veiculos.at[catalogo_idx, "manifestos_utilizados"] = atual + 1
+def _obter_coluna_id_documento(df: pd.DataFrame) -> str:
+    if "cte" in df.columns:
+        return "cte"
+    return "id_linha_pipeline"
 
 
 def _score_prioridade_embarque(valor: Any) -> int:
@@ -535,9 +338,7 @@ def _score_prioridade_embarque(valor: Any) -> int:
 
 def _score_ordem_fila(row: pd.Series) -> Tuple[Any, ...]:
     exclusivo = 0 if _eh_exclusivo(row) else 1
-
-    prioridade_embarque = row.get("prioridade_embarque", np.nan)
-    prioridade_score = _score_prioridade_embarque(prioridade_embarque)
+    prioridade_score = _score_prioridade_embarque(row.get("prioridade_embarque", np.nan))
     data_agenda = _scalar_safe(row.get("data_agenda", pd.NaT))
     folga = _num_safe(row.get("folga_dias", np.nan), default=np.nan)
     score = _num_safe(row.get("score_prioridade_preliminar", 0), default=0)
@@ -570,12 +371,235 @@ def _score_ordem_fila(row: pd.Series) -> Tuple[Any, ...]:
 def _ordenar_fila(df_: pd.DataFrame) -> pd.DataFrame:
     if len(df_) == 0:
         return df_.copy()
+
     return (
         df_.assign(__ord__=df_.apply(_score_ordem_fila, axis=1))
         .sort_values("__ord__")
         .drop(columns="__ord__")
         .reset_index(drop=True)
     )
+
+
+def _ordenar_cliente_por_peso(df_cliente: pd.DataFrame) -> pd.DataFrame:
+    if len(df_cliente) == 0:
+        return df_cliente.copy()
+
+    return (
+        df_cliente.sort_values(
+            by=["peso_calculado", "score_prioridade_preliminar", "distancia_rodoviaria_est_km"],
+            ascending=[False, False, True],
+            na_position="last",
+        )
+        .reset_index(drop=True)
+    )
+
+
+def _preparar_catalogo_veiculos(
+    df_veic: pd.DataFrame,
+    coluna_tipo_veiculo: str,
+    tipo_roteirizacao: str,
+    configuracao_frota: Any,
+) -> pd.DataFrame:
+    cat = df_veic.copy()
+
+    colunas_min = [
+        coluna_tipo_veiculo,
+        "capacidade_peso_kg",
+        "capacidade_vol_m3",
+        "max_entregas",
+        "max_km_distancia",
+    ]
+    cat = cat.loc[cat[colunas_min].notna().all(axis=1)].copy()
+
+    cat["tipo"] = cat[coluna_tipo_veiculo].astype(str).str.strip()
+    cat["capacidade_peso_kg"] = pd.to_numeric(cat["capacidade_peso_kg"], errors="coerce")
+    cat["capacidade_vol_m3"] = pd.to_numeric(cat["capacidade_vol_m3"], errors="coerce")
+    cat["max_entregas"] = pd.to_numeric(cat["max_entregas"], errors="coerce")
+    cat["max_km_distancia"] = pd.to_numeric(cat["max_km_distancia"], errors="coerce")
+    cat["ocupacao_minima_perc"] = pd.to_numeric(cat.get("ocupacao_minima_perc", np.nan), errors="coerce")
+
+    cat = (
+        cat.groupby("tipo", as_index=False)
+        .agg(
+            {
+                "capacidade_peso_kg": "max",
+                "capacidade_vol_m3": "max",
+                "max_entregas": "max",
+                "max_km_distancia": "max",
+                "ocupacao_minima_perc": "max",
+            }
+        )
+        .sort_values(
+            by=["capacidade_peso_kg", "capacidade_vol_m3", "max_entregas", "max_km_distancia"],
+            ascending=[True, True, True, True],
+        )
+        .reset_index(drop=True)
+    )
+
+    cat["ocupacao_minima_perc"] = cat["ocupacao_minima_perc"].where(
+        cat["ocupacao_minima_perc"].notna(),
+        OCUPACAO_MINIMA_PADRAO * 100,
+    )
+
+    tipo_roteirizacao = _normalizar_tipo_roteirizacao(tipo_roteirizacao)
+
+    if tipo_roteirizacao == "frota":
+        cfg = _normalizar_configuracao_frota(configuracao_frota)
+        if len(cfg) == 0:
+            raise Exception("tipo_roteirizacao = 'frota', mas configuracao_frota está vazia ou inválida.")
+
+        cat = cat.merge(cfg, how="inner", left_on="tipo", right_on="perfil")
+        if len(cat) == 0:
+            raise Exception("Nenhum perfil da configuracao_frota foi encontrado no catálogo de veículos.")
+
+        cat["limite_manifestos"] = pd.to_numeric(cat["quantidade"], errors="coerce").fillna(0).astype(int)
+        cat.drop(columns=["perfil", "quantidade"], inplace=True, errors="ignore")
+    else:
+        cat["limite_manifestos"] = np.nan
+
+    cat["manifestos_utilizados"] = 0
+    cat["ordem_porte"] = np.arange(1, len(cat) + 1)
+    return cat.reset_index(drop=True)
+
+
+def _veiculo_disponivel_no_modo_frota(veic: pd.Series, tipo_roteirizacao: str) -> bool:
+    tipo_roteirizacao = _normalizar_tipo_roteirizacao(tipo_roteirizacao)
+    if tipo_roteirizacao == "carteira":
+        return True
+
+    limite = _num_safe(veic.get("limite_manifestos"), default=np.nan)
+    usados = _num_safe(veic.get("manifestos_utilizados"), default=0)
+
+    if pd.isna(limite):
+        return True
+
+    return int(usados) < int(limite)
+
+
+def _consumir_veiculo_catalogo(
+    catalogo_veiculos: pd.DataFrame,
+    catalogo_idx: Optional[int],
+    tipo_roteirizacao: str,
+) -> None:
+    if catalogo_idx is None:
+        return
+
+    tipo_roteirizacao = _normalizar_tipo_roteirizacao(tipo_roteirizacao)
+    if tipo_roteirizacao != "frota":
+        return
+
+    if catalogo_idx not in catalogo_veiculos.index:
+        return
+
+    atual = _int_safe(catalogo_veiculos.at[catalogo_idx, "manifestos_utilizados"], default=0)
+    catalogo_veiculos.at[catalogo_idx, "manifestos_utilizados"] = atual + 1
+
+
+def _obter_base_carga_oficial(df_combo: pd.DataFrame) -> float:
+    return float(pd.to_numeric(df_combo["peso_calculado"], errors="coerce").fillna(0).sum())
+
+
+def _calcular_qtd_paradas(df_combo: pd.DataFrame) -> int:
+    return int(_chave_parada_df(df_combo).nunique())
+
+
+def _calcular_km_referencia(df_combo: pd.DataFrame) -> float:
+    return float(pd.to_numeric(df_combo["distancia_rodoviaria_est_km"], errors="coerce").max())
+
+
+def _avaliar_combo_no_veiculo(
+    df_combo: pd.DataFrame,
+    veic: pd.Series,
+    ignorar_ocupacao_minima: bool = False,
+    ignorar_raio: bool = False,
+) -> Dict[str, Any]:
+    base_carga_total = _obter_base_carga_oficial(df_combo)
+    peso_total_kg = float(pd.to_numeric(df_combo["peso_kg"], errors="coerce").fillna(0).sum())
+    vol_total_m3 = float(pd.to_numeric(df_combo["vol_m3"], errors="coerce").fillna(0).sum())
+    km_combo = _calcular_km_referencia(df_combo)
+
+    col_doc = _obter_coluna_id_documento(df_combo)
+    qtd_ctes = int(df_combo[col_doc].astype(str).nunique())
+    qtd_itens = int(len(df_combo))
+    qtd_paradas = _calcular_qtd_paradas(df_combo)
+
+    cap_peso = float(veic["capacidade_peso_kg"])
+    cap_vol = float(veic["capacidade_vol_m3"])
+    max_entregas = int(veic["max_entregas"])
+    max_km = float(veic["max_km_distancia"])
+
+    cabe_carga_oficial = base_carga_total <= cap_peso
+    cabe_paradas = qtd_paradas <= max_entregas
+    cabe_vol = vol_total_m3 <= cap_vol if pd.notna(cap_vol) else True
+    cabe_km = True if ignorar_raio else (km_combo <= max_km if pd.notna(km_combo) else False)
+    cabe_restricao_veiculo = _combo_respeita_restricao_veiculo(df_combo=df_combo, veic=veic)
+
+    ocupacao_oficial = base_carga_total / cap_peso if pd.notna(cap_peso) and cap_peso > 0 else np.nan
+
+    if ignorar_ocupacao_minima:
+        passa_ocupacao = True
+    else:
+        passa_ocupacao = (
+            pd.notna(ocupacao_oficial)
+            and ocupacao_oficial >= OCUPACAO_MINIMA_PADRAO
+            and ocupacao_oficial < OCUPACAO_MAXIMA_PADRAO
+        )
+
+    aceito = bool(
+        cabe_carga_oficial
+        and cabe_paradas
+        and cabe_vol
+        and cabe_km
+        and passa_ocupacao
+        and cabe_restricao_veiculo
+    )
+
+    return {
+        "veiculo_tipo": veic["tipo"],
+        "capacidade_peso_kg": cap_peso,
+        "capacidade_vol_m3": cap_vol,
+        "max_entregas": max_entregas,
+        "max_km_distancia": max_km,
+        "base_carga_oficial": round(base_carga_total, 3),
+        "peso_total_kg": round(peso_total_kg, 3),
+        "vol_total_m3": round(vol_total_m3, 3),
+        "km_referencia": round(km_combo, 2) if pd.notna(km_combo) else np.nan,
+        "qtd_itens": qtd_itens,
+        "qtd_ctes": qtd_ctes,
+        "qtd_paradas": qtd_paradas,
+        "cabe_carga_oficial": cabe_carga_oficial,
+        "cabe_paradas": cabe_paradas,
+        "cabe_vol": cabe_vol,
+        "cabe_km": cabe_km,
+        "cabe_restricao_veiculo": cabe_restricao_veiculo,
+        "ocupacao_oficial_perc": round(float(ocupacao_oficial * 100), 2) if pd.notna(ocupacao_oficial) else np.nan,
+        "passa_ocupacao": passa_ocupacao,
+        "ignorar_ocupacao_minima": bool(ignorar_ocupacao_minima),
+        "ignorar_raio": bool(ignorar_raio),
+        "aceito": aceito,
+    }
+
+
+def _motivo_reprovacao(avaliacao: Dict[str, Any], exigir_ocupacao: bool = True, exigir_raio: bool = True) -> str:
+    motivos: List[str] = []
+
+    if not avaliacao.get("cabe_carga_oficial", True):
+        motivos.append("excede_capacidade_peso_oficial")
+    if not avaliacao.get("cabe_paradas", True):
+        motivos.append("excede_max_entregas")
+    if not avaliacao.get("cabe_vol", True):
+        motivos.append("excede_capacidade_volume")
+    if exigir_raio and not avaliacao.get("cabe_km", True):
+        motivos.append("excede_max_km")
+    if exigir_ocupacao and not avaliacao.get("passa_ocupacao", True):
+        motivos.append("nao_atinge_faixa_ocupacao_70_100")
+    if not avaliacao.get("cabe_restricao_veiculo", True):
+        motivos.append("restricao_veiculo_incompativel")
+
+    if len(motivos) == 0:
+        return "rejeitado_sem_motivo_detalhado"
+
+    return "|".join(motivos)
 
 
 def _gerar_resumo_manifesto(
@@ -602,6 +626,7 @@ def _gerar_resumo_manifesto(
         "max_entregas_veiculo": avaliacao["max_entregas"],
         "max_km_distancia_veiculo": avaliacao["max_km_distancia"],
         "ignorar_ocupacao_minima": avaliacao["ignorar_ocupacao_minima"],
+        "ignorar_raio": avaliacao.get("ignorar_raio", False),
         "origem_modulo": 4,
         "origem_etapa": origem_etapa,
     }
@@ -616,343 +641,58 @@ def _gerar_resumo_manifesto(
     return linha
 
 
-def _gerar_subconjunto_guloso(
-    base_cliente: pd.DataFrame,
-    veic: pd.Series,
-    anchor_id: Optional[str] = None,
-    ignorar_ocupacao_minima: bool = False,
-    ordem_desc: bool = True,
+def _agrupar_clientes_ordenados(df_base: pd.DataFrame) -> List[Tuple[str, pd.DataFrame]]:
+    if len(df_base) == 0:
+        return []
+
+    trabalho = df_base.copy()
+    trabalho["cliente_key"] = trabalho.apply(_cliente_key, axis=1)
+
+    resumo = (
+        trabalho.groupby("cliente_key", as_index=False)["peso_calculado"]
+        .sum()
+        .sort_values("peso_calculado", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    grupos: List[Tuple[str, pd.DataFrame]] = []
+    for cliente in resumo["cliente_key"].tolist():
+        grupo = trabalho.loc[trabalho["cliente_key"] == cliente].copy()
+        grupo = _ordenar_cliente_por_peso(grupo)
+        grupos.append((cliente, grupo))
+
+    return grupos
+
+
+def _obter_menor_perfil_por_capacidade(catalogo_veiculos: pd.DataFrame) -> pd.Series:
+    return (
+        catalogo_veiculos.sort_values(
+            by=["capacidade_peso_kg", "capacidade_vol_m3", "max_entregas", "max_km_distancia"],
+            ascending=[True, True, True, True],
+        )
+        .iloc[0]
+    )
+
+
+def _perfis_compativeis_por_raio(
+    catalogo_veiculos: pd.DataFrame,
+    km_referencia: float,
+    tipo_roteirizacao: str,
 ) -> pd.DataFrame:
-    if len(base_cliente) == 0:
-        return pd.DataFrame(columns=base_cliente.columns)
+    comp = catalogo_veiculos.loc[catalogo_veiculos["max_km_distancia"] >= km_referencia].copy()
 
-    trabalho = base_cliente.copy().reset_index(drop=True)
+    if len(comp) == 0:
+        return comp
 
-    if anchor_id is not None:
-        mask_anchor = trabalho["id_linha_pipeline"].astype(str) == str(anchor_id)
-        if not mask_anchor.any():
-            return pd.DataFrame(columns=trabalho.columns)
+    if _normalizar_tipo_roteirizacao(tipo_roteirizacao) == "frota":
+        comp = comp.loc[
+            comp.apply(lambda row: _veiculo_disponivel_no_modo_frota(row, tipo_roteirizacao), axis=1)
+        ].copy()
 
-        idx_anchor = trabalho.index[mask_anchor][0]
-        restantes = trabalho.drop(index=idx_anchor).copy()
-        restantes = restantes.sort_values("peso_calculado", ascending=not ordem_desc).reset_index(drop=True)
-
-        grupo = trabalho.loc[[idx_anchor]].copy().reset_index(drop=True)
-
-        for _, row in restantes.iterrows():
-            teste = pd.concat([grupo, row.to_frame().T], ignore_index=True)
-            aval = _avaliar_combo_no_veiculo(teste, veic=veic, ignorar_ocupacao_minima=ignorar_ocupacao_minima)
-            if (
-                aval["cabe_carga_oficial"]
-                and aval["cabe_paradas"]
-                and aval["cabe_km"]
-                and aval["cabe_restricao_veiculo"]
-            ):
-                grupo = teste
-
-        return grupo.reset_index(drop=True)
-
-    trabalho = trabalho.sort_values("peso_calculado", ascending=not ordem_desc).reset_index(drop=True)
-    grupo = pd.DataFrame(columns=trabalho.columns)
-
-    for _, row in trabalho.iterrows():
-        teste = pd.concat([grupo, row.to_frame().T], ignore_index=True)
-        aval = _avaliar_combo_no_veiculo(teste, veic=veic, ignorar_ocupacao_minima=ignorar_ocupacao_minima)
-        if (
-            aval["cabe_carga_oficial"]
-            and aval["cabe_paradas"]
-            and aval["cabe_km"]
-            and aval["cabe_restricao_veiculo"]
-        ):
-            grupo = teste
-
-    return grupo.reset_index(drop=True)
-
-
-def _tentar_exclusivo_com_mesmo_cliente(
-    linha_exclusiva: pd.Series,
-    fila_disponivel: pd.DataFrame,
-    catalogo_veiculos: pd.DataFrame,
-    tipo_roteirizacao: str,
-) -> Dict[str, Any]:
-    cliente_ref = _cliente_key(linha_exclusiva)
-    base_cliente = fila_disponivel.loc[
-        fila_disponivel.apply(_cliente_key, axis=1) == cliente_ref
-    ].copy()
-
-    if len(base_cliente) == 0:
-        return {"aceito": False, "motivo_reprovacao": "exclusivo_sem_base_cliente", "tentativas": []}
-
-    tentativas: List[Dict[str, Any]] = []
-    anchor_id = str(linha_exclusiva["id_linha_pipeline"])
-
-    for idx, veic in catalogo_veiculos.sort_values("ordem_porte").iterrows():
-        if not _veiculo_disponivel_no_modo_frota(veic, tipo_roteirizacao):
-            tentativas.append(
-                {
-                    "veiculo_tipo": veic["tipo"],
-                    "resultado_teste": "rejeitado",
-                    "motivo_reprovacao": "perfil_sem_disponibilidade_no_modo_frota",
-                }
-            )
-            continue
-
-        grupo = _gerar_subconjunto_guloso(
-            base_cliente=base_cliente,
-            veic=veic,
-            anchor_id=anchor_id,
-            ignorar_ocupacao_minima=True,
-            ordem_desc=True,
-        )
-
-        if len(grupo) == 0:
-            tentativas.append(
-                {
-                    "veiculo_tipo": veic["tipo"],
-                    "resultado_teste": "rejeitado",
-                    "motivo_reprovacao": "exclusivo_sem_combo_viavel",
-                }
-            )
-            continue
-
-        aval = _avaliar_combo_no_veiculo(grupo, veic=veic, ignorar_ocupacao_minima=True)
-        registro = {**aval, "resultado_teste": "aceito" if aval["aceito"] else "rejeitado"}
-        if not aval["aceito"]:
-            motivos = []
-            if not aval.get("cabe_carga_oficial", True):
-                motivos.append("excede_capacidade_peso_oficial")
-            if not aval.get("cabe_paradas", True):
-                motivos.append("excede_max_entregas")
-            if not aval.get("cabe_km", True):
-                motivos.append("excede_max_km")
-            if not aval.get("cabe_restricao_veiculo", True):
-                motivos.append("restricao_veiculo_incompativel")
-            registro["motivo_reprovacao"] = "|".join(motivos) if motivos else "exclusivo_nao_fechou"
-        tentativas.append(registro)
-
-        if aval["aceito"]:
-            return {
-                "aceito": True,
-                "df_combo": grupo,
-                "avaliacao": aval,
-                "catalogo_idx": idx,
-                "tentativas": tentativas,
-            }
-
-    return {
-        "aceito": False,
-        "motivo_reprovacao": "exclusivo_sem_veiculo_viavel",
-        "tentativas": tentativas,
-    }
-
-
-def _tentar_cluster_mesmo_cliente_menor_para_maior(
-    base_cliente: pd.DataFrame,
-    catalogo_veiculos: pd.DataFrame,
-    tipo_roteirizacao: str,
-) -> Dict[str, Any]:
-    tentativas: List[Dict[str, Any]] = []
-
-    for idx, veic in catalogo_veiculos.sort_values("ordem_porte", ascending=False).iterrows():
-        if not _veiculo_disponivel_no_modo_frota(veic, tipo_roteirizacao):
-            tentativas.append(
-                {
-                    "veiculo_tipo": veic["tipo"],
-                    "resultado_teste": "rejeitado",
-                    "motivo_reprovacao": "perfil_sem_disponibilidade_no_modo_frota",
-                    "tipo_busca": "cluster_completo_maior_para_menor",
-                }
-            )
-            continue
-
-        aval_full = _avaliar_combo_no_veiculo(base_cliente, veic=veic, ignorar_ocupacao_minima=False)
-        reg_full = {
-            **aval_full,
-            "resultado_teste": "aceito" if aval_full["aceito"] else "rejeitado",
-            "tipo_busca": "cluster_completo_maior_para_menor",
-        }
-        if not aval_full["aceito"]:
-            motivos = []
-            if not aval_full.get("cabe_carga_oficial", True):
-                motivos.append("excede_capacidade_peso_oficial")
-            if not aval_full.get("cabe_paradas", True):
-                motivos.append("excede_max_entregas")
-            if not aval_full.get("cabe_km", True):
-                motivos.append("excede_max_km")
-            if not aval_full.get("passa_ocupacao", True):
-                motivos.append("nao_atinge_faixa_ocupacao_70_100")
-            if not aval_full.get("cabe_restricao_veiculo", True):
-                motivos.append("restricao_veiculo_incompativel")
-            reg_full["motivo_reprovacao"] = "|".join(motivos) if motivos else "cluster_completo_nao_fechou"
-
-        tentativas.append(reg_full)
-
-        if aval_full["aceito"]:
-            return {
-                "aceito": True,
-                "df_combo": base_cliente.copy().reset_index(drop=True),
-                "avaliacao": aval_full,
-                "catalogo_idx": idx,
-                "tentativas": tentativas,
-            }
-
-    for idx, veic in catalogo_veiculos.sort_values("ordem_porte").iterrows():
-        if not _veiculo_disponivel_no_modo_frota(veic, tipo_roteirizacao):
-            tentativas.append(
-                {
-                    "veiculo_tipo": veic["tipo"],
-                    "resultado_teste": "rejeitado",
-                    "motivo_reprovacao": "perfil_sem_disponibilidade_no_modo_frota",
-                    "tipo_busca": "subconjunto_mesmo_cliente_menor_para_maior",
-                }
-            )
-            continue
-
-        grupo = _gerar_subconjunto_guloso(
-            base_cliente=base_cliente,
-            veic=veic,
-            anchor_id=None,
-            ignorar_ocupacao_minima=False,
-            ordem_desc=True,
-        )
-
-        if len(grupo) == 0:
-            continue
-
-        aval_sub = _avaliar_combo_no_veiculo(grupo, veic=veic, ignorar_ocupacao_minima=False)
-        reg_sub = {
-            **aval_sub,
-            "resultado_teste": "aceito" if aval_sub["aceito"] else "rejeitado",
-            "tipo_busca": "subconjunto_mesmo_cliente_menor_para_maior",
-        }
-        if not aval_sub["aceito"]:
-            motivos = []
-            if not aval_sub.get("cabe_carga_oficial", True):
-                motivos.append("excede_capacidade_peso_oficial")
-            if not aval_sub.get("cabe_paradas", True):
-                motivos.append("excede_max_entregas")
-            if not aval_sub.get("cabe_km", True):
-                motivos.append("excede_max_km")
-            if not aval_sub.get("passa_ocupacao", True):
-                motivos.append("nao_atinge_faixa_ocupacao_70_100")
-            if not aval_sub.get("cabe_restricao_veiculo", True):
-                motivos.append("restricao_veiculo_incompativel")
-            reg_sub["motivo_reprovacao"] = "|".join(motivos) if motivos else "subconjunto_nao_fechou"
-
-        tentativas.append(reg_sub)
-
-        if aval_sub["aceito"]:
-            return {
-                "aceito": True,
-                "df_combo": grupo,
-                "avaliacao": aval_sub,
-                "catalogo_idx": idx,
-                "tentativas": tentativas,
-            }
-
-    return {
-        "aceito": False,
-        "motivo_reprovacao": "cliente_nao_fechou_cluster_maior_e_subconjunto_menor",
-        "tentativas": tentativas,
-    }
-
-
-def _tentar_restante_cliente_maior_para_menor(
-    base_cliente: pd.DataFrame,
-    catalogo_veiculos: pd.DataFrame,
-    tipo_roteirizacao: str,
-) -> Dict[str, Any]:
-    tentativas: List[Dict[str, Any]] = []
-
-    for idx, veic in catalogo_veiculos.sort_values("ordem_porte", ascending=False).iterrows():
-        if not _veiculo_disponivel_no_modo_frota(veic, tipo_roteirizacao):
-            tentativas.append(
-                {
-                    "veiculo_tipo": veic["tipo"],
-                    "resultado_teste": "rejeitado",
-                    "motivo_reprovacao": "perfil_sem_disponibilidade_no_modo_frota",
-                }
-            )
-            continue
-
-        aval_full = _avaliar_combo_no_veiculo(base_cliente, veic=veic, ignorar_ocupacao_minima=False)
-        reg_full = {
-            **aval_full,
-            "resultado_teste": "aceito" if aval_full["aceito"] else "rejeitado",
-            "tipo_busca": "restante_full_maior_para_menor",
-        }
-        if not aval_full["aceito"]:
-            motivos = []
-            if not aval_full.get("cabe_carga_oficial", True):
-                motivos.append("excede_capacidade_peso_oficial")
-            if not aval_full.get("cabe_paradas", True):
-                motivos.append("excede_max_entregas")
-            if not aval_full.get("cabe_km", True):
-                motivos.append("excede_max_km")
-            if not aval_full.get("passa_ocupacao", True):
-                motivos.append("nao_atinge_faixa_ocupacao_70_100")
-            if not aval_full.get("cabe_restricao_veiculo", True):
-                motivos.append("restricao_veiculo_incompativel")
-            reg_full["motivo_reprovacao"] = "|".join(motivos) if motivos else "restante_nao_fechou"
-
-        tentativas.append(reg_full)
-
-        if aval_full["aceito"]:
-            return {
-                "aceito": True,
-                "df_combo": base_cliente.copy().reset_index(drop=True),
-                "avaliacao": aval_full,
-                "catalogo_idx": idx,
-                "tentativas": tentativas,
-            }
-
-        grupo = _gerar_subconjunto_guloso(
-            base_cliente=base_cliente,
-            veic=veic,
-            anchor_id=None,
-            ignorar_ocupacao_minima=False,
-            ordem_desc=True,
-        )
-
-        if len(grupo) == 0:
-            continue
-
-        aval_sub = _avaliar_combo_no_veiculo(grupo, veic=veic, ignorar_ocupacao_minima=False)
-        reg_sub = {
-            **aval_sub,
-            "resultado_teste": "aceito" if aval_sub["aceito"] else "rejeitado",
-            "tipo_busca": "restante_subconjunto_maior_para_menor",
-        }
-        if not aval_sub["aceito"]:
-            motivos = []
-            if not aval_sub.get("cabe_carga_oficial", True):
-                motivos.append("excede_capacidade_peso_oficial")
-            if not aval_sub.get("cabe_paradas", True):
-                motivos.append("excede_max_entregas")
-            if not aval_sub.get("cabe_km", True):
-                motivos.append("excede_max_km")
-            if not aval_sub.get("passa_ocupacao", True):
-                motivos.append("nao_atinge_faixa_ocupacao_70_100")
-            if not aval_sub.get("cabe_restricao_veiculo", True):
-                motivos.append("restricao_veiculo_incompativel")
-            reg_sub["motivo_reprovacao"] = "|".join(motivos) if motivos else "restante_subconjunto_nao_fechou"
-
-        tentativas.append(reg_sub)
-
-        if aval_sub["aceito"]:
-            return {
-                "aceito": True,
-                "df_combo": grupo,
-                "avaliacao": aval_sub,
-                "catalogo_idx": idx,
-                "tentativas": tentativas,
-            }
-
-    return {
-        "aceito": False,
-        "motivo_reprovacao": "restante_cliente_nao_fechou",
-        "tentativas": tentativas,
-    }
+    return comp.sort_values(
+        by=["capacidade_peso_kg", "capacidade_vol_m3", "max_entregas", "max_km_distancia"],
+        ascending=[False, False, False, False],
+    ).reset_index()
 
 
 def _motivo_final_remanescente(
@@ -979,7 +719,7 @@ def _motivo_final_remanescente(
         if not base_rej.empty:
             base = base_rej
 
-    motivos = []
+    motivos: List[str] = []
     if "motivo_reprovacao" in base.columns:
         motivos = [
             str(x).strip()
@@ -998,14 +738,6 @@ def _motivo_final_remanescente(
 
 
 def _montar_df_nao_roteirizados_bloco_4(df_remanescente: pd.DataFrame) -> pd.DataFrame:
-    """
-    Monta uma visão auditável do remanescente oficial do M4.
-
-    IMPORTANTE:
-    - isto NÃO representa o "não roteirizado final" do pipeline inteiro;
-    - isto representa o que sobrou após o fechamento do bloco 4 e seguirá para o M5;
-    - o objetivo é dar visibilidade no Swagger para auditoria operacional.
-    """
     if df_remanescente is None or len(df_remanescente) == 0:
         return pd.DataFrame()
 
@@ -1077,30 +809,32 @@ def executar_m4_manifestos_fechados(
     inicio_total = _agora()
     tempos_m4: Dict[str, float] = {}
     contadores_m4: Dict[str, Any] = {
-        "qtd_anchors_exclusivos": 0,
+        "qtd_clientes_input": 0,
+        "qtd_clientes_exclusivos": 0,
         "qtd_clientes_nao_exclusivos": 0,
         "qtd_tentativas_total": 0,
         "qtd_tentativas_rejeitadas_ocupacao": 0,
         "qtd_tentativas_rejeitadas_km": 0,
         "qtd_tentativas_rejeitadas_paradas": 0,
         "qtd_tentativas_rejeitadas_capacidade": 0,
+        "qtd_tentativas_rejeitadas_volume": 0,
         "qtd_tentativas_rejeitadas_restricao_veiculo": 0,
         "qtd_tentativas_sem_disponibilidade_frota": 0,
         "qtd_manifestos_exclusivos": 0,
-        "qtd_manifestos_cliente_cluster": 0,
-        "qtd_manifestos_cliente_maior_menor": 0,
+        "qtd_manifestos_nao_exclusivos": 0,
+        "qtd_clientes_eliminados_peso_minimo": 0,
+        "qtd_clientes_sem_perfil_por_raio": 0,
     }
 
     fila = _deduplicar_colunas(df_input_oficial_bloco_4.copy().reset_index(drop=True))
     veiculos = _deduplicar_colunas(df_veiculos_tratados.copy().reset_index(drop=True))
     caminhos_pipeline = caminhos_pipeline or {}
     tipo_roteirizacao = _normalizar_tipo_roteirizacao(tipo_roteirizacao)
-
     persistir_artefatos = bool(caminhos_pipeline.get("persistir_artefatos", False))
 
-    # =========================================================================================
-    # PREPARAÇÃO
-    # =========================================================================================
+    # ============================================================
+    # 1) PREPARAÇÃO E CONTRATO
+    # ============================================================
     t0 = _agora()
 
     fila = _garantir_coluna_por_alias(fila, "destinatario", ["Destinatário", "cliente"], default=np.nan)
@@ -1142,6 +876,8 @@ def executar_m4_manifestos_fechados(
         "destinatario",
         "cidade",
         "uf",
+        "peso_kg",
+        "vol_m3",
         "peso_calculado",
         "distancia_rodoviaria_est_km",
         "status_triagem",
@@ -1160,6 +896,7 @@ def executar_m4_manifestos_fechados(
 
     if faltam_fila:
         raise Exception("Faltam colunas mínimas na fila oficial do Bloco 4:\n- " + "\n- ".join(faltam_fila))
+
     if faltam_veiculos:
         raise Exception("Faltam colunas mínimas na base de veículos:\n- " + "\n- ".join(faltam_veiculos))
 
@@ -1210,6 +947,9 @@ def executar_m4_manifestos_fechados(
     fila["ranking_prioridade"] = pd.to_numeric(fila["ranking_prioridade"], errors="coerce").fillna(999999)
     fila["score_prioridade_preliminar"] = pd.to_numeric(fila["score_prioridade_preliminar"], errors="coerce").fillna(0.0)
     fila["peso_calculado"] = pd.to_numeric(fila["peso_calculado"], errors="coerce")
+    fila["peso_kg"] = pd.to_numeric(fila["peso_kg"], errors="coerce")
+    fila["vol_m3"] = pd.to_numeric(fila["vol_m3"], errors="coerce")
+    fila["distancia_rodoviaria_est_km"] = pd.to_numeric(fila["distancia_rodoviaria_est_km"], errors="coerce")
 
     if "restricao_veiculo" not in fila.columns:
         fila["restricao_veiculo"] = np.nan
@@ -1231,9 +971,11 @@ def executar_m4_manifestos_fechados(
     fila_ordenada = _ordenar_fila(fila)
     tempos_m4["preparacao_validacao_ms"] = _duracao_ms(t0)
 
-    # =========================================================================================
-    # EXECUÇÃO
-    # =========================================================================================
+    # ============================================================
+    # 2) ESTRUTURAS DE EXECUÇÃO
+    # ============================================================
+    t0 = _agora()
+
     manifestos_fechados: List[Dict[str, Any]] = []
     itens_manifestos_fechados: List[pd.DataFrame] = []
     tentativas_fechamento: List[Dict[str, Any]] = []
@@ -1243,6 +985,7 @@ def executar_m4_manifestos_fechados(
     def _contabilizar_tentativa(tent: Dict[str, Any]) -> None:
         contadores_m4["qtd_tentativas_total"] += 1
         motivo = str(tent.get("motivo_reprovacao", "")).strip()
+
         if motivo == "perfil_sem_disponibilidade_no_modo_frota":
             contadores_m4["qtd_tentativas_sem_disponibilidade_frota"] += 1
         if "nao_atinge_faixa_ocupacao_70_100" in motivo:
@@ -1253,6 +996,8 @@ def executar_m4_manifestos_fechados(
             contadores_m4["qtd_tentativas_rejeitadas_paradas"] += 1
         if "excede_capacidade_peso_oficial" in motivo:
             contadores_m4["qtd_tentativas_rejeitadas_capacidade"] += 1
+        if "excede_capacidade_volume" in motivo:
+            contadores_m4["qtd_tentativas_rejeitadas_volume"] += 1
         if "restricao_veiculo_incompativel" in motivo:
             contadores_m4["qtd_tentativas_rejeitadas_restricao_veiculo"] += 1
 
@@ -1278,9 +1023,9 @@ def executar_m4_manifestos_fechados(
 
         if not avaliacao.get("ignorar_ocupacao_minima", False):
             ocup = _num_safe(avaliacao.get("ocupacao_oficial_perc"), default=np.nan)
-            if pd.isna(ocup) or ocup < 70 or ocup > 100:
+            if pd.isna(ocup) or ocup < 70 or ocup >= 100:
                 raise Exception(
-                    f"Manifesto inválido: ocupação fora da faixa 70%-100%. "
+                    f"Manifesto inválido: ocupação fora da faixa 70% <= x < 100%. "
                     f"Valor encontrado: {ocup}"
                 )
 
@@ -1307,141 +1052,251 @@ def executar_m4_manifestos_fechados(
         itens["base_carga_oficial_manifesto"] = avaliacao["base_carga_oficial"]
         itens["ocupacao_oficial_perc_manifesto"] = avaliacao["ocupacao_oficial_perc"]
         itens["ignorar_ocupacao_minima_manifesto"] = avaliacao["ignorar_ocupacao_minima"]
+        itens["ignorar_raio_manifesto"] = avaliacao.get("ignorar_raio", False)
         itens["origem_modulo"] = 4
         itens["origem_etapa"] = origem_etapa
 
         itens_manifestos_fechados.append(itens)
-
         ids_alocados.update(ids_combo)
         _consumir_veiculo_catalogo(catalogo_veiculos, catalogo_idx, tipo_roteirizacao)
 
-    # -----------------------------------------
-    # 4B1 - EXCLUSIVOS
-    # -----------------------------------------
-    t0 = _agora()
-    exclusivos = _filtrar_nao_alocados(fila_ordenada)
-    exclusivos = exclusivos.loc[exclusivos["veiculo_exclusivo_flag"] == True].copy().reset_index(drop=True)
-    contadores_m4["qtd_anchors_exclusivos"] = int(len(exclusivos))
+    grupos_cliente = _agrupar_clientes_ordenados(fila_ordenada)
+    contadores_m4["qtd_clientes_input"] = int(len(grupos_cliente))
+    tempos_m4["montagem_indices_cliente_ms"] = _duracao_ms(t0)
 
-    for _, linha_exclusiva in exclusivos.iterrows():
-        id_anchor = str(linha_exclusiva["id_linha_pipeline"])
-        if id_anchor in ids_alocados:
+    # ============================================================
+    # 3) DEDICADOS
+    # Regra:
+    # - primeiro
+    # - menor perfil para maior
+    # - ignora ocupação mínima e raio
+    # - respeita capacidade, volume, paradas e restrição de veículo
+    # ============================================================
+    t0 = _agora()
+
+    grupos_dedicados = [(cliente, dfc) for cliente, dfc in grupos_cliente if bool(dfc["veiculo_exclusivo_flag"].any())]
+    contadores_m4["qtd_clientes_exclusivos"] = int(len(grupos_dedicados))
+
+    for cliente, df_cliente in grupos_dedicados:
+        pool_cliente = _filtrar_nao_alocados(df_cliente)
+        if len(pool_cliente) == 0:
             continue
 
-        fila_disponivel = _filtrar_nao_alocados(fila_ordenada)
+        linha_ancora = pool_cliente.iloc[0]
+        anchor_id = str(linha_ancora["id_linha_pipeline"])
 
-        resultado_exclusivo = _tentar_exclusivo_com_mesmo_cliente(
-            linha_exclusiva=linha_exclusiva,
-            fila_disponivel=fila_disponivel,
+        perfis = catalogo_veiculos.sort_values(
+            by=["capacidade_peso_kg", "capacidade_vol_m3", "max_entregas", "max_km_distancia"],
+            ascending=[True, True, True, True],
+        )
+
+        fechado = False
+
+        for idx, veic in perfis.iterrows():
+            if not _veiculo_disponivel_no_modo_frota(veic, tipo_roteirizacao):
+                tent = {
+                    "etapa_fechamento": "4B1_dedicados",
+                    "tipo_tentativa": "cliente_dedicado",
+                    "cliente_referencia": cliente,
+                    "linha_ancora": anchor_id,
+                    "veiculo_tipo": veic["tipo"],
+                    "resultado_teste": "rejeitado",
+                    "motivo_reprovacao": "perfil_sem_disponibilidade_no_modo_frota",
+                }
+                tentativas_fechamento.append(tent)
+                _contabilizar_tentativa(tent)
+                continue
+
+            avaliacao = _avaliar_combo_no_veiculo(
+                pool_cliente,
+                veic=veic,
+                ignorar_ocupacao_minima=True,
+                ignorar_raio=True,
+            )
+
+            tent = {
+                **avaliacao,
+                "etapa_fechamento": "4B1_dedicados",
+                "tipo_tentativa": "cliente_dedicado",
+                "cliente_referencia": cliente,
+                "linha_ancora": anchor_id,
+                "resultado_teste": "aceito" if avaliacao["aceito"] else "rejeitado",
+            }
+
+            if not avaliacao["aceito"]:
+                tent["motivo_reprovacao"] = _motivo_reprovacao(
+                    avaliacao,
+                    exigir_ocupacao=False,
+                    exigir_raio=False,
+                )
+
+            tentativas_fechamento.append(tent)
+            _contabilizar_tentativa(tent)
+
+            if avaliacao["aceito"]:
+                registrar_manifesto(
+                    df_combo=pool_cliente,
+                    avaliacao=avaliacao,
+                    origem_etapa="4B1_dedicados",
+                    catalogo_idx=idx,
+                )
+                contadores_m4["qtd_manifestos_exclusivos"] += 1
+                fechado = True
+                break
+
+        if not fechado:
+            continue
+
+    tempos_m4["4B1_dedicados_ms"] = _duracao_ms(t0)
+
+    # ============================================================
+    # 4) REMANESCENTE PÓS-DEDICADOS + FILTRO DE PESO MÍNIMO
+    # Regra:
+    # - não dedicado
+    # - elimina cliente cujo peso total não atinge 70% do menor perfil
+    # ============================================================
+    t0 = _agora()
+
+    remanescente_pos_dedicados = _filtrar_nao_alocados(fila_ordenada)
+    remanescente_nao_exclusivo = remanescente_pos_dedicados.loc[
+        remanescente_pos_dedicados["veiculo_exclusivo_flag"] == False
+    ].copy().reset_index(drop=True)
+
+    grupos_nao_exclusivos = _agrupar_clientes_ordenados(remanescente_nao_exclusivo)
+    contadores_m4["qtd_clientes_nao_exclusivos"] = int(len(grupos_nao_exclusivos))
+
+    menor_perfil = _obter_menor_perfil_por_capacidade(catalogo_veiculos)
+    peso_minimo_menor_perfil = float(menor_perfil["capacidade_peso_kg"]) * OCUPACAO_MINIMA_PADRAO
+
+    grupos_validos: List[Tuple[str, pd.DataFrame]] = []
+    grupos_eliminados_peso: List[Tuple[str, pd.DataFrame]] = []
+
+    for cliente, df_cliente in grupos_nao_exclusivos:
+        peso_total_cliente = _obter_base_carga_oficial(df_cliente)
+        if peso_total_cliente < peso_minimo_menor_perfil:
+            grupos_eliminados_peso.append((cliente, df_cliente))
+        else:
+            grupos_validos.append((cliente, df_cliente))
+
+    contadores_m4["qtd_clientes_eliminados_peso_minimo"] = int(len(grupos_eliminados_peso))
+
+    for cliente, df_cliente in grupos_eliminados_peso:
+        tent = {
+            "etapa_fechamento": "4B2_filtro_peso_minimo",
+            "tipo_tentativa": "cliente_nao_exclusivo",
+            "cliente_referencia": cliente,
+            "linha_ancora": str(df_cliente["id_linha_pipeline"].astype(str).iloc[0]),
+            "resultado_teste": "rejeitado",
+            "motivo_reprovacao": "abaixo_ocupacao_minima_do_menor_perfil",
+        }
+        tentativas_fechamento.append(tent)
+        _contabilizar_tentativa(tent)
+
+    tempos_m4["4B2_filtro_peso_minimo_ms"] = _duracao_ms(t0)
+
+    # ============================================================
+    # 5) NÃO DEDICADOS
+    # Regra:
+    # - perfis compatíveis por raio
+    # - testar do maior perfil compatível para o menor
+    # - respeitar ocupação 70% <= x < 100%, raio, capacidade, volume, paradas e restrição
+    # - se não fechar em um perfil, tenta o próximo
+    # - só desiste se não fechar em nenhum
+    # ============================================================
+    t0 = _agora()
+
+    for cliente, df_cliente in grupos_validos:
+        pool_cliente = _filtrar_nao_alocados(df_cliente)
+        if len(pool_cliente) == 0:
+            continue
+
+        anchor_id = str(pool_cliente["id_linha_pipeline"].astype(str).iloc[0])
+        km_cliente = _calcular_km_referencia(pool_cliente)
+        perfis_compativeis = _perfis_compativeis_por_raio(
             catalogo_veiculos=catalogo_veiculos,
+            km_referencia=km_cliente,
             tipo_roteirizacao=tipo_roteirizacao,
         )
 
-        for tent in resultado_exclusivo.get("tentativas", []):
-            tent_padrao = {
-                **tent,
-                "etapa_fechamento": "4B1_exclusivo",
-                "tipo_tentativa": "exclusivo_com_mesmo_cliente",
-                "cliente_referencia": linha_exclusiva["destinatario"],
-                "linha_ancora": id_anchor,
+        if len(perfis_compativeis) == 0:
+            contadores_m4["qtd_clientes_sem_perfil_por_raio"] += 1
+            tent = {
+                "etapa_fechamento": "4C_nao_exclusivos",
+                "tipo_tentativa": "cliente_nao_exclusivo",
+                "cliente_referencia": cliente,
+                "linha_ancora": anchor_id,
+                "resultado_teste": "rejeitado",
+                "motivo_reprovacao": "sem_perfil_compativel_por_raio",
             }
-            tentativas_fechamento.append(tent_padrao)
-            _contabilizar_tentativa(tent_padrao)
+            tentativas_fechamento.append(tent)
+            _contabilizar_tentativa(tent)
+            continue
 
-        if resultado_exclusivo["aceito"]:
-            registrar_manifesto(
-                df_combo=resultado_exclusivo["df_combo"],
-                avaliacao=resultado_exclusivo["avaliacao"],
-                origem_etapa="4B1_exclusivo",
-                catalogo_idx=resultado_exclusivo["catalogo_idx"],
+        fechado = False
+
+        for _, row_veic in perfis_compativeis.iterrows():
+            idx_original = int(row_veic["index"])
+            veic = catalogo_veiculos.loc[idx_original]
+
+            if not _veiculo_disponivel_no_modo_frota(veic, tipo_roteirizacao):
+                tent = {
+                    "etapa_fechamento": "4C_nao_exclusivos",
+                    "tipo_tentativa": "cliente_nao_exclusivo",
+                    "cliente_referencia": cliente,
+                    "linha_ancora": anchor_id,
+                    "veiculo_tipo": veic["tipo"],
+                    "resultado_teste": "rejeitado",
+                    "motivo_reprovacao": "perfil_sem_disponibilidade_no_modo_frota",
+                }
+                tentativas_fechamento.append(tent)
+                _contabilizar_tentativa(tent)
+                continue
+
+            avaliacao = _avaliar_combo_no_veiculo(
+                pool_cliente,
+                veic=veic,
+                ignorar_ocupacao_minima=False,
+                ignorar_raio=False,
             )
-            contadores_m4["qtd_manifestos_exclusivos"] += 1
 
-    tempos_m4["4B1_exclusivos_ms"] = _duracao_ms(t0)
+            tent = {
+                **avaliacao,
+                "etapa_fechamento": "4C_nao_exclusivos",
+                "tipo_tentativa": "cliente_nao_exclusivo",
+                "cliente_referencia": cliente,
+                "linha_ancora": anchor_id,
+                "resultado_teste": "aceito" if avaliacao["aceito"] else "rejeitado",
+            }
 
-    # -----------------------------------------
-    # 4B2/4C - CLIENTES NÃO EXCLUSIVOS
-    # -----------------------------------------
-    t0 = _agora()
+            if not avaliacao["aceito"]:
+                tent["motivo_reprovacao"] = _motivo_reprovacao(
+                    avaliacao,
+                    exigir_ocupacao=True,
+                    exigir_raio=True,
+                )
 
-    fila_nao_exclusiva = _filtrar_nao_alocados(fila_ordenada)
-    fila_nao_exclusiva = fila_nao_exclusiva.loc[fila_nao_exclusiva["veiculo_exclusivo_flag"] == False].copy()
+            tentativas_fechamento.append(tent)
+            _contabilizar_tentativa(tent)
 
-    clientes = list(dict.fromkeys(fila_nao_exclusiva["destinatario"].astype(str).tolist()))
-    contadores_m4["qtd_clientes_nao_exclusivos"] = int(len(clientes))
-
-    for cliente in clientes:
-        while True:
-            fila_cliente = _filtrar_nao_alocados(fila_ordenada)
-            fila_cliente = fila_cliente.loc[
-                (fila_cliente["veiculo_exclusivo_flag"] == False)
-                & (fila_cliente["destinatario"].astype(str) == str(cliente))
-            ].copy().reset_index(drop=True)
-
-            if len(fila_cliente) == 0:
+            if avaliacao["aceito"]:
+                registrar_manifesto(
+                    df_combo=pool_cliente,
+                    avaliacao=avaliacao,
+                    origem_etapa="4C_nao_exclusivos",
+                    catalogo_idx=idx_original,
+                )
+                contadores_m4["qtd_manifestos_nao_exclusivos"] += 1
+                fechado = True
                 break
 
-            resultado_primario = _tentar_cluster_mesmo_cliente_menor_para_maior(
-                base_cliente=fila_cliente,
-                catalogo_veiculos=catalogo_veiculos,
-                tipo_roteirizacao=tipo_roteirizacao,
-            )
+        if not fechado:
+            continue
 
-            for tent in resultado_primario.get("tentativas", []):
-                tent_padrao = {
-                    **tent,
-                    "etapa_fechamento": "4B2_cluster_maior_para_menor",
-                    "tipo_tentativa": "cluster_mesmo_cliente",
-                    "cliente_referencia": cliente,
-                    "linha_ancora": fila_cliente["id_linha_pipeline"].astype(str).iloc[0],
-                }
-                tentativas_fechamento.append(tent_padrao)
-                _contabilizar_tentativa(tent_padrao)
+    tempos_m4["4C_nao_exclusivos_ms"] = _duracao_ms(t0)
 
-            if resultado_primario["aceito"]:
-                registrar_manifesto(
-                    df_combo=resultado_primario["df_combo"],
-                    avaliacao=resultado_primario["avaliacao"],
-                    origem_etapa="4B2_cluster_maior_para_menor",
-                    catalogo_idx=resultado_primario["catalogo_idx"],
-                )
-                contadores_m4["qtd_manifestos_cliente_cluster"] += 1
-                continue
-
-            resultado_restante = _tentar_restante_cliente_maior_para_menor(
-                base_cliente=fila_cliente,
-                catalogo_veiculos=catalogo_veiculos,
-                tipo_roteirizacao=tipo_roteirizacao,
-            )
-
-            for tent in resultado_restante.get("tentativas", []):
-                tent_padrao = {
-                    **tent,
-                    "etapa_fechamento": "4C_restante_cliente_maior_para_menor",
-                    "tipo_tentativa": "restante_mesmo_cliente",
-                    "cliente_referencia": cliente,
-                    "linha_ancora": fila_cliente["id_linha_pipeline"].astype(str).iloc[0],
-                }
-                tentativas_fechamento.append(tent_padrao)
-                _contabilizar_tentativa(tent_padrao)
-
-            if resultado_restante["aceito"]:
-                registrar_manifesto(
-                    df_combo=resultado_restante["df_combo"],
-                    avaliacao=resultado_restante["avaliacao"],
-                    origem_etapa="4C_restante_cliente_maior_para_menor",
-                    catalogo_idx=resultado_restante["catalogo_idx"],
-                )
-                contadores_m4["qtd_manifestos_cliente_maior_menor"] += 1
-                continue
-
-            break
-
-    tempos_m4["4B2_4C_clientes_ms"] = _duracao_ms(t0)
-
-    # -----------------------------------------
-    # VALIDAÇÃO DURA PÓS-M4
-    # -----------------------------------------
+    # ============================================================
+    # 6) PÓS-M4 / OUTPUTS
+    # ============================================================
     t0 = _agora()
 
     df_manifestos_fechados_bloco_4 = pd.DataFrame(manifestos_fechados)
@@ -1465,12 +1320,12 @@ def executar_m4_manifestos_fechados(
                 (~df_manifestos_fechados_bloco_4["ignorar_ocupacao_minima"])
                 & (
                     (pd.to_numeric(df_manifestos_fechados_bloco_4["ocupacao_oficial_perc"], errors="coerce") < 70)
-                    | (pd.to_numeric(df_manifestos_fechados_bloco_4["ocupacao_oficial_perc"], errors="coerce") > 100)
+                    | (pd.to_numeric(df_manifestos_fechados_bloco_4["ocupacao_oficial_perc"], errors="coerce") >= 100)
                 )
             ].copy()
             if len(base_invalidos) > 0:
                 raise Exception(
-                    "Validação pós-M4 falhou: manifesto não exclusivo com ocupação fora de 70%-100%."
+                    "Validação pós-M4 falhou: manifesto não exclusivo com ocupação fora de 70% <= x < 100%."
                 )
 
     if len(df_remanescente_roteirizavel_bloco_4) > 0:
@@ -1503,9 +1358,9 @@ def executar_m4_manifestos_fechados(
 
     tempos_m4["validacao_pos_m4_ms"] = _duracao_ms(t0)
 
-    # =========================================================================================
-    # PERSISTÊNCIA OPCIONAL
-    # =========================================================================================
+    # ============================================================
+    # 7) PERSISTÊNCIA OPCIONAL
+    # ============================================================
     t0 = _agora()
 
     if persistir_artefatos:
@@ -1566,10 +1421,13 @@ def executar_m4_manifestos_fechados(
                 "tipo_roteirizacao": tipo_roteirizacao,
                 "regras": {
                     "peso_calculado_base_oficial": True,
-                    "exclusivo_sem_ocupacao_minima": True,
+                    "dedicado_primeiro": True,
+                    "dedicado_ignora_ocupacao_minima": True,
+                    "dedicado_ignora_raio": True,
                     "nao_exclusivo_mesmo_cliente_sem_mistura": True,
-                    "cluster_primeiro_maior_para_menor": True,
-                    "remanescente_segue_para_m5": True,
+                    "nao_exclusivo_respeita_ocupacao_70_a_menor_que_100": True,
+                    "nao_exclusivo_respeita_raio": True,
+                    "remanescente_segue_para_proximo_bloco": True,
                 },
                 "contadores_m4": contadores_m4,
                 "tempos_m4": tempos_m4,
@@ -1598,9 +1456,9 @@ def executar_m4_manifestos_fechados(
     tempos_m4["persistencia_artefatos_ms"] = _duracao_ms(t0)
     tempos_m4["tempo_total_m4_ms"] = _duracao_ms(inicio_total)
 
-    # =========================================================================================
-    # RESUMOS E METADADOS
-    # =========================================================================================
+    # ============================================================
+    # 8) RESUMOS E METADADOS
+    # ============================================================
     resumo_m4 = {
         "modulo": "M4",
         "data_base_roteirizacao": pd.Timestamp(data_base_roteirizacao).isoformat(),
