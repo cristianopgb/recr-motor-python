@@ -13,6 +13,7 @@ COLUNAS_MINIMAS_M31 = [
     "agendada",
     "folga_dias",
     "peso_kg",
+    "peso_calculado",
     "vol_m3",
     "distancia_rodoviaria_est_km",
     "destinatario",
@@ -58,6 +59,11 @@ def executar_m3_1_validacao_fronteira(
     - roteirizável com data_agenda: folga_dias >= 0 e < 2
     - roteirizável sem data_agenda: deve ter data_leadtime preenchida
     - a verdade operacional de agenda é somente data_agenda
+
+    Regra crítica de peso nesta fronteira:
+    - peso_kg permanece como auditoria
+    - peso_calculado é obrigatório como referência operacional do bloco 4 em diante
+    - este módulo não recalcula peso; apenas valida a integridade da fronteira
     """
 
     df_input = df_carteira_roteirizavel.copy().reset_index(drop=True)
@@ -95,11 +101,15 @@ def executar_m3_1_validacao_fronteira(
         "agendadas_validas": int(df_input_oficial_bloco_4["data_agenda"].notna().sum()),
         "leadtime_sem_agenda": int(df_input_oficial_bloco_4["data_agenda"].isna().sum()),
         "peso_nulo": int(df_input_oficial_bloco_4["peso_kg"].isna().sum()),
+        "peso_calculado_nulo": int(df_input_oficial_bloco_4["peso_calculado"].isna().sum()),
         "volume_nulo": int(df_input_oficial_bloco_4["vol_m3"].isna().sum()),
-        "peso_calculado_nulo": int(df_input_oficial_bloco_4["peso_calculado"].isna().sum()) if "peso_calculado" in df_input_oficial_bloco_4.columns else None,
         "km_nulo": int(df_input_oficial_bloco_4["distancia_rodoviaria_est_km"].isna().sum()),
-        "veiculo_exclusivo_flag_true": int(df_input_oficial_bloco_4["veiculo_exclusivo_flag"].fillna(False).astype(bool).sum()) if "veiculo_exclusivo_flag" in df_input_oficial_bloco_4.columns else None,
-        "prioridade_embarque_1": int((pd.to_numeric(df_input_oficial_bloco_4["prioridade_embarque"], errors="coerce") == 1).sum()) if "prioridade_embarque" in df_input_oficial_bloco_4.columns else None,
+        "veiculo_exclusivo_flag_true": int(
+            df_input_oficial_bloco_4["veiculo_exclusivo_flag"].fillna(False).astype(bool).sum()
+        ) if "veiculo_exclusivo_flag" in df_input_oficial_bloco_4.columns else None,
+        "prioridade_embarque_1": int(
+            (pd.to_numeric(df_input_oficial_bloco_4["prioridade_embarque"], errors="coerce") == 1).sum()
+        ) if "prioridade_embarque" in df_input_oficial_bloco_4.columns else None,
         "ids_tecnicos_unicos": int(df_input_oficial_bloco_4["id_linha_pipeline"].nunique()),
         "colunas_base_hash": colunas_base_hash,
         "caminhos_pipeline": caminhos_pipeline or {},
@@ -131,11 +141,9 @@ def _tipagem_defensiva(df: pd.DataFrame) -> None:
 
     df["folga_dias"] = pd.to_numeric(df["folga_dias"], errors="coerce")
     df["peso_kg"] = pd.to_numeric(df["peso_kg"], errors="coerce")
+    df["peso_calculado"] = pd.to_numeric(df["peso_calculado"], errors="coerce")
     df["vol_m3"] = pd.to_numeric(df["vol_m3"], errors="coerce")
     df["distancia_rodoviaria_est_km"] = pd.to_numeric(df["distancia_rodoviaria_est_km"], errors="coerce")
-
-    if "peso_calculado" in df.columns:
-        df["peso_calculado"] = pd.to_numeric(df["peso_calculado"], errors="coerce")
 
     if "prioridade_embarque" in df.columns:
         df["prioridade_embarque"] = pd.to_numeric(df["prioridade_embarque"], errors="coerce")
@@ -183,13 +191,21 @@ def _validacoes_duras(df: pd.DataFrame) -> None:
         )
 
     linhas_sem_peso = int(df["peso_kg"].isna().sum())
+    linhas_sem_peso_calculado = int(df["peso_calculado"].isna().sum())
     linhas_sem_vol = int(df["vol_m3"].isna().sum())
     linhas_sem_km = int(df["distancia_rodoviaria_est_km"].isna().sum())
 
     if linhas_sem_peso > 0:
         problemas.append(f"Linhas sem peso_kg: {linhas_sem_peso}")
+
+    if linhas_sem_peso_calculado > 0:
+        problemas.append(
+            f"Linhas sem peso_calculado na fronteira do Bloco 4: {linhas_sem_peso_calculado}"
+        )
+
     if linhas_sem_vol > 0:
         problemas.append(f"Linhas sem vol_m3: {linhas_sem_vol}")
+
     if linhas_sem_km > 0:
         problemas.append(f"Linhas sem distancia_rodoviaria_est_km: {linhas_sem_km}")
 
