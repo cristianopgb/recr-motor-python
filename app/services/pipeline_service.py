@@ -15,6 +15,7 @@ from app.pipeline.m5_2_composicao_cidades import executar_m5_2_composicao_cidade
 from app.pipeline.m5_3_triagem_subregioes import executar_m5_3_triagem_subregioes
 from app.pipeline.m5_4a_preparacao_subregioes import executar_m5_4a_preparacao_subregioes
 from app.pipeline.m5_4b_aderencia_frota_subregioes import executar_m5_4b_aderencia_frota_subregioes
+from app.pipeline.m5_4c_composicao_subregioes import executar_m5_4c_composicao_subregioes
 from app.schemas import RoteirizacaoRequest
 from app.services.payload_service import PipelineContext, normalizar_payload_para_pipeline
 
@@ -277,9 +278,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     resumo_m3 = meta_m3["resumo_m3"]
 
     df_carteira_roteirizavel = outputs_m3["df_carteira_roteirizavel"]
-    df_carteira_agendamento_futuro = outputs_m3["df_carteira_agendamento_futuro"]
-    df_carteira_agendas_vencidas = outputs_m3["df_carteira_agendas_vencidas"]
-    df_carteira_excecoes_triagem = outputs_m3.get("df_carteira_excecoes_triagem", pd.DataFrame())
 
     logs.append(
         _log(
@@ -513,7 +511,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
 
     resumo_m5_4b = meta_m5_4b["resumo_m5_4b"]
     df_frota_aderente_m5_4b = outputs_m5_4b["df_frota_aderente_m5_4b"]
-    df_frota_nao_aderente_m5_4b = outputs_m5_4b["df_frota_nao_aderente_m5_4b"]
 
     logs.append(
         _log(
@@ -526,18 +523,58 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             extra={
                 **resumo_m5_4b,
                 "total_frota_aderente_m5_4b": _safe_len(df_frota_aderente_m5_4b),
-                "total_frota_nao_aderente_m5_4b": _safe_len(df_frota_nao_aderente_m5_4b),
             },
         )
     )
 
     # =========================================================================================
-    # SERIALIZAÇÃO FINAL - SOMENTE ETAPA ATUAL
+    # M5.4C
+    # =========================================================================================
+    t0 = _agora()
+    outputs_m5_4c, meta_m5_4c = executar_m5_4c_composicao_subregioes(
+        df_base_preparada_m5_4a=df_base_preparada_m5_4a,
+        df_frota_aderente_m5_4b=df_frota_aderente_m5_4b,
+        rodada_id=contexto.rodada_id,
+        data_base_roteirizacao=contexto.data_base,
+        tipo_roteirizacao=contexto.tipo_roteirizacao,
+        caminhos_pipeline=contexto.caminhos_pipeline,
+    )
+    tempo_m5_4c = _duracao_ms(t0)
+    metricas_tempo["m5_4c_composicao_subregioes_ms"] = tempo_m5_4c
+
+    resumo_m5_4c = meta_m5_4c["resumo_m5_4c"]
+    df_itens_premanifestados_m5_4c = outputs_m5_4c["df_itens_premanifestados_m5_4c"]
+    df_remanescente_m5_4c = outputs_m5_4c["df_remanescente_m5_4c"]
+
+    logs.append(
+        _log(
+            modulo="m5_4c_composicao_subregioes",
+            status="ok",
+            mensagem="M5.4C executado com sucesso",
+            quantidade_entrada=_safe_len(df_base_preparada_m5_4a),
+            quantidade_saida=_safe_len(df_itens_premanifestados_m5_4c),
+            tempo_ms=tempo_m5_4c,
+            extra={
+                **resumo_m5_4c,
+                "total_itens_premanifestados_m5_4c": _safe_len(df_itens_premanifestados_m5_4c),
+                "total_remanescente_m5_4c": _safe_len(df_remanescente_m5_4c),
+            },
+        )
+    )
+
+    # =========================================================================================
+    # SERIALIZAÇÃO FINAL - AUDITORIA LINHA A LINHA
     # =========================================================================================
     t0 = _agora()
 
-    frota_aderente_m5_4b = _serializar_dataframe_para_records(df_frota_aderente_m5_4b, limit=None)
-    frota_nao_aderente_m5_4b = _serializar_dataframe_para_records(df_frota_nao_aderente_m5_4b, limit=None)
+    itens_premanifestados_m5_4c = _serializar_dataframe_para_records(
+        df_itens_premanifestados_m5_4c,
+        limit=None,
+    )
+    remanescente_m5_4c = _serializar_dataframe_para_records(
+        df_remanescente_m5_4c,
+        limit=None,
+    )
 
     tempo_serializacao = _duracao_ms(t0)
     metricas_tempo["serializacao_resposta_ms"] = tempo_serializacao
@@ -547,9 +584,9 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
 
     resposta: Dict[str, Any] = {
         "status": "ok",
-        "mensagem": "Motor executou com sucesso até o M5.4B aderência de frota por subregiões.",
-        "pipeline_real_ate": "M5.4B",
-        "modo_resposta": "validacao_manual_m5_4b_aderencia_frota",
+        "mensagem": "Motor executou com sucesso até o M5.4C composição por subregiões.",
+        "pipeline_real_ate": "M5.4C",
+        "modo_resposta": "validacao_manual_m5_4c_linha_a_linha",
         "resposta_truncada": False,
         "resumo_execucao": {
             "rodada_id": contexto.rodada_id,
@@ -566,23 +603,25 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "total_remanescentes_m4": _safe_len(df_remanescente_roteirizavel_bloco_4),
             "total_elegiveis_m5_3": _safe_len(df_saldo_elegivel_composicao_m5_3),
             "total_frota_aderente_m5_4b": _safe_len(df_frota_aderente_m5_4b),
-            "total_frota_nao_aderente_m5_4b": _safe_len(df_frota_nao_aderente_m5_4b),
+            "total_itens_premanifestados_m5_4c": _safe_len(df_itens_premanifestados_m5_4c),
+            "total_remanescente_m5_4c": _safe_len(df_remanescente_m5_4c),
             "resumo_m4": resumo_m4,
             "resumo_m5_3": resumo_m5_3,
             "resumo_m5_4a": resumo_m5_4a,
             "resumo_m5_4b": resumo_m5_4b,
+            "resumo_m5_4c": resumo_m5_4c,
         },
         "contexto_rodada": {
             "filial": contexto.filial,
             "parametros_rodada": contexto.parametros_rodada,
         },
-        "frota_aderente_m5_4b": frota_aderente_m5_4b,
-        "frota_nao_aderente_m5_4b": frota_nao_aderente_m5_4b,
+        "itens_premanifestados_m5_4c": itens_premanifestados_m5_4c,
+        "remanescente_m5_4c": remanescente_m5_4c,
         "auditoria_serializacao": {
-            "frota_aderente_m5_4b_total": _safe_len(df_frota_aderente_m5_4b),
-            "frota_aderente_m5_4b_retornado": len(frota_aderente_m5_4b),
-            "frota_nao_aderente_m5_4b_total": _safe_len(df_frota_nao_aderente_m5_4b),
-            "frota_nao_aderente_m5_4b_retornado": len(frota_nao_aderente_m5_4b),
+            "itens_premanifestados_m5_4c_total": _safe_len(df_itens_premanifestados_m5_4c),
+            "itens_premanifestados_m5_4c_retornado": len(itens_premanifestados_m5_4c),
+            "remanescente_m5_4c_total": _safe_len(df_remanescente_m5_4c),
+            "remanescente_m5_4c_retornado": len(remanescente_m5_4c),
         },
         "logs": logs,
     }
@@ -590,12 +629,24 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     if debug:
         resposta["debug"] = {
             "snapshots": {
-                "frota_aderente_m5_4b": _snapshot_dataframe(df_frota_aderente_m5_4b, "df_frota_aderente_m5_4b"),
-                "frota_nao_aderente_m5_4b": _snapshot_dataframe(df_frota_nao_aderente_m5_4b, "df_frota_nao_aderente_m5_4b"),
+                "itens_premanifestados_m5_4c": _snapshot_dataframe(
+                    df_itens_premanifestados_m5_4c,
+                    "df_itens_premanifestados_m5_4c",
+                ),
+                "remanescente_m5_4c": _snapshot_dataframe(
+                    df_remanescente_m5_4c,
+                    "df_remanescente_m5_4c",
+                ),
             },
             "resumos_dataframes": {
-                "frota_aderente_m5_4b": _montar_resumo_dataframe(df_frota_aderente_m5_4b, "frota_aderente_m5_4b"),
-                "frota_nao_aderente_m5_4b": _montar_resumo_dataframe(df_frota_nao_aderente_m5_4b, "frota_nao_aderente_m5_4b"),
+                "itens_premanifestados_m5_4c": _montar_resumo_dataframe(
+                    df_itens_premanifestados_m5_4c,
+                    "itens_premanifestados_m5_4c",
+                ),
+                "remanescente_m5_4c": _montar_resumo_dataframe(
+                    df_remanescente_m5_4c,
+                    "remanescente_m5_4c",
+                ),
             },
         }
 
