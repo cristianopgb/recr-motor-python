@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, List, Literal, Optional
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
@@ -9,10 +9,11 @@ class CarteiraItem(BaseModel):
     """
     Schema bruto da carteira recebida do Sistema 1.
 
-    Regra deste schema:
-    - aceitar o layout novo do cliente como principal
-    - manter aliases de compatibilidade para nomes antigos relevantes
-    - não fazer regra de negócio aqui
+    Diretriz deste schema:
+    - aceitar o contrato novo como padrão
+    - aceitar aliases de compatibilidade com layout antigo
+    - aceitar aliases do dataset real/truncado usado nos testes
+    - não aplicar regra de negócio aqui
     - deixar o M1 responsável pela padronização interna do pipeline
     """
     model_config = ConfigDict(
@@ -27,18 +28,21 @@ class CarteiraItem(BaseModel):
         default=None,
         validation_alias=AliasChoices("Filial R", "Filial"),
     )
-    Romane: Optional[Any] = None
+    Romane: Optional[Any] = Field(
+        default=None,
+        validation_alias=AliasChoices("Romane", "Romanei"),
+    )
     Filial_D: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("Filial D", "Filial (origem)"),
+        validation_alias=AliasChoices("Filial D", "Filial (origem)", "Filial "),
     )
     Serie: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("Série", "Serie"),
+        validation_alias=AliasChoices("Série", "Serie", "Série D"),
     )
     Nro_Doc: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("Nro Doc."),
+        validation_alias=AliasChoices("Nro Doc.", "Nro Do"),
     )
 
     # ============================================================
@@ -46,19 +50,19 @@ class CarteiraItem(BaseModel):
     # ============================================================
     Data_Des: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("Data Des", "Data"),
+        validation_alias=AliasChoices("Data Des", "Data", "Data D"),
     )
     Data_NF: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("Data NF"),
+        validation_alias=AliasChoices("Data NF", "Data N"),
     )
     DLE: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("D.L.E."),
+        validation_alias=AliasChoices("D.L.E.", "DLE"),
     )
     Agendam: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("Agendam."),
+        validation_alias=AliasChoices("Agendam.", "Agendam"),
     )
 
     # ============================================================
@@ -73,15 +77,19 @@ class CarteiraItem(BaseModel):
     )
     Qtd: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("Qtd."),
+        validation_alias=AliasChoices("Qtd.", "Qtd"),
     )
     Peso_Cub: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("Peso Cub.", "Peso C"),
+        validation_alias=AliasChoices("Peso Cub.", "Peso Cub", "Peso C"),
     )
     Peso_Calculo: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("Peso Calculo", "Peso Calculado"),
+        validation_alias=AliasChoices(
+            "Peso Calculo",
+            "Peso Calculado",
+            "Peso Cálculo",
+        ),
     )
 
     # ============================================================
@@ -89,7 +97,7 @@ class CarteiraItem(BaseModel):
     # ============================================================
     Classif: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("Classif", "Classifi"),
+        validation_alias=AliasChoices("Classif", "Classifi", "Classifica"),
     )
     Tomad: Optional[Any] = Field(
         default=None,
@@ -97,7 +105,7 @@ class CarteiraItem(BaseModel):
     )
     Destin: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("Destin", "Destinatário"),
+        validation_alias=AliasChoices("Destin", "Destinatário", "Destina"),
     )
     Bairro: Optional[Any] = None
     Cidad: Optional[Any] = Field(
@@ -111,7 +119,7 @@ class CarteiraItem(BaseModel):
     )
     Tipo_Ca: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("Tipo Ca"),
+        validation_alias=AliasChoices("Tipo Ca", "Tipo Carg"),
     )
     Tipo_Carga: Optional[Any] = Field(
         default=None,
@@ -125,17 +133,25 @@ class CarteiraItem(BaseModel):
     # ============================================================
     # REGIONALIDADE / OBSERVAÇÕES
     # ============================================================
+    Regiao: Optional[Any] = Field(
+        default=None,
+        validation_alias=AliasChoices("Região", "Regiao"),
+    )
     Mesoregiao: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("Mesoregião"),
+        validation_alias=AliasChoices("Mesoregião", "Mesoregiao"),
     )
     Sub_Regiao: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("Sub-Região"),
+        validation_alias=AliasChoices("Sub-Região", "Sub-Regiao"),
     )
     Ocorrencias_NF: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("Ocorrências NF", "Ocorrências NFs"),
+        validation_alias=AliasChoices(
+            "Ocorrências NF",
+            "Ocorrências NFs",
+            "Ocorrências N",
+        ),
     )
     Remetente: Optional[Any] = None
     Observacao: Optional[Any] = Field(
@@ -148,7 +164,7 @@ class CarteiraItem(BaseModel):
     )
     Cidade_Dest: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("Cidade Dest."),
+        validation_alias=AliasChoices("Cidade Dest.", "Cidade Dest"),
     )
     Agenda: Optional[Any] = Field(
         default=None,
@@ -168,11 +184,11 @@ class CarteiraItem(BaseModel):
     # ============================================================
     Latitude: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("Latitude", "Lat."),
+        validation_alias=AliasChoices("Latitude", "Lat.", "Lat"),
     )
     Longitude: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("Longitude", "Lon."),
+        validation_alias=AliasChoices("Longitude", "Lon.", "Lon"),
     )
 
     # ============================================================
@@ -181,15 +197,23 @@ class CarteiraItem(BaseModel):
     Prioridade: Optional[Any] = None
     Restricao_Veiculo: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("Restrição Veículo"),
+        validation_alias=AliasChoices(
+            "Restrição Veículo",
+            "Restrição Veíc",
+            "Restrição Veíc.",
+        ),
     )
     Carro_Dedicado: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("Carro Dedicado", "Veiculo Exclusivo"),
+        validation_alias=AliasChoices(
+            "Carro Dedicado",
+            "Veiculo Exclusivo",
+            "Veículo Exclusivo",
+        ),
     )
     Inicio_Ent: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("Inicio Ent."),
+        validation_alias=AliasChoices("Inicio Ent.", "Início Ent."),
     )
     Fim_En: Optional[Any] = Field(
         default=None,
@@ -198,34 +222,43 @@ class CarteiraItem(BaseModel):
 
 
 class Veiculo(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(
+        populate_by_name=True,
+        extra="allow",
+    )
 
     id: Optional[Any] = None
     placa: Optional[Any] = None
-    perfil: Optional[Any] = None
-    qtd_eixos: Optional[Any] = None
-    capacidade_peso_kg: Optional[Any] = None
-    capacidade_vol_m3: Optional[Any] = None
-    max_entregas: Optional[Any] = None
-    max_km_distancia: Optional[Any] = None
-    ocupacao_minima_perc: Optional[Any] = None
+    perfil: str
+    qtd_eixos: int
+    capacidade_peso_kg: float
+    capacidade_vol_m3: float
+    max_entregas: int
+    max_km_distancia: float
+    ocupacao_minima_perc: float
     filial_id: Optional[Any] = None
-    ativo: Optional[Any] = None
+    ativo: bool
     tipo_frota: Optional[Any] = None
     dedicado: Optional[Any] = None
 
 
 class Regionalidade(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(
+        populate_by_name=True,
+        extra="allow",
+    )
 
-    cidade: Optional[Any] = None
-    uf: Optional[Any] = None
-    mesorregiao: Optional[Any] = None
-    microrregiao: Optional[Any] = None
+    cidade: str
+    uf: str
+    mesorregiao: str
+    microrregiao: str
 
 
 class FilialRodada(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(
+        populate_by_name=True,
+        extra="allow",
+    )
 
     id: str
     nome: str
@@ -236,10 +269,40 @@ class FilialRodada(BaseModel):
 
 
 class ConfiguracaoFrotaItem(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(
+        populate_by_name=True,
+        extra="allow",
+    )
 
     perfil: str
     quantidade: int
+
+
+class ParametrosRoteirizacao(BaseModel):
+    """
+    Contexto operacional da execução.
+
+    Observação:
+    - o contrato oficial do motor mantém configuracao_frota no TOPO do payload
+    - aqui ficam apenas metadados/contexto da execução
+    """
+    model_config = ConfigDict(
+        populate_by_name=True,
+        extra="allow",
+    )
+
+    usuario_id: str
+    usuario_nome: str
+    filial_id: str
+    filial_nome: str
+    upload_id: str
+    rodada_id: str
+    data_execucao: str
+    data_base_roteirizacao: str
+    origem_sistema: str
+    modelo_roteirizacao: str
+    tipo_roteirizacao: Literal["carteira", "frota"]
+    filtros_aplicados: dict = Field(default_factory=dict)
 
 
 class RoteirizacaoRequest(BaseModel):
@@ -261,5 +324,5 @@ class RoteirizacaoRequest(BaseModel):
     veiculos: List[Veiculo] = Field(default_factory=list)
     regionalidades: List[Regionalidade] = Field(default_factory=list)
 
-    parametros: Dict[str, Any] = Field(default_factory=dict)
+    parametros: ParametrosRoteirizacao
     configuracao_frota: List[ConfiguracaoFrotaItem] = Field(default_factory=list)
