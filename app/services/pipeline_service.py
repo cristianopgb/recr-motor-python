@@ -336,7 +336,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     metricas_tempo["m4_manifestos_fechados_ms"] = tempo_m4
 
     resumo_m4 = meta_m4["resumo_m4"]
-
     df_remanescente_roteirizavel_bloco_4 = outputs_m4["df_remanescente_roteirizavel_bloco_4"]
 
     logs.append(
@@ -367,7 +366,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     metricas_tempo["m5_1_triagem_cidades_ms"] = tempo_m5_1
 
     resumo_m5_1 = meta_m5_1["resumo_m5_1_triagem"]
-
     df_saldo_elegivel_composicao_m5_1 = outputs_m5_1["df_saldo_elegivel_composicao_m5_1"]
     df_saldo_excluido_triagem_m5_1 = outputs_m5_1["df_saldo_excluido_triagem_m5_1"]
     df_perfis_viaveis_por_cidade_m5_1 = outputs_m5_1["df_perfis_viaveis_por_cidade_m5_1"]
@@ -383,8 +381,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             extra={
                 **resumo_m5_1,
                 "total_linhas_elegiveis_composicao": _safe_len(df_saldo_elegivel_composicao_m5_1),
-                "total_linhas_excluidas_triagem": _safe_len(df_saldo_excluido_triagem_m5_1),
-                "total_perfis_viaveis_por_cidade": _safe_len(df_perfis_viaveis_por_cidade_m5_1),
             },
         )
     )
@@ -423,7 +419,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     )
 
     # =========================================================================================
-    # SALDO GLOBAL
+    # SALDO GLOBAL PÓS-CIDADE
     # =========================================================================================
     if _safe_len(df_saldo_excluido_triagem_m5_1) > 0 and _safe_len(df_remanescente_m5_2) > 0:
         df_saldo_global_pos_cidade_m5 = pd.concat(
@@ -516,11 +512,8 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     metricas_tempo["m5_4b_aderencia_frota_subregioes_ms"] = tempo_m5_4b
 
     resumo_m5_4b = meta_m5_4b["resumo_m5_4b"]
-
     df_frota_aderente_m5_4b = outputs_m5_4b["df_frota_aderente_m5_4b"]
     df_frota_nao_aderente_m5_4b = outputs_m5_4b["df_frota_nao_aderente_m5_4b"]
-    df_base_tentativas_m5_4b = outputs_m5_4b["df_base_tentativas_m5_4b"]
-    df_cidades_candidatas_m5_4b = outputs_m5_4b["df_cidades_candidatas_m5_4b"]
 
     logs.append(
         _log(
@@ -528,14 +521,12 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             status="ok",
             mensagem="M5.4B executado com sucesso",
             quantidade_entrada=_safe_len(df_base_preparada_m5_4a),
-            quantidade_saida=_safe_len(df_base_tentativas_m5_4b),
+            quantidade_saida=_safe_len(df_frota_aderente_m5_4b),
             tempo_ms=tempo_m5_4b,
             extra={
                 **resumo_m5_4b,
                 "total_frota_aderente_m5_4b": _safe_len(df_frota_aderente_m5_4b),
                 "total_frota_nao_aderente_m5_4b": _safe_len(df_frota_nao_aderente_m5_4b),
-                "total_base_tentativas_m5_4b": _safe_len(df_base_tentativas_m5_4b),
-                "total_cidades_candidatas_m5_4b": _safe_len(df_cidades_candidatas_m5_4b),
             },
         )
     )
@@ -545,11 +536,8 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     # =========================================================================================
     t0 = _agora()
 
-    base_preparada_m5_4a = _serializar_dataframe_para_records(df_base_preparada_m5_4a, limit=None)
     frota_aderente_m5_4b = _serializar_dataframe_para_records(df_frota_aderente_m5_4b, limit=None)
     frota_nao_aderente_m5_4b = _serializar_dataframe_para_records(df_frota_nao_aderente_m5_4b, limit=None)
-    base_tentativas_m5_4b = _serializar_dataframe_para_records(df_base_tentativas_m5_4b, limit=None)
-    cidades_candidatas_m5_4b = _serializar_dataframe_para_records(df_cidades_candidatas_m5_4b, limit=None)
 
     tempo_serializacao = _duracao_ms(t0)
     metricas_tempo["serializacao_resposta_ms"] = tempo_serializacao
@@ -577,11 +565,8 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "total_roteirizavel": _safe_len(df_carteira_roteirizavel),
             "total_remanescentes_m4": _safe_len(df_remanescente_roteirizavel_bloco_4),
             "total_elegiveis_m5_3": _safe_len(df_saldo_elegivel_composicao_m5_3),
-            "total_base_preparada_m5_4a": _safe_len(df_base_preparada_m5_4a),
             "total_frota_aderente_m5_4b": _safe_len(df_frota_aderente_m5_4b),
             "total_frota_nao_aderente_m5_4b": _safe_len(df_frota_nao_aderente_m5_4b),
-            "total_base_tentativas_m5_4b": _safe_len(df_base_tentativas_m5_4b),
-            "total_cidades_candidatas_m5_4b": _safe_len(df_cidades_candidatas_m5_4b),
             "resumo_m4": resumo_m4,
             "resumo_m5_3": resumo_m5_3,
             "resumo_m5_4a": resumo_m5_4a,
@@ -591,22 +576,13 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "filial": contexto.filial,
             "parametros_rodada": contexto.parametros_rodada,
         },
-        "base_preparada_m5_4a": base_preparada_m5_4a,
         "frota_aderente_m5_4b": frota_aderente_m5_4b,
         "frota_nao_aderente_m5_4b": frota_nao_aderente_m5_4b,
-        "base_tentativas_m5_4b": base_tentativas_m5_4b,
-        "cidades_candidatas_m5_4b": cidades_candidatas_m5_4b,
         "auditoria_serializacao": {
-            "base_preparada_m5_4a_total": _safe_len(df_base_preparada_m5_4a),
-            "base_preparada_m5_4a_retornado": len(base_preparada_m5_4a),
             "frota_aderente_m5_4b_total": _safe_len(df_frota_aderente_m5_4b),
             "frota_aderente_m5_4b_retornado": len(frota_aderente_m5_4b),
             "frota_nao_aderente_m5_4b_total": _safe_len(df_frota_nao_aderente_m5_4b),
             "frota_nao_aderente_m5_4b_retornado": len(frota_nao_aderente_m5_4b),
-            "base_tentativas_m5_4b_total": _safe_len(df_base_tentativas_m5_4b),
-            "base_tentativas_m5_4b_retornado": len(base_tentativas_m5_4b),
-            "cidades_candidatas_m5_4b_total": _safe_len(df_cidades_candidatas_m5_4b),
-            "cidades_candidatas_m5_4b_retornado": len(cidades_candidatas_m5_4b),
         },
         "logs": logs,
     }
@@ -614,18 +590,12 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     if debug:
         resposta["debug"] = {
             "snapshots": {
-                "base_preparada_m5_4a": _snapshot_dataframe(df_base_preparada_m5_4a, "df_base_preparada_m5_4a"),
                 "frota_aderente_m5_4b": _snapshot_dataframe(df_frota_aderente_m5_4b, "df_frota_aderente_m5_4b"),
                 "frota_nao_aderente_m5_4b": _snapshot_dataframe(df_frota_nao_aderente_m5_4b, "df_frota_nao_aderente_m5_4b"),
-                "base_tentativas_m5_4b": _snapshot_dataframe(df_base_tentativas_m5_4b, "df_base_tentativas_m5_4b"),
-                "cidades_candidatas_m5_4b": _snapshot_dataframe(df_cidades_candidatas_m5_4b, "df_cidades_candidatas_m5_4b"),
             },
             "resumos_dataframes": {
-                "base_preparada_m5_4a": _montar_resumo_dataframe(df_base_preparada_m5_4a, "base_preparada_m5_4a"),
                 "frota_aderente_m5_4b": _montar_resumo_dataframe(df_frota_aderente_m5_4b, "frota_aderente_m5_4b"),
                 "frota_nao_aderente_m5_4b": _montar_resumo_dataframe(df_frota_nao_aderente_m5_4b, "frota_nao_aderente_m5_4b"),
-                "base_tentativas_m5_4b": _montar_resumo_dataframe(df_base_tentativas_m5_4b, "base_tentativas_m5_4b"),
-                "cidades_candidatas_m5_4b": _montar_resumo_dataframe(df_cidades_candidatas_m5_4b, "cidades_candidatas_m5_4b"),
             },
         }
 
