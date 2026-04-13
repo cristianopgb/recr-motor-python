@@ -31,6 +31,11 @@ def executar_m3_triagem(
     - A coluna textual Agenda não participa da regra
     - Não existe mais categoria aguardando_agendamento
     - folga_dias == 2 entra em agendamento_futuro
+
+    Regra crítica preservada:
+    - este módulo não recalcula peso
+    - peso_kg permanece como auditoria
+    - peso_calculado deve seguir preservado como referência operacional do bloco 4
     """
 
     carteira = df_carteira_enriquecida.copy()
@@ -43,6 +48,8 @@ def executar_m3_triagem(
     carteira["folga_dias"] = pd.to_numeric(carteira["folga_dias"], errors="coerce")
     carteira["transit_time_dias"] = pd.to_numeric(carteira["transit_time_dias"], errors="coerce")
     carteira["dias_ate_data_alvo"] = pd.to_numeric(carteira["dias_ate_data_alvo"], errors="coerce")
+    carteira["peso_kg"] = pd.to_numeric(carteira["peso_kg"], errors="coerce")
+    carteira["peso_calculado"] = pd.to_numeric(carteira["peso_calculado"], errors="coerce")
 
     # Verdade operacional de agenda = existe data_agenda
     carteira["agendada"] = carteira["data_agenda"].notna()
@@ -149,6 +156,8 @@ def _validar_colunas_minimas(df: pd.DataFrame) -> None:
         "transit_time_dias",
         "folga_dias",
         "status_folga",
+        "peso_kg",
+        "peso_calculado",
     ]
 
     faltam = [c for c in colunas_minimas if c not in df.columns]
@@ -321,6 +330,13 @@ def _validar_integridade_fechamento(
             "A carteira de agendas vencidas ficou com linhas incompatíveis com a regra (data_agenda preenchida e folga < 0)."
         )
 
+    linhas_sem_peso_calculado_roteirizavel = int(df_carteira_roteirizavel["peso_calculado"].isna().sum())
+    if linhas_sem_peso_calculado_roteirizavel > 0:
+        raise Exception(
+            "A carteira roteirizável ficou contaminada com linhas sem peso_calculado, "
+            "o que não é permitido para a entrada do bloco 4."
+        )
+
 
 def _montar_resumo_m3(
     df_carteira_triagem: pd.DataFrame,
@@ -365,6 +381,8 @@ def _montar_resumo_m3(
         "agendadas_folga_igual_2_em_agendamento_futuro": qtd_folga_2_futuro,
         "status_triagem_counts": status_counts,
         "prioridade_roteirizavel_counts": prioridade_counts,
+        "peso_kg_nulo_roteirizavel": int(df_carteira_roteirizavel["peso_kg"].isna().sum()),
+        "peso_calculado_nulo_roteirizavel": int(df_carteira_roteirizavel["peso_calculado"].isna().sum()),
         "regra_agendada_roteirizavel": "0 <= folga_dias < 2",
         "regra_agendamento_futuro": "folga_dias >= 2",
         "regra_agenda_vencida": "folga_dias < 0",
