@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
-import math
 
 import pandas as pd
 
@@ -11,19 +10,23 @@ import pandas as pd
 # -----------------------------------------------------------------------------------------
 # OBJETIVO
 # - receber a base preparada do M5.4A
-# - testar veículos do maior para o menor
-# - reduzir o universo de tentativa para o M5.4C
+# - analisar perfil por subregião
+# - eliminar perfis claramente inviáveis
+# - manter só os perfis que valem tentativa no M5.4C
 #
 # ESTA ETAPA NÃO:
+# - não compõe
 # - não fecha pré-manifesto
 # - não remove itens do pool
-# - não compõe definitivamente
 #
-# ELA DEVE:
-# - definir cidade âncora
-# - testar aderência de cada perfil
-# - montar uma base teórica de tentativa
-# - devolver veículos aderentes e não aderentes, com motivo
+# REGRAS CONSOLIDADAS
+# 1. análise por subregião
+# 2. perfis do maior para o menor
+# 3. elimina por ocupação mínima da massa útil
+# 4. elimina por limite de entregas com teste simples
+# 5. raio é filtro parcial:
+#    - cidade fora do raio não elimina o perfil
+#    - só sai da base útil daquele perfil
 # =========================================================================================
 
 
@@ -48,15 +51,6 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
-def _safe_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if pd.isna(value):
-        return False
-    text = str(value).strip().lower()
-    return text in {"1", "true", "t", "sim", "s", "yes", "y"}
-
-
 def _safe_text(value: Any) -> str:
     if pd.isna(value):
         return ""
@@ -69,24 +63,38 @@ def _ensure_column(df: pd.DataFrame, col: str, default: Any) -> None:
 
 
 # -----------------------------------------------------------------------------------------
-# Geometria
+# Métricas
 # -----------------------------------------------------------------------------------------
-def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    if any(pd.isna(v) for v in [lat1, lon1, lat2, lon2]):
-        return 999999.0
+def _peso_total(df: pd.DataFrame) -> float:
+    if df.empty:
+        return 0.0
+    return float(pd.to_numeric(df["peso_calculado"], errors="coerce").fillna(0).sum())
 
-    r = 6371.0
-    p1 = math.radians(lat1)
-    p2 = math.radians(lat2)
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
 
-    a = (
-        math.sin(dlat / 2) ** 2
-        + math.cos(p1) * math.cos(p2) * math.sin(dlon / 2) ** 2
-    )
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return r * c
+def _km_max(df: pd.DataFrame) -> float:
+    if df.empty:
+        return 0.0
+    return float(pd.to_numeric(df["distancia_rodoviaria_est_km"], errors="coerce").fillna(0).max())
+
+
+def _qtd_clientes(df: pd.DataFrame) -> int:
+    if df.empty:
+        return 0
+    return int(df["destinatario"].fillna("").astype(str).nunique())
+
+
+def _ocupacao_minima_kg(vehicle_row: pd.Series) -> float:
+    cap_peso = _safe_float(vehicle_row.get("capacidade_peso_kg"), 0.0)
+    ocup_min = _safe_float(vehicle_row.get("ocupacao_minima_perc"), 70.0)
+    return cap_peso * (ocup_min / 100.0)
+
+
+def _ocupacao_maxima_kg(vehicle_row: pd.Series) -> float:
+    cap_peso = _safe_float(vehicle_row.get("capacidade_peso_kg"), 0.0)
+    ocup_max = _safe_float(vehicle_row.get("ocupacao_maxima_perc"), 100.0)
+    if ocup_max <= 0:
+        ocup_max = 100.0
+    return cap_peso * (ocup_max / 100.0)
 
 
 # -----------------------------------------------------------------------------------------
@@ -109,11 +117,7 @@ def _normalizar_inputs(
         "cidade": "",
         "destinatario": "",
         "peso_calculado": 0.0,
-        "vol_m3": 0.0,
         "distancia_rodoviaria_est_km": 0.0,
-        "restricao_veiculo": None,
-        "latitude_destinatario": pd.NA,
-        "longitude_destinatario": pd.NA,
         "ordem_subregiao_m5_4a": 0,
         "ordem_cidade_na_subregiao_m5_4a": 0,
         "ordem_cliente_na_cidade_m5_4a": 0,
@@ -129,10 +133,7 @@ def _normalizar_inputs(
 
     for col in [
         "peso_calculado",
-        "vol_m3",
         "distancia_rodoviaria_est_km",
-        "latitude_destinatario",
-        "longitude_destinatario",
         "ordem_subregiao_m5_4a",
         "ordem_cidade_na_subregiao_m5_4a",
         "ordem_cliente_na_cidade_m5_4a",
@@ -145,8 +146,18 @@ def _normalizar_inputs(
     for col in ["subregiao", "uf", "cidade", "destinatario"]:
         base[col] = base[col].fillna("").astype(str).str.strip()
 
-    _ensure_column(veiculos, "perfil", "")
-    _ensure_column(veiculos, "tipo", "")
+    for col in [
+        "perfil",
+        "tipo",
+        "capacidade_peso_kg",
+        "capacidade_vol_m3",
+        "max_entregas",
+        "max_km_distancia",
+        "ocupacao_minima_perc",
+        "ocupacao_maxima_perc",
+    ]:
+        _ensure_column(veiculos, col, pd.NA if col not in ["perfil", "tipo"] else "")
+
     for col in [
         "capacidade_peso_kg",
         "capacidade_vol_m3",
@@ -155,7 +166,6 @@ def _normalizar_inputs(
         "ocupacao_minima_perc",
         "ocupacao_maxima_perc",
     ]:
-        _ensure_column(veiculos, col, pd.NA)
         veiculos[col] = pd.to_numeric(veiculos[col], errors="coerce")
 
     for col in ["perfil", "tipo"]:
@@ -182,48 +192,7 @@ def _normalizar_inputs(
 
 
 # -----------------------------------------------------------------------------------------
-# Métricas
-# -----------------------------------------------------------------------------------------
-def _peso_total(df: pd.DataFrame) -> float:
-    if df.empty:
-        return 0.0
-    return float(pd.to_numeric(df["peso_calculado"], errors="coerce").fillna(0).sum())
-
-
-def _volume_total(df: pd.DataFrame) -> float:
-    if df.empty:
-        return 0.0
-    return float(pd.to_numeric(df["vol_m3"], errors="coerce").fillna(0).sum())
-
-
-def _km_referencia(df: pd.DataFrame) -> float:
-    if df.empty:
-        return 0.0
-    return float(pd.to_numeric(df["distancia_rodoviaria_est_km"], errors="coerce").fillna(0).max())
-
-
-def _qtd_paradas(df: pd.DataFrame) -> int:
-    if df.empty:
-        return 0
-    return int(df["destinatario"].fillna("").astype(str).nunique())
-
-
-def _ocupacao_minima_kg(vehicle_row: pd.Series) -> float:
-    cap_peso = _safe_float(vehicle_row.get("capacidade_peso_kg"), 0.0)
-    ocup_min = _safe_float(vehicle_row.get("ocupacao_minima_perc"), 70.0)
-    return cap_peso * (ocup_min / 100.0)
-
-
-def _ocupacao_maxima_kg(vehicle_row: pd.Series) -> float:
-    cap_peso = _safe_float(vehicle_row.get("capacidade_peso_kg"), 0.0)
-    ocup_max = _safe_float(vehicle_row.get("ocupacao_maxima_perc"), 100.0)
-    if ocup_max <= 0:
-        ocup_max = 100.0
-    return cap_peso * (ocup_max / 100.0)
-
-
-# -----------------------------------------------------------------------------------------
-# Veículos
+# Veículos do maior para o menor
 # -----------------------------------------------------------------------------------------
 def _veiculos_maior_para_menor(df_veiculos: pd.DataFrame) -> pd.DataFrame:
     temp = df_veiculos.copy()
@@ -243,197 +212,141 @@ def _veiculos_maior_para_menor(df_veiculos: pd.DataFrame) -> pd.DataFrame:
 
 
 # -----------------------------------------------------------------------------------------
-# Cliente / restrição
+# Blocos de cliente da subregião
 # -----------------------------------------------------------------------------------------
-def _cliente_respeita_restricao_veiculo(df_cliente: pd.DataFrame, vehicle_row: pd.Series) -> bool:
-    tipo_veiculo = _safe_text(vehicle_row.get("tipo")) or _safe_text(vehicle_row.get("perfil"))
-    if not tipo_veiculo:
-        return True
+def _blocos_clientes_subregiao(df_sub: pd.DataFrame) -> pd.DataFrame:
+    if df_sub.empty:
+        return pd.DataFrame()
 
-    if "restricao_veiculo" not in df_cliente.columns:
-        return True
-
-    restricoes = df_cliente["restricao_veiculo"].dropna().astype(str).str.strip()
-    if restricoes.empty:
-        return True
-
-    for restr in restricoes.unique().tolist():
-        if restr and restr.lower() not in {"", "nan", "none"}:
-            if restr.lower() != tipo_veiculo.lower():
-                return False
-
-    return True
-
-
-# -----------------------------------------------------------------------------------------
-# Distância entre cidades destino
-# -----------------------------------------------------------------------------------------
-def _centroide_cidade(df_cidade: pd.DataFrame) -> Tuple[float, float]:
-    lat = pd.to_numeric(df_cidade["latitude_destinatario"], errors="coerce").dropna()
-    lon = pd.to_numeric(df_cidade["longitude_destinatario"], errors="coerce").dropna()
-    if lat.empty or lon.empty:
-        return (math.nan, math.nan)
-    return (float(lat.mean()), float(lon.mean()))
-
-
-def _ordenar_cidades_da_subregiao_por_expansao(
-    df_sub: pd.DataFrame,
-    cidade_anchor: str,
-) -> List[str]:
-    cidades = []
-    for cidade, grupo in df_sub.groupby("cidade", dropna=False, sort=False):
-        lat, lon = _centroide_cidade(grupo)
-        cidades.append(
-            {
-                "cidade": _safe_text(cidade),
-                "peso_total_cidade": _peso_total(grupo),
-                "lat": lat,
-                "lon": lon,
-            }
+    blocos = (
+        df_sub.groupby(["cidade", "destinatario"], dropna=False, sort=False)
+        .agg(
+            peso_total_cliente=("peso_calculado", "sum"),
+            km_cliente=("distancia_rodoviaria_est_km", "max"),
+            ordem_cidade=("ordem_cidade_na_subregiao_m5_4a", "min"),
+            ordem_cliente=("ordem_cliente_na_cidade_m5_4a", "min"),
         )
+        .reset_index()
+    )
 
-    df_cidades = pd.DataFrame(cidades)
-    if df_cidades.empty:
-        return []
-
-    if cidade_anchor not in df_cidades["cidade"].tolist():
-        return df_cidades.sort_values(
-            by=["peso_total_cidade", "cidade"],
-            ascending=[False, True],
-            kind="mergesort",
-        )["cidade"].tolist()
-
-    anchor_row = df_cidades[df_cidades["cidade"] == cidade_anchor].iloc[0]
-    lat_anchor = _safe_float(anchor_row.get("lat"), math.nan)
-    lon_anchor = _safe_float(anchor_row.get("lon"), math.nan)
-
-    def _dist(row: pd.Series) -> float:
-        if _safe_text(row.get("cidade")) == cidade_anchor:
-            return 0.0
-        return _haversine_km(
-            _safe_float(row.get("lat"), math.nan),
-            _safe_float(row.get("lon"), math.nan),
-            lat_anchor,
-            lon_anchor,
-        )
-
-    df_cidades["_dist_ancora"] = df_cidades.apply(_dist, axis=1)
-
-    df_cidades = df_cidades.sort_values(
-        by=["_dist_ancora", "peso_total_cidade", "cidade"],
-        ascending=[True, False, True],
+    blocos = blocos.sort_values(
+        by=["peso_total_cliente", "ordem_cidade", "ordem_cliente", "cidade", "destinatario"],
+        ascending=[False, True, True, True, True],
         kind="mergesort",
     ).reset_index(drop=True)
 
-    return df_cidades["cidade"].tolist()
+    return blocos
 
 
 # -----------------------------------------------------------------------------------------
-# Base teórica de tentativa por veículo
+# Teste simples de entregas
 # -----------------------------------------------------------------------------------------
-def _montar_base_teorica_para_veiculo(
-    df_sub: pd.DataFrame,
-    cidade_anchor: str,
+def _existe_combinacao_simples_viavel(
+    blocos: pd.DataFrame,
     vehicle_row: pd.Series,
-) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-    cap_peso = _safe_float(vehicle_row.get("capacidade_peso_kg"), 0.0)
-    cap_vol = _safe_float(vehicle_row.get("capacidade_vol_m3"), 0.0)
+    max_trocas: int = 12,
+) -> Tuple[bool, Dict[str, Any]]:
+    if blocos.empty:
+        return False, {
+            "motivo": "sem_blocos_dentro_do_raio",
+            "peso_melhor_combinacao": 0.0,
+            "qtd_entregas_melhor_combinacao": 0,
+        }
+
     max_entregas = _safe_int(vehicle_row.get("max_entregas"), 0)
-    max_km = _safe_float(vehicle_row.get("max_km_distancia"), 0.0)
+    if max_entregas <= 0:
+        return False, {
+            "motivo": "perfil_sem_max_entregas",
+            "peso_melhor_combinacao": 0.0,
+            "qtd_entregas_melhor_combinacao": 0,
+        }
+
     ocup_min_kg = _ocupacao_minima_kg(vehicle_row)
     ocup_max_kg = _ocupacao_maxima_kg(vehicle_row)
 
-    if df_sub.empty:
-        return pd.DataFrame(), {
-            "aderente": False,
-            "motivo": "subregiao_vazia",
+    pesos = blocos["peso_total_cliente"].tolist()
+    n = len(pesos)
+    k = min(max_entregas, n)
+
+    if k <= 0:
+        return False, {
+            "motivo": "sem_entregas_possiveis",
+            "peso_melhor_combinacao": 0.0,
+            "qtd_entregas_melhor_combinacao": 0,
         }
 
-    if cidade_anchor not in df_sub["cidade"].astype(str).tolist():
-        return pd.DataFrame(), {
-            "aderente": False,
-            "motivo": "cidade_anchor_nao_encontrada",
+    # tentativa 1: maiores blocos
+    escolhidos = list(range(k))
+    soma = sum(pesos[i] for i in escolhidos)
+
+    melhor_soma_abaixo = 0.0
+    melhor_qtd_abaixo = 0
+
+    if ocup_min_kg <= soma <= ocup_max_kg:
+        return True, {
+            "motivo": "ok_com_maiores_blocos",
+            "peso_melhor_combinacao": round(soma, 3),
+            "qtd_entregas_melhor_combinacao": len(escolhidos),
         }
 
-    cidades_ordenadas = _ordenar_cidades_da_subregiao_por_expansao(df_sub, cidade_anchor)
+    if soma < ocup_min_kg:
+        melhor_soma_abaixo = soma
+        melhor_qtd_abaixo = len(escolhidos)
 
-    blocos_clientes: List[pd.DataFrame] = []
-    for cidade in cidades_ordenadas:
-        df_cidade = df_sub[df_sub["cidade"] == cidade].copy()
-        if df_cidade.empty:
-            continue
+    # tentativa 2: se passou de 100, substitui últimos blocos por menores
+    # isso segue exatamente a lógica que você descreveu
+    if soma > ocup_max_kg and n > k:
+        base_idxs = list(range(k))
+        reserva_idxs = list(range(k, n))
+        tentativas = 0
 
-        clientes = (
-            df_cidade.groupby("destinatario", dropna=False, sort=False)["peso_total_cliente_m5_4a"]
-            .max()
-            .reset_index()
-            .sort_values(by=["peso_total_cliente_m5_4a", "destinatario"], ascending=[False, True], kind="mergesort")
-        )
+        for pos_sub in range(k - 1, -1, -1):
+            for idx_reserva in reserva_idxs:
+                tentativas += 1
+                if tentativas > max_trocas:
+                    break
 
-        for _, row_cli in clientes.iterrows():
-            destinatario = _safe_text(row_cli.get("destinatario"))
-            df_cliente = df_cidade[df_cidade["destinatario"] == destinatario].copy()
-            if df_cliente.empty:
-                continue
-            blocos_clientes.append(df_cliente)
+                tentativa_idxs = base_idxs.copy()
+                tentativa_idxs[pos_sub] = idx_reserva
+                tentativa_idxs = sorted(set(tentativa_idxs))
 
-    if not blocos_clientes:
-        return pd.DataFrame(), {
-            "aderente": False,
-            "motivo": "sem_blocos_cliente",
-        }
+                if len(tentativa_idxs) == 0 or len(tentativa_idxs) > k:
+                    continue
 
-    selecionados: List[pd.DataFrame] = []
+                soma_tent = sum(pesos[i] for i in tentativa_idxs)
 
-    for df_cliente in blocos_clientes:
-        if not _cliente_respeita_restricao_veiculo(df_cliente, vehicle_row):
-            continue
+                if ocup_min_kg <= soma_tent <= ocup_max_kg:
+                    return True, {
+                        "motivo": "ok_com_substituicao_bloco_menor",
+                        "peso_melhor_combinacao": round(soma_tent, 3),
+                        "qtd_entregas_melhor_combinacao": len(tentativa_idxs),
+                    }
 
-        tentativa = pd.concat(selecionados + [df_cliente], ignore_index=True) if selecionados else df_cliente.copy()
+                if soma_tent < ocup_min_kg and soma_tent > melhor_soma_abaixo:
+                    melhor_soma_abaixo = soma_tent
+                    melhor_qtd_abaixo = len(tentativa_idxs)
 
-        peso_tent = _peso_total(tentativa)
-        vol_tent = _volume_total(tentativa)
-        km_tent = _km_referencia(tentativa)
-        paradas_tent = _qtd_paradas(tentativa)
+            if tentativas > max_trocas:
+                break
 
-        if cap_peso > 0 and peso_tent > cap_peso:
-            continue
-        if ocup_max_kg > 0 and peso_tent > ocup_max_kg:
-            continue
-        if cap_vol > 0 and vol_tent > cap_vol:
-            continue
-        if max_entregas > 0 and paradas_tent > max_entregas:
-            continue
-        if max_km > 0 and km_tent > max_km:
-            continue
+    # tentativa 3: menor quantidade de entregas até k
+    for qtd in range(1, k + 1):
+        soma_qtd = sum(pesos[:qtd])
+        if ocup_min_kg <= soma_qtd <= ocup_max_kg:
+            return True, {
+                "motivo": "ok_com_quantidade_menor_entregas",
+                "peso_melhor_combinacao": round(soma_qtd, 3),
+                "qtd_entregas_melhor_combinacao": qtd,
+            }
 
-        selecionados.append(df_cliente)
+        if soma_qtd < ocup_min_kg and soma_qtd > melhor_soma_abaixo:
+            melhor_soma_abaixo = soma_qtd
+            melhor_qtd_abaixo = qtd
 
-    if not selecionados:
-        return pd.DataFrame(), {
-            "aderente": False,
-            "motivo": "nenhum_cliente_aderente",
-        }
-
-    base_tentativa = pd.concat(selecionados, ignore_index=True)
-
-    peso_final = _peso_total(base_tentativa)
-    vol_final = _volume_total(base_tentativa)
-    km_final = _km_referencia(base_tentativa)
-    paradas_final = _qtd_paradas(base_tentativa)
-
-    aderente = peso_final >= ocup_min_kg
-    motivo = "ok" if aderente else "peso_montavel_abaixo_ocupacao_minima"
-
-    return base_tentativa, {
-        "aderente": aderente,
-        "motivo": motivo,
-        "peso_montavel_teorico": round(peso_final, 3),
-        "volume_montavel_teorico": round(vol_final, 3),
-        "km_referencia_teorico": round(km_final, 2),
-        "qtd_paradas_teorico": int(paradas_final),
-        "ocupacao_minima_kg": round(ocup_min_kg, 3),
-        "ocupacao_maxima_kg": round(ocup_max_kg, 3),
+    return False, {
+        "motivo": "nao_ha_combinacao_simples_dentro_limite_entregas",
+        "peso_melhor_combinacao": round(melhor_soma_abaixo, 3),
+        "qtd_entregas_melhor_combinacao": int(melhor_qtd_abaixo),
     }
 
 
@@ -460,8 +373,6 @@ def executar_m5_4b_aderencia_frota_subregioes(
         outputs_vazio = {
             "df_frota_aderente_m5_4b": pd.DataFrame(),
             "df_frota_nao_aderente_m5_4b": pd.DataFrame(),
-            "df_base_tentativas_m5_4b": pd.DataFrame(),
-            "df_cidades_candidatas_m5_4b": pd.DataFrame(),
         }
         meta_vazio = {
             "resumo_m5_4b": {
@@ -471,14 +382,12 @@ def executar_m5_4b_aderencia_frota_subregioes(
                 "linhas_entrada_m5_4b": 0,
                 "total_registros_frota_aderente_m5_4b": 0,
                 "total_registros_frota_nao_aderente_m5_4b": 0,
-                "total_linhas_base_tentativas_m5_4b": 0,
-                "total_cidades_candidatas_m5_4b": 0,
                 "estrategia_m5_4b": [
-                    "teste_de_veiculos_do_maior_para_o_menor",
-                    "base_teorica_sem_composicao_final",
-                    "cidade_ancora_por_maior_massa",
-                    "expansao_por_menor_distancia_entre_destinos",
-                    "VERSAO_M5_4B_2026_04_12",
+                    "analise_por_subregiao",
+                    "perfis_do_maior_para_o_menor",
+                    "raio_como_filtro_parcial",
+                    "teste_simples_por_limite_de_entregas",
+                    "VERSAO_M5_4B_2026_04_12_B",
                 ],
                 "caminhos_pipeline": caminhos_pipeline or {},
             }
@@ -487,121 +396,159 @@ def executar_m5_4b_aderencia_frota_subregioes(
 
     veiculos_ord = _veiculos_maior_para_menor(veiculos)
 
-    frota_aderente_rows: List[Dict[str, Any]] = []
-    frota_nao_aderente_rows: List[Dict[str, Any]] = []
-    base_tentativas_list: List[pd.DataFrame] = []
-    cidades_candidatas_rows: List[Dict[str, Any]] = []
+    aderentes_rows: List[Dict[str, Any]] = []
+    nao_aderentes_rows: List[Dict[str, Any]] = []
 
-    # Processa uma cidade âncora por vez dentro de cada subregião
     subregioes = (
-        base[["subregiao", "uf", "ordem_subregiao_m5_4a"]]
+        base[
+            [
+                "subregiao",
+                "uf",
+                "ordem_subregiao_m5_4a",
+                "peso_total_subregiao_m5_4a",
+            ]
+        ]
         .drop_duplicates()
-        .sort_values(by=["ordem_subregiao_m5_4a", "subregiao", "uf"], ascending=[True, True, True], kind="mergesort")
+        .sort_values(
+            by=["ordem_subregiao_m5_4a", "peso_total_subregiao_m5_4a", "subregiao", "uf"],
+            ascending=[True, False, True, True],
+            kind="mergesort",
+        )
+        .reset_index(drop=True)
     )
 
     for _, sub_row in subregioes.iterrows():
         subregiao = _safe_text(sub_row.get("subregiao"))
         uf = _safe_text(sub_row.get("uf"))
+        ordem_sub = _safe_int(sub_row.get("ordem_subregiao_m5_4a"), 0)
 
         df_sub = base[(base["subregiao"] == subregiao) & (base["uf"] == uf)].copy()
         if df_sub.empty:
             continue
 
-        cidades_anchor = (
-            df_sub[["cidade", "ordem_cidade_na_subregiao_m5_4a", "peso_total_cidade_m5_4a"]]
-            .drop_duplicates()
-            .sort_values(
-                by=["ordem_cidade_na_subregiao_m5_4a", "peso_total_cidade_m5_4a", "cidade"],
-                ascending=[True, False, True],
-                kind="mergesort",
-            )
-        )
+        peso_total_sub = _peso_total(df_sub)
+        qtd_clientes_sub = _qtd_clientes(df_sub)
+        km_max_sub = _km_max(df_sub)
 
-        for _, anchor_row in cidades_anchor.iterrows():
-            cidade_anchor = _safe_text(anchor_row.get("cidade"))
-            ordem_cidade = _safe_int(anchor_row.get("ordem_cidade_na_subregiao_m5_4a"), 0)
+        blocos_sub = _blocos_clientes_subregiao(df_sub)
 
-            cidades_expansao = _ordenar_cidades_da_subregiao_por_expansao(df_sub, cidade_anchor)
-            for ordem_expansao, cidade_cand in enumerate(cidades_expansao, start=1):
-                cidades_candidatas_rows.append(
+        for ordem_perfil, (_, vehicle_row) in enumerate(veiculos_ord.iterrows(), start=1):
+            perfil = _safe_text(vehicle_row.get("perfil"))
+            tipo = _safe_text(vehicle_row.get("tipo"))
+
+            cap_peso = _safe_float(vehicle_row.get("capacidade_peso_kg"), 0.0)
+            max_entregas = _safe_int(vehicle_row.get("max_entregas"), 0)
+            max_km = _safe_float(vehicle_row.get("max_km_distancia"), 0.0)
+            ocup_min_kg = _ocupacao_minima_kg(vehicle_row)
+            ocup_max_kg = _ocupacao_maxima_kg(vehicle_row)
+
+            # 1) filtro por raio é parcial
+            if max_km > 0:
+                df_sub_dentro_raio = df_sub[
+                    pd.to_numeric(df_sub["distancia_rodoviaria_est_km"], errors="coerce").fillna(0) <= max_km
+                ].copy()
+            else:
+                df_sub_dentro_raio = df_sub.copy()
+
+            peso_total_util = _peso_total(df_sub_dentro_raio)
+            qtd_clientes_util = _qtd_clientes(df_sub_dentro_raio)
+            km_max_util = _km_max(df_sub_dentro_raio)
+
+            registro_base = {
+                "subregiao": subregiao,
+                "uf": uf,
+                "ordem_subregiao_m5_4b": ordem_sub,
+                "perfil": perfil,
+                "tipo": tipo,
+                "ordem_tentativa_perfil_m5_4b": ordem_perfil,
+                "capacidade_peso_kg": round(cap_peso, 3),
+                "max_entregas": max_entregas,
+                "max_km_distancia": round(max_km, 3),
+                "ocupacao_minima_perc": round(_safe_float(vehicle_row.get("ocupacao_minima_perc"), 70.0), 3),
+                "ocupacao_maxima_perc": round(_safe_float(vehicle_row.get("ocupacao_maxima_perc"), 100.0), 3),
+                "ocupacao_minima_kg": round(ocup_min_kg, 3),
+                "ocupacao_maxima_kg": round(ocup_max_kg, 3),
+                "peso_total_subregiao": round(peso_total_sub, 3),
+                "qtd_clientes_subregiao": qtd_clientes_sub,
+                "km_max_subregiao": round(km_max_sub, 2),
+                "peso_total_util_raio": round(peso_total_util, 3),
+                "qtd_clientes_util_raio": qtd_clientes_util,
+                "km_max_util_raio": round(km_max_util, 2),
+                "qtd_cidades_fora_do_raio": int(
+                    df_sub["cidade"].nunique() - df_sub_dentro_raio["cidade"].nunique()
+                ),
+            }
+
+            # 2) se não sobrou nada no raio, perfil cai
+            if df_sub_dentro_raio.empty:
+                nao_aderentes_rows.append(
                     {
-                        "subregiao": subregiao,
-                        "uf": uf,
-                        "cidade_anchor": cidade_anchor,
-                        "ordem_cidade_anchor_m5_4b": ordem_cidade,
-                        "cidade_candidata": cidade_cand,
-                        "ordem_expansao_m5_4b": ordem_expansao,
+                        **registro_base,
+                        "status_aderencia_m5_4b": "nao_aderente",
+                        "motivo_aderencia_m5_4b": "sem_massa_util_dentro_do_raio",
                     }
                 )
+                continue
 
-            for ordem_perfil, (_, vehicle_row) in enumerate(veiculos_ord.iterrows(), start=1):
-                base_tentativa, info = _montar_base_teorica_para_veiculo(
-                    df_sub=df_sub,
-                    cidade_anchor=cidade_anchor,
-                    vehicle_row=vehicle_row,
+            # 3) ocupação mínima na massa útil
+            if peso_total_util < ocup_min_kg:
+                nao_aderentes_rows.append(
+                    {
+                        **registro_base,
+                        "status_aderencia_m5_4b": "nao_aderente",
+                        "motivo_aderencia_m5_4b": "peso_total_util_abaixo_ocupacao_minima",
+                    }
                 )
+                continue
 
-                registro = {
-                    "subregiao": subregiao,
-                    "uf": uf,
-                    "cidade_anchor": cidade_anchor,
-                    "ordem_cidade_anchor_m5_4b": ordem_cidade,
-                    "perfil": _safe_text(vehicle_row.get("perfil")),
-                    "tipo": _safe_text(vehicle_row.get("tipo")),
-                    "ordem_tentativa_perfil_m5_4b": ordem_perfil,
-                    "capacidade_peso_kg": round(_safe_float(vehicle_row.get("capacidade_peso_kg"), 0.0), 3),
-                    "capacidade_vol_m3": round(_safe_float(vehicle_row.get("capacidade_vol_m3"), 0.0), 3),
-                    "max_entregas": _safe_int(vehicle_row.get("max_entregas"), 0),
-                    "max_km_distancia": round(_safe_float(vehicle_row.get("max_km_distancia"), 0.0), 3),
-                    "ocupacao_minima_perc": round(_safe_float(vehicle_row.get("ocupacao_minima_perc"), 70.0), 3),
-                    "ocupacao_maxima_perc": round(_safe_float(vehicle_row.get("ocupacao_maxima_perc"), 100.0), 3),
-                    "ocupacao_minima_kg": round(_ocupacao_minima_kg(vehicle_row), 3),
-                    "ocupacao_maxima_kg": round(_ocupacao_maxima_kg(vehicle_row), 3),
-                    "peso_montavel_teorico": round(_safe_float(info.get("peso_montavel_teorico"), 0.0), 3),
-                    "volume_montavel_teorico": round(_safe_float(info.get("volume_montavel_teorico"), 0.0), 3),
-                    "km_referencia_teorico": round(_safe_float(info.get("km_referencia_teorico"), 0.0), 2),
-                    "qtd_paradas_teorico": _safe_int(info.get("qtd_paradas_teorico"), 0),
-                    "aderente_m5_4b": bool(info.get("aderente", False)),
-                    "motivo_aderencia_m5_4b": _safe_text(info.get("motivo")),
+            # 4) blocos de cliente dentro do raio
+            blocos_util = _blocos_clientes_subregiao(df_sub_dentro_raio)
+
+            ok_entregas, info_combo = _existe_combinacao_simples_viavel(
+                blocos=blocos_util,
+                vehicle_row=vehicle_row,
+            )
+
+            if not ok_entregas:
+                nao_aderentes_rows.append(
+                    {
+                        **registro_base,
+                        "status_aderencia_m5_4b": "nao_aderente",
+                        "motivo_aderencia_m5_4b": _safe_text(info_combo.get("motivo")),
+                        "peso_melhor_combinacao": round(_safe_float(info_combo.get("peso_melhor_combinacao"), 0.0), 3),
+                        "qtd_entregas_melhor_combinacao": _safe_int(info_combo.get("qtd_entregas_melhor_combinacao"), 0),
+                    }
+                )
+                continue
+
+            aderentes_rows.append(
+                {
+                    **registro_base,
+                    "status_aderencia_m5_4b": "aderente",
+                    "motivo_aderencia_m5_4b": "perfil_aderente",
+                    "peso_melhor_combinacao": round(_safe_float(info_combo.get("peso_melhor_combinacao"), 0.0), 3),
+                    "qtd_entregas_melhor_combinacao": _safe_int(info_combo.get("qtd_entregas_melhor_combinacao"), 0),
+                    "motivo_combinacao_simples": _safe_text(info_combo.get("motivo")),
                 }
+            )
 
-                if bool(info.get("aderente", False)):
-                    frota_aderente_rows.append(registro)
-
-                    if not base_tentativa.empty:
-                        df_temp = base_tentativa.copy()
-                        df_temp["subregiao"] = subregiao
-                        df_temp["uf"] = uf
-                        df_temp["cidade_anchor_m5_4b"] = cidade_anchor
-                        df_temp["perfil_m5_4b"] = _safe_text(vehicle_row.get("perfil"))
-                        df_temp["tipo_m5_4b"] = _safe_text(vehicle_row.get("tipo"))
-                        df_temp["ordem_tentativa_perfil_m5_4b"] = ordem_perfil
-                        base_tentativas_list.append(df_temp)
-                else:
-                    frota_nao_aderente_rows.append(registro)
-
-    df_frota_aderente_m5_4b = pd.DataFrame(frota_aderente_rows)
-    df_frota_nao_aderente_m5_4b = pd.DataFrame(frota_nao_aderente_rows)
-    df_base_tentativas_m5_4b = (
-        pd.concat(base_tentativas_list, ignore_index=True) if base_tentativas_list else pd.DataFrame()
-    )
-    df_cidades_candidatas_m5_4b = pd.DataFrame(cidades_candidatas_rows)
+    df_frota_aderente_m5_4b = pd.DataFrame(aderentes_rows)
+    df_frota_nao_aderente_m5_4b = pd.DataFrame(nao_aderentes_rows)
 
     resumo_m5_4b = {
         "modulo": "M5.4B",
         "data_base_roteirizacao": str(data_base_roteirizacao) if data_base_roteirizacao is not None else None,
         "tipo_roteirizacao": tipo_roteirizacao,
         "linhas_entrada_m5_4b": int(len(base)),
+        "subregioes_analisadas_m5_4b": int(subregioes["subregiao"].nunique()),
         "total_registros_frota_aderente_m5_4b": int(len(df_frota_aderente_m5_4b)),
         "total_registros_frota_nao_aderente_m5_4b": int(len(df_frota_nao_aderente_m5_4b)),
-        "total_linhas_base_tentativas_m5_4b": int(len(df_base_tentativas_m5_4b)),
-        "total_cidades_candidatas_m5_4b": int(len(df_cidades_candidatas_m5_4b)),
         "estrategia_m5_4b": [
-            "teste_de_veiculos_do_maior_para_o_menor",
-            "base_teorica_sem_composicao_final",
-            "cidade_ancora_por_maior_massa",
-            "expansao_por_menor_distancia_entre_destinos",
-            "VERSAO_M5_4B_2026_04_12",
+            "analise_por_subregiao",
+            "perfis_do_maior_para_o_menor",
+            "raio_como_filtro_parcial",
+            "teste_simples_por_limite_de_entregas",
+            "VERSAO_M5_4B_2026_04_12_B",
         ],
         "caminhos_pipeline": caminhos_pipeline or {},
     }
@@ -609,8 +556,6 @@ def executar_m5_4b_aderencia_frota_subregioes(
     outputs_m5_4b = {
         "df_frota_aderente_m5_4b": df_frota_aderente_m5_4b,
         "df_frota_nao_aderente_m5_4b": df_frota_nao_aderente_m5_4b,
-        "df_base_tentativas_m5_4b": df_base_tentativas_m5_4b,
-        "df_cidades_candidatas_m5_4b": df_cidades_candidatas_m5_4b,
     }
 
     meta_m5_4b = {
