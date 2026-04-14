@@ -15,6 +15,8 @@ from app.pipeline.m5_common import (
     peso_total,
     peso_auditoria_total,
     volume_total,
+    km_referencia,
+    qtd_paradas,
     ocupacao_perc,
     grupo_respeita_restricao_veiculo,
 )
@@ -149,104 +151,17 @@ def _materializar_candidato_por_blocos(
     return candidato.reset_index(drop=True)
 
 
-def _qtd_paradas_validas(df_itens: pd.DataFrame) -> int:
-    """
-    Conta apenas destinatários preenchidos.
-    Evita criar parada fantasma com destinatário vazio.
-    """
-    if df_itens is None or df_itens.empty or "destinatario" not in df_itens.columns:
-        return 0
-
-    serie = df_itens["destinatario"].fillna("").astype(str).str.strip()
-    serie = serie[serie != ""]
-    return int(serie.nunique())
-
-
-def _km_referencia_manifesto(df_itens: pd.DataFrame) -> float:
-    """
-    Regra correta de raio:
-    usar a MAIOR distância do grupo.
-    Nunca somar distâncias.
-    """
-    if df_itens is None or df_itens.empty or "distancia_rodoviaria_est_km" not in df_itens.columns:
-        return 0.0
-
-    return float(pd.to_numeric(df_itens["distancia_rodoviaria_est_km"], errors="coerce").fillna(0).max())
-
-
-def _remover_clientes_fora_do_raio(
-    df_itens: pd.DataFrame,
-    vehicle_row: pd.Series,
-    suffix: str,
-) -> Tuple[pd.DataFrame, int]:
-    """
-    Se houver clientes fora do raio do perfil, remove apenas esses clientes
-    e devolve o candidato reduzido. Não mata o bloco inteiro automaticamente.
-    """
+def _validar_hard_constraints(df_itens: pd.DataFrame, vehicle_row: pd.Series) -> Tuple[bool, str]:
     if df_itens.empty:
-        return df_itens.copy(), 0
+        return False, "grupo_vazio"
 
-    max_km = safe_float(vehicle_row.get("max_km_distancia"), 0.0)
-    if max_km <= 0 or "distancia_rodoviaria_est_km" not in df_itens.columns:
-        return df_itens.copy(), 0
+    if not grupo_respeita_restricao_veiculo(df_itens, vehicle_row):
+        return False, "restricao_veiculo_incompativel"
 
-    cliente_key_col = f"_cliente_key_{suffix}"
-    if cliente_key_col not in df_itens.columns:
-        return df_itens.copy(), 0
-
-    temp = df_itens.copy()
-    temp["_dist_tmp_raio"] = pd.to_numeric(temp["distancia_rodoviaria_est_km"], errors="coerce").fillna(0)
-
-    chaves_fora = set(
-        temp.loc[temp["_dist_tmp_raio"] > max_km, cliente_key_col].astype(str).tolist()
-    )
-    if not chaves_fora:
-        return df_itens.copy(), 0
-
-    reduzido = temp.loc[~temp[cliente_key_col].astype(str).isin(chaves_fora)].copy()
-    reduzido = reduzido.drop(columns=["_dist_tmp_raio"], errors="ignore")
-    removidos = len(chaves_fora)
-
-    if not reduzido.empty:
-        reduzido = ordenar_operacional_m5(reduzido, suffix=suffix)
-
-    return reduzido.reset_index(drop=True), removidos
-
-
-def _validar_hard_constraints(
-    df_itens: pd.DataFrame,
-    vehicle_row: pd.Series,
-    suffix: str,
-) -> Tuple[bool, str, pd.DataFrame]:
-    """
-    Validação hard com poda de raio:
-    - se houver cliente fora do raio, remove esse cliente e reavalia
-    - só rejeita o grupo inteiro se o restante ainda não fechar
-    """
-    if df_itens.empty:
-        return False, "grupo_vazio", df_itens.copy()
-
-    candidato = df_itens.copy()
-
-    if not grupo_respeita_restricao_veiculo(candidato, vehicle_row):
-        return False, "restricao_veiculo_incompativel", candidato
-
-    candidato, qtd_removidos_raio = _remover_clientes_fora_do_raio(
-        df_itens=candidato,
-        vehicle_row=vehicle_row,
-        suffix=suffix,
-    )
-
-    if candidato.empty:
-        return False, "todos_clientes_fora_do_raio", candidato
-
-    if not grupo_respeita_restricao_veiculo(candidato, vehicle_row):
-        return False, "restricao_veiculo_incompativel", candidato
-
-    peso_oficial = peso_total(candidato)
-    volume = volume_total(candidato)
-    paradas = _qtd_paradas_validas(candidato)
-    km_ref = _km_referencia_manifesto(candidato)
+    peso_oficial = peso_total(df_itens)
+    volume = volume_total(df_itens)
+    paradas = qtd_paradas(df_itens)
+    km_ref = km_referencia(df_itens)
 
     cap_peso = safe_float(vehicle_row.get("capacidade_peso_kg"), 0.0)
     cap_vol = safe_float(vehicle_row.get("capacidade_vol_m3"), 0.0)
@@ -255,50 +170,39 @@ def _validar_hard_constraints(
     ocup_max = safe_float(vehicle_row.get("ocupacao_maxima_perc"), 100.0)
 
     if cap_peso > 0 and peso_oficial > cap_peso:
-        return False, "excede_capacidade_peso", candidato
+        return False, "excede_capacidade_peso"
     if cap_vol > 0 and volume > cap_vol:
-        return False, "excede_capacidade_volume", candidato
+        return False, "excede_capacidade_volume"
     if max_entregas > 0 and paradas > max_entregas:
-        return False, "excede_max_entregas", candidato
+        return False, "excede_max_entregas"
     if max_km > 0 and km_ref > max_km:
-        return False, "excede_max_km", candidato
+        return False, "excede_max_km"
 
-    ocup = ocupacao_perc(candidato, vehicle_row)
+    ocup = ocupacao_perc(df_itens, vehicle_row)
     if ocup > ocup_max:
-        return False, "excede_ocupacao_maxima", candidato
+        return False, "excede_ocupacao_maxima"
 
-    if qtd_removidos_raio > 0:
-        return True, "ok_com_poda_raio", candidato
-
-    return True, "ok", candidato
+    return True, "ok"
 
 
-def _validar_fechamento(
-    df_itens: pd.DataFrame,
-    vehicle_row: pd.Series,
-    suffix: str,
-) -> Tuple[bool, str, pd.DataFrame]:
-    ok_hard, motivo_hard, candidato_ajustado = _validar_hard_constraints(
-        df_itens=df_itens,
-        vehicle_row=vehicle_row,
-        suffix=suffix,
-    )
+def _validar_fechamento(df_itens: pd.DataFrame, vehicle_row: pd.Series) -> Tuple[bool, str]:
+    ok_hard, motivo_hard = _validar_hard_constraints(df_itens, vehicle_row)
     if not ok_hard:
-        return False, motivo_hard, candidato_ajustado
+        return False, motivo_hard
 
     ocup_min = safe_float(vehicle_row.get("ocupacao_minima_perc"), 70.0)
-    ocup = ocupacao_perc(candidato_ajustado, vehicle_row)
+    ocup = ocupacao_perc(df_itens, vehicle_row)
 
     if ocup < ocup_min:
-        return False, "abaixo_ocupacao_minima", candidato_ajustado
+        return False, "abaixo_ocupacao_minima"
 
-    return True, "ok", candidato_ajustado
+    return True, "ok"
 
 
 def _score_candidato(df_itens: pd.DataFrame, vehicle_row: pd.Series) -> Tuple[float, float, int, float]:
     ocup = ocupacao_perc(df_itens, vehicle_row)
     peso = peso_total(df_itens)
-    clientes = _qtd_paradas_validas(df_itens)
+    clientes = qtd_paradas(df_itens)
     cap = safe_float(vehicle_row.get("capacidade_peso_kg"), 0.0)
 
     return (
@@ -331,11 +235,11 @@ def _tentativa_dict(
         "resultado": resultado,
         "motivo": motivo,
         "qtd_itens_candidato": int(len(candidato)),
-        "qtd_paradas_candidato": _qtd_paradas_validas(candidato),
+        "qtd_paradas_candidato": qtd_paradas(candidato),
         "peso_total_candidato": round(peso_total(candidato), 3),
         "peso_kg_total_candidato": round(peso_auditoria_total(candidato), 3),
         "volume_total_candidato": round(volume_total(candidato), 3),
-        "km_referencia_candidato": round(_km_referencia_manifesto(candidato), 2),
+        "km_referencia_candidato": round(km_referencia(candidato), 2),
         "ocupacao_perc_candidato": round(ocupacao_perc(candidato, vehicle_row), 2)
         if vehicle_row is not None and not candidato.empty
         else 0.0,
@@ -368,11 +272,11 @@ def _build_manifesto(
         "veiculo_perfil": safe_text(vehicle_row.get("perfil")),
         "qtd_itens": qtd_itens,
         "qtd_ctes": qtd_ctes,
-        "qtd_paradas": _qtd_paradas_validas(df_itens_limpo),
+        "qtd_paradas": qtd_paradas(df_itens_limpo),
         "base_carga_oficial": round(peso_total(df_itens_limpo), 3),
         "peso_total_kg": round(peso_auditoria_total(df_itens_limpo), 3),
         "vol_total_m3": round(volume_total(df_itens_limpo), 3),
-        "km_referencia": round(_km_referencia_manifesto(df_itens_limpo), 2),
+        "km_referencia": round(km_referencia(df_itens_limpo), 2),
         "ocupacao_oficial_perc": round(ocupacao_perc(df_itens_limpo, vehicle_row), 2),
         "capacidade_peso_kg_veiculo": safe_float(vehicle_row.get("capacidade_peso_kg"), 0.0),
         "capacidade_vol_m3_veiculo": safe_float(vehicle_row.get("capacidade_vol_m3"), 0.0),
@@ -471,14 +375,17 @@ def _gerar_candidatos_guiados(
         vistos.add(chave)
         candidatos.append(df_candidate.copy())
 
+    # 1) cidade inteira/base inteira
     _adicionar(base)
 
+    # 2) prefixos
     for k in range(1, min(n, MAX_PREFIXOS_POR_PERFIL) + 1):
         cand = base.head(k).copy()
         peso = float(cand["peso_total_bloco"].sum())
         if peso > 0 and (peso <= cap_peso * 1.10 or cap_peso <= 0):
             _adicionar(cand)
 
+    # Descobrir melhor tamanho de prefixo aproximado para faixa alvo
     melhor_k = None
     melhor_gap = None
     acumulado = 0.0
@@ -495,6 +402,7 @@ def _gerar_candidatos_guiados(
     prefixo_base = base.head(melhor_k).copy()
     fora_prefixo = base.iloc[melhor_k:].copy()
 
+    # 3) prefixo + troca de 1
     trocas_1 = 0
     if len(prefixo_base) >= 1 and len(fora_prefixo) >= 1:
         idxs_prefixo = list(range(len(prefixo_base)))
@@ -517,6 +425,7 @@ def _gerar_candidatos_guiados(
             if trocas_1 >= MAX_TROCAS_1:
                 break
 
+    # 4) prefixo + troca de 2
     trocas_2 = 0
     if len(prefixo_base) >= 2 and len(fora_prefixo) >= 2:
         idxs_prefixo = list(range(len(prefixo_base)))
@@ -610,12 +519,8 @@ def _buscar_melhor_fechamento_na_cidade(
             continue
 
         for blocks_candidato in candidatos_blocos:
-            candidato_bruto = _materializar_candidato_por_blocos(city_df, blocks_candidato, suffix=suffix)
-            ok, motivo, candidato = _validar_fechamento(
-                df_itens=candidato_bruto,
-                vehicle_row=vehicle_row,
-                suffix=suffix,
-            )
+            candidato = _materializar_candidato_por_blocos(city_df, blocks_candidato, suffix=suffix)
+            ok, motivo = _validar_fechamento(candidato, vehicle_row)
 
             tentativas.append(
                 _tentativa_dict(
@@ -632,7 +537,7 @@ def _buscar_melhor_fechamento_na_cidade(
             tentativa_idx += 1
             melhor_motivo = motivo
 
-            if not ok or candidato.empty:
+            if not ok:
                 continue
 
             score = _score_candidato(candidato, vehicle_row)
@@ -701,10 +606,9 @@ def executar_m5_2_composicao_cidades(
                 "estrategia_m5_2": [
                     "cidade_por_cidade",
                     "solver_guiado_com_poda",
-                    "poda_de_raio_por_cliente",
                     "maximiza_ocupacao_e_aproveitamento",
                     "multiplos_fechamentos_na_mesma_cidade",
-                    "VERSAO_M5_2_2026_04_14_C",
+                    "VERSAO_M5_2_2026_04_14_B",
                 ],
                 "caminhos_pipeline": caminhos_pipeline or {},
             },
@@ -763,11 +667,11 @@ def executar_m5_2_composicao_cidades(
                         "resultado": "saldo",
                         "motivo": motivo,
                         "qtd_itens_candidato": int(len(city_df)),
-                        "qtd_paradas_candidato": _qtd_paradas_validas(city_df),
+                        "qtd_paradas_candidato": qtd_paradas(city_df),
                         "peso_total_candidato": round(peso_total(city_df), 3),
                         "peso_kg_total_candidato": round(peso_auditoria_total(city_df), 3),
                         "volume_total_candidato": round(volume_total(city_df), 3),
-                        "km_referencia_candidato": round(_km_referencia_manifesto(city_df), 2),
+                        "km_referencia_candidato": round(km_referencia(city_df), 2),
                         "ocupacao_perc_candidato": 0.0,
                     }
                 )
@@ -823,10 +727,9 @@ def executar_m5_2_composicao_cidades(
         "estrategia_m5_2": [
             "cidade_por_cidade",
             "solver_guiado_com_poda",
-            "poda_de_raio_por_cliente",
             "maximiza_ocupacao_e_aproveitamento",
             "multiplos_fechamentos_na_mesma_cidade",
-            "VERSAO_M5_2_2026_04_14_C",
+            "VERSAO_M5_2_2026_04_14_B",
         ],
         "caminhos_pipeline": caminhos_pipeline or {},
     }
