@@ -14,6 +14,7 @@ from app.pipeline.m5_1_triagem_cidades import executar_m5_1_triagem_cidades
 from app.pipeline.m5_2_composicao_cidades import executar_m5_2_composicao_cidades
 from app.pipeline.m5_3_triagem_subregioes import executar_m5_3_triagem_subregioes
 from app.pipeline.m5_3_composicao_subregioes import executar_m5_3_composicao_subregioes
+from app.pipeline.m5_4a_triagem_mesorregioes import executar_m5_4a_triagem_mesorregioes
 from app.schemas import RoteirizacaoRequest
 from app.services.payload_service import PipelineContext, normalizar_payload_para_pipeline
 
@@ -489,16 +490,60 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     )
 
     # =========================================================================================
-    # SERIALIZAÇÃO FINAL - M5.3B
+    # M5.4A
+    # =========================================================================================
+    t0 = _agora()
+    outputs_m5_4a, meta_m5_4a = executar_m5_4a_triagem_mesorregioes(
+        df_remanescente_m5_3=df_remanescente_m5_3,
+        df_veiculos_tratados=df_veiculos_tratados,
+    )
+    tempo_m5_4a = _duracao_ms(t0)
+    metricas_tempo["m5_4a_triagem_mesorregioes_ms"] = tempo_m5_4a
+
+    resumo_m5_4a = meta_m5_4a["resumo_m5_4a"]
+
+    df_mesorregioes_consolidadas_m5_4 = outputs_m5_4a["df_mesorregioes_consolidadas_m5_4"]
+    df_perfis_elegiveis_por_mesorregiao_m5_4 = outputs_m5_4a["df_perfis_elegiveis_por_mesorregiao_m5_4"]
+    df_perfis_descartados_por_mesorregiao_m5_4 = outputs_m5_4a["df_perfis_descartados_por_mesorregiao_m5_4"]
+    df_saldo_elegivel_composicao_m5_4 = outputs_m5_4a["df_saldo_elegivel_composicao_m5_4"]
+    df_saldo_nao_elegivel_m5_4 = outputs_m5_4a["df_saldo_nao_elegivel_m5_4"]
+    df_tentativas_triagem_mesorregioes_m5_4 = outputs_m5_4a["df_tentativas_triagem_mesorregioes_m5_4"]
+
+    logs.append(
+        _log(
+            modulo="m5_4a_triagem_mesorregioes",
+            status="ok",
+            mensagem="M5.4A executado com sucesso",
+            quantidade_entrada=_safe_len(df_remanescente_m5_3),
+            quantidade_saida=_safe_len(df_saldo_elegivel_composicao_m5_4),
+            tempo_ms=tempo_m5_4a,
+            extra={
+                **resumo_m5_4a,
+                "total_mesorregioes_consolidadas_m5_4": _safe_len(df_mesorregioes_consolidadas_m5_4),
+                "total_tentativas_triagem_mesorregioes_m5_4": _safe_len(df_tentativas_triagem_mesorregioes_m5_4),
+            },
+        )
+    )
+
+    # =========================================================================================
+    # SERIALIZAÇÃO FINAL - M5.4A
     # =========================================================================================
     t0 = _agora()
 
-    itens_roteirizados_m5_3 = _serializar_dataframe_para_records(
-        df_itens_premanifestos_m5_3,
+    itens_elegiveis_m5_4 = _serializar_dataframe_para_records(
+        df_saldo_elegivel_composicao_m5_4,
         limit=None,
     )
-    itens_remanescentes_m5_3 = _serializar_dataframe_para_records(
-        df_remanescente_m5_3,
+    itens_nao_elegiveis_m5_4 = _serializar_dataframe_para_records(
+        df_saldo_nao_elegivel_m5_4,
+        limit=None,
+    )
+    veiculos_elegiveis_m5_4 = _serializar_dataframe_para_records(
+        df_perfis_elegiveis_por_mesorregiao_m5_4,
+        limit=None,
+    )
+    veiculos_descartados_m5_4 = _serializar_dataframe_para_records(
+        df_perfis_descartados_por_mesorregiao_m5_4,
         limit=None,
     )
 
@@ -510,9 +555,9 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
 
     resposta: Dict[str, Any] = {
         "status": "ok",
-        "mensagem": "Motor executou com sucesso até o M5.3B composição por subregiões.",
-        "pipeline_real_ate": "M5.3B",
-        "modo_resposta": "validacao_manual_m5_3b_linha_a_linha",
+        "mensagem": "Motor executou com sucesso até o M5.4A triagem de mesorregiões.",
+        "pipeline_real_ate": "M5.4A",
+        "modo_resposta": "validacao_manual_m5_4a_linha_a_linha",
         "resposta_truncada": False,
         "resumo_execucao": {
             "rodada_id": contexto.rodada_id,
@@ -537,12 +582,15 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "total_itens_manifestados_m5_2": _safe_len(df_itens_premanifestos_m5_2),
             "total_itens_remanescentes_m5_2": _safe_len(df_remanescente_m5_2),
             "total_subregioes_consolidadas_m5_3": _safe_len(df_subregioes_consolidadas_m5_3),
-            "total_itens_elegiveis_m5_3": _safe_len(df_saldo_elegivel_composicao_m5_3),
-            "total_itens_nao_elegiveis_m5_3": _safe_len(df_saldo_nao_elegivel_m5_3),
             "total_premanifestos_m5_3": _safe_len(df_premanifestos_m5_3),
             "total_itens_roteirizados_m5_3": _safe_len(df_itens_premanifestos_m5_3),
             "total_itens_remanescentes_m5_3": _safe_len(df_remanescente_m5_3),
-            "total_tentativas_m5_3": _safe_len(df_tentativas_m5_3),
+            "total_mesorregioes_consolidadas_m5_4": _safe_len(df_mesorregioes_consolidadas_m5_4),
+            "total_itens_elegiveis_m5_4": _safe_len(df_saldo_elegivel_composicao_m5_4),
+            "total_itens_nao_elegiveis_m5_4": _safe_len(df_saldo_nao_elegivel_m5_4),
+            "total_veiculos_elegiveis_m5_4": _safe_len(df_perfis_elegiveis_por_mesorregiao_m5_4),
+            "total_veiculos_descartados_m5_4": _safe_len(df_perfis_descartados_por_mesorregiao_m5_4),
+            "total_tentativas_m5_4": _safe_len(df_tentativas_triagem_mesorregioes_m5_4),
             "resumo_m3": resumo_m3,
             "resumo_m31": resumo_m31,
             "resumo_m4": resumo_m4,
@@ -550,18 +598,25 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "resumo_m5_2": resumo_m5_2,
             "resumo_m5_3a": resumo_m5_3a,
             "resumo_m5_3b": resumo_m5_3b,
+            "resumo_m5_4a": resumo_m5_4a,
         },
         "contexto_rodada": {
             "filial": contexto.filial,
             "parametros_rodada": contexto.parametros_rodada,
         },
-        "itens_roteirizados_m5_3": itens_roteirizados_m5_3,
-        "itens_remanescentes_m5_3": itens_remanescentes_m5_3,
+        "itens_elegiveis_m5_4": itens_elegiveis_m5_4,
+        "itens_nao_elegiveis_m5_4": itens_nao_elegiveis_m5_4,
+        "veiculos_elegiveis_m5_4": veiculos_elegiveis_m5_4,
+        "veiculos_descartados_m5_4": veiculos_descartados_m5_4,
         "auditoria_serializacao": {
-            "itens_roteirizados_m5_3_total": _safe_len(df_itens_premanifestos_m5_3),
-            "itens_roteirizados_m5_3_retornado": len(itens_roteirizados_m5_3),
-            "itens_remanescentes_m5_3_total": _safe_len(df_remanescente_m5_3),
-            "itens_remanescentes_m5_3_retornado": len(itens_remanescentes_m5_3),
+            "itens_elegiveis_m5_4_total": _safe_len(df_saldo_elegivel_composicao_m5_4),
+            "itens_elegiveis_m5_4_retornado": len(itens_elegiveis_m5_4),
+            "itens_nao_elegiveis_m5_4_total": _safe_len(df_saldo_nao_elegivel_m5_4),
+            "itens_nao_elegiveis_m5_4_retornado": len(itens_nao_elegiveis_m5_4),
+            "veiculos_elegiveis_m5_4_total": _safe_len(df_perfis_elegiveis_por_mesorregiao_m5_4),
+            "veiculos_elegiveis_m5_4_retornado": len(veiculos_elegiveis_m5_4),
+            "veiculos_descartados_m5_4_total": _safe_len(df_perfis_descartados_por_mesorregiao_m5_4),
+            "veiculos_descartados_m5_4_retornado": len(veiculos_descartados_m5_4),
         },
         "logs": logs,
     }
@@ -642,6 +697,30 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                     df_tentativas_m5_3,
                     "df_tentativas_m5_3",
                 ),
+                "df_mesorregioes_consolidadas_m5_4": _snapshot_dataframe(
+                    df_mesorregioes_consolidadas_m5_4,
+                    "df_mesorregioes_consolidadas_m5_4",
+                ),
+                "df_perfis_elegiveis_por_mesorregiao_m5_4": _snapshot_dataframe(
+                    df_perfis_elegiveis_por_mesorregiao_m5_4,
+                    "df_perfis_elegiveis_por_mesorregiao_m5_4",
+                ),
+                "df_perfis_descartados_por_mesorregiao_m5_4": _snapshot_dataframe(
+                    df_perfis_descartados_por_mesorregiao_m5_4,
+                    "df_perfis_descartados_por_mesorregiao_m5_4",
+                ),
+                "df_saldo_elegivel_composicao_m5_4": _snapshot_dataframe(
+                    df_saldo_elegivel_composicao_m5_4,
+                    "df_saldo_elegivel_composicao_m5_4",
+                ),
+                "df_saldo_nao_elegivel_m5_4": _snapshot_dataframe(
+                    df_saldo_nao_elegivel_m5_4,
+                    "df_saldo_nao_elegivel_m5_4",
+                ),
+                "df_tentativas_triagem_mesorregioes_m5_4": _snapshot_dataframe(
+                    df_tentativas_triagem_mesorregioes_m5_4,
+                    "df_tentativas_triagem_mesorregioes_m5_4",
+                ),
             },
             "resumos_dataframes": {
                 "df_carteira_tratada": _montar_resumo_dataframe(df_carteira_tratada, "df_carteira_tratada"),
@@ -716,6 +795,30 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                 "df_tentativas_m5_3": _montar_resumo_dataframe(
                     df_tentativas_m5_3,
                     "df_tentativas_m5_3",
+                ),
+                "df_mesorregioes_consolidadas_m5_4": _montar_resumo_dataframe(
+                    df_mesorregioes_consolidadas_m5_4,
+                    "df_mesorregioes_consolidadas_m5_4",
+                ),
+                "df_perfis_elegiveis_por_mesorregiao_m5_4": _montar_resumo_dataframe(
+                    df_perfis_elegiveis_por_mesorregiao_m5_4,
+                    "df_perfis_elegiveis_por_mesorregiao_m5_4",
+                ),
+                "df_perfis_descartados_por_mesorregiao_m5_4": _montar_resumo_dataframe(
+                    df_perfis_descartados_por_mesorregiao_m5_4,
+                    "df_perfis_descartados_por_mesorregiao_m5_4",
+                ),
+                "df_saldo_elegivel_composicao_m5_4": _montar_resumo_dataframe(
+                    df_saldo_elegivel_composicao_m5_4,
+                    "df_saldo_elegivel_composicao_m5_4",
+                ),
+                "df_saldo_nao_elegivel_m5_4": _montar_resumo_dataframe(
+                    df_saldo_nao_elegivel_m5_4,
+                    "df_saldo_nao_elegivel_m5_4",
+                ),
+                "df_tentativas_triagem_mesorregioes_m5_4": _montar_resumo_dataframe(
+                    df_tentativas_triagem_mesorregioes_m5_4,
+                    "df_tentativas_triagem_mesorregioes_m5_4",
                 ),
             },
         }
