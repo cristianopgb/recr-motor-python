@@ -364,8 +364,10 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
 
     df_cidades_consolidadas_m5_1 = outputs_m5_1["df_cidades_consolidadas_m5_1"]
     df_perfis_viaveis_por_cidade_m5_1 = outputs_m5_1["df_perfis_viaveis_por_cidade_m5_1"]
+    df_perfis_elegiveis_por_cidade_m5_1 = outputs_m5_1["df_perfis_elegiveis_por_cidade_m5_1"]
+    df_perfis_descartados_por_cidade_m5_1 = outputs_m5_1["df_perfis_descartados_por_cidade_m5_1"]
     df_saldo_elegivel_composicao_m5_1 = outputs_m5_1["df_saldo_elegivel_composicao_m5_1"]
-    df_cidades_remanescentes_m5_1 = outputs_m5_1["df_cidades_remanescentes_m5_1"]
+    df_saldo_nao_elegivel_m5_1 = outputs_m5_1["df_saldo_nao_elegivel_m5_1"]
     df_tentativas_triagem_cidades_m5_1 = outputs_m5_1["df_tentativas_triagem_cidades_m5_1"]
 
     logs.append(
@@ -393,32 +395,20 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         df_saldo_elegivel_composicao_m5_1,
         limit=None,
     )
-    remanescentes_m5_1 = _serializar_dataframe_para_records(
-        df_cidades_remanescentes_m5_1,
+    itens_nao_elegiveis_m5_1 = _serializar_dataframe_para_records(
+        df_saldo_nao_elegivel_m5_1,
         limit=None,
     )
-
-    df_veiculos_elegiveis_m5_1 = (
-        df_perfis_viaveis_por_cidade_m5_1.loc[
-            df_perfis_viaveis_por_cidade_m5_1["status_perfil_cidade"].astype(str) == "elegivel"
-        ].copy()
-        if not df_perfis_viaveis_por_cidade_m5_1.empty
-        else pd.DataFrame()
-    )
-    df_veiculos_descartados_m5_1 = (
-        df_perfis_viaveis_por_cidade_m5_1.loc[
-            df_perfis_viaveis_por_cidade_m5_1["status_perfil_cidade"].astype(str) == "nao_elegivel"
-        ].copy()
-        if not df_perfis_viaveis_por_cidade_m5_1.empty
-        else pd.DataFrame()
-    )
-
     veiculos_elegiveis_m5_1 = _serializar_dataframe_para_records(
-        df_veiculos_elegiveis_m5_1,
+        df_perfis_elegiveis_por_cidade_m5_1,
         limit=None,
     )
     veiculos_descartados_m5_1 = _serializar_dataframe_para_records(
-        df_veiculos_descartados_m5_1,
+        df_perfis_descartados_por_cidade_m5_1,
+        limit=None,
+    )
+    tentativas_m5_1 = _serializar_dataframe_para_records(
+        df_tentativas_triagem_cidades_m5_1,
         limit=None,
     )
 
@@ -448,13 +438,19 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "total_enriquecida_m2": _safe_len(df_carteira_enriquecida),
             "total_triagem_m3": _safe_len(df_carteira_triagem),
             "total_roteirizavel_m3": _safe_len(df_carteira_roteirizavel),
+            "total_agendamento_futuro_m3": _safe_len(df_carteira_agendamento_futuro),
+            "total_agendas_vencidas_m3": _safe_len(df_carteira_agendas_vencidas),
             "total_input_bloco_4": _safe_len(df_input_oficial_bloco_4),
             "total_remanescente_global_m4": _safe_len(df_remanescente_roteirizavel_bloco_4),
             "total_cidades_consolidadas_m5_1": _safe_len(df_cidades_consolidadas_m5_1),
             "total_itens_elegiveis_m5_1": _safe_len(df_saldo_elegivel_composicao_m5_1),
-            "total_remanescentes_m5_1": _safe_len(df_cidades_remanescentes_m5_1),
-            "total_veiculos_elegiveis_m5_1": _safe_len(df_veiculos_elegiveis_m5_1),
-            "total_veiculos_descartados_m5_1": _safe_len(df_veiculos_descartados_m5_1),
+            "total_itens_nao_elegiveis_m5_1": _safe_len(df_saldo_nao_elegivel_m5_1),
+            "total_veiculos_elegiveis_m5_1": _safe_len(df_perfis_elegiveis_por_cidade_m5_1),
+            "total_veiculos_descartados_m5_1": _safe_len(df_perfis_descartados_por_cidade_m5_1),
+            "total_tentativas_m5_1": _safe_len(df_tentativas_triagem_cidades_m5_1),
+            "resumo_m3": resumo_m3,
+            "resumo_m31": resumo_m31,
+            "resumo_m4": resumo_m4,
             "resumo_m5_1": resumo_m5_1,
         },
         "contexto_rodada": {
@@ -462,18 +458,21 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "parametros_rodada": contexto.parametros_rodada,
         },
         "itens_elegiveis_m5_1": itens_elegiveis_m5_1,
-        "remanescentes_m5_1": remanescentes_m5_1,
+        "itens_nao_elegiveis_m5_1": itens_nao_elegiveis_m5_1,
         "veiculos_elegiveis_m5_1": veiculos_elegiveis_m5_1,
         "veiculos_descartados_m5_1": veiculos_descartados_m5_1,
+        "tentativas_m5_1": tentativas_m5_1,
         "auditoria_serializacao": {
             "itens_elegiveis_m5_1_total": _safe_len(df_saldo_elegivel_composicao_m5_1),
             "itens_elegiveis_m5_1_retornado": len(itens_elegiveis_m5_1),
-            "remanescentes_m5_1_total": _safe_len(df_cidades_remanescentes_m5_1),
-            "remanescentes_m5_1_retornado": len(remanescentes_m5_1),
-            "veiculos_elegiveis_m5_1_total": _safe_len(df_veiculos_elegiveis_m5_1),
+            "itens_nao_elegiveis_m5_1_total": _safe_len(df_saldo_nao_elegivel_m5_1),
+            "itens_nao_elegiveis_m5_1_retornado": len(itens_nao_elegiveis_m5_1),
+            "veiculos_elegiveis_m5_1_total": _safe_len(df_perfis_elegiveis_por_cidade_m5_1),
             "veiculos_elegiveis_m5_1_retornado": len(veiculos_elegiveis_m5_1),
-            "veiculos_descartados_m5_1_total": _safe_len(df_veiculos_descartados_m5_1),
+            "veiculos_descartados_m5_1_total": _safe_len(df_perfis_descartados_por_cidade_m5_1),
             "veiculos_descartados_m5_1_retornado": len(veiculos_descartados_m5_1),
+            "tentativas_m5_1_total": _safe_len(df_tentativas_triagem_cidades_m5_1),
+            "tentativas_m5_1_retornado": len(tentativas_m5_1),
         },
         "logs": logs,
     }
@@ -498,13 +497,25 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                     df_perfis_viaveis_por_cidade_m5_1,
                     "df_perfis_viaveis_por_cidade_m5_1",
                 ),
+                "df_perfis_elegiveis_por_cidade_m5_1": _snapshot_dataframe(
+                    df_perfis_elegiveis_por_cidade_m5_1,
+                    "df_perfis_elegiveis_por_cidade_m5_1",
+                ),
+                "df_perfis_descartados_por_cidade_m5_1": _snapshot_dataframe(
+                    df_perfis_descartados_por_cidade_m5_1,
+                    "df_perfis_descartados_por_cidade_m5_1",
+                ),
                 "df_saldo_elegivel_composicao_m5_1": _snapshot_dataframe(
                     df_saldo_elegivel_composicao_m5_1,
                     "df_saldo_elegivel_composicao_m5_1",
                 ),
-                "df_cidades_remanescentes_m5_1": _snapshot_dataframe(
-                    df_cidades_remanescentes_m5_1,
-                    "df_cidades_remanescentes_m5_1",
+                "df_saldo_nao_elegivel_m5_1": _snapshot_dataframe(
+                    df_saldo_nao_elegivel_m5_1,
+                    "df_saldo_nao_elegivel_m5_1",
+                ),
+                "df_tentativas_triagem_cidades_m5_1": _snapshot_dataframe(
+                    df_tentativas_triagem_cidades_m5_1,
+                    "df_tentativas_triagem_cidades_m5_1",
                 ),
             },
             "resumos_dataframes": {
@@ -525,13 +536,25 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                     df_perfis_viaveis_por_cidade_m5_1,
                     "df_perfis_viaveis_por_cidade_m5_1",
                 ),
+                "df_perfis_elegiveis_por_cidade_m5_1": _montar_resumo_dataframe(
+                    df_perfis_elegiveis_por_cidade_m5_1,
+                    "df_perfis_elegiveis_por_cidade_m5_1",
+                ),
+                "df_perfis_descartados_por_cidade_m5_1": _montar_resumo_dataframe(
+                    df_perfis_descartados_por_cidade_m5_1,
+                    "df_perfis_descartados_por_cidade_m5_1",
+                ),
                 "df_saldo_elegivel_composicao_m5_1": _montar_resumo_dataframe(
                     df_saldo_elegivel_composicao_m5_1,
                     "df_saldo_elegivel_composicao_m5_1",
                 ),
-                "df_cidades_remanescentes_m5_1": _montar_resumo_dataframe(
-                    df_cidades_remanescentes_m5_1,
-                    "df_cidades_remanescentes_m5_1",
+                "df_saldo_nao_elegivel_m5_1": _montar_resumo_dataframe(
+                    df_saldo_nao_elegivel_m5_1,
+                    "df_saldo_nao_elegivel_m5_1",
+                ),
+                "df_tentativas_triagem_cidades_m5_1": _montar_resumo_dataframe(
+                    df_tentativas_triagem_cidades_m5_1,
+                    "df_tentativas_triagem_cidades_m5_1",
                 ),
             },
         }
