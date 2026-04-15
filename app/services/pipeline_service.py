@@ -340,14 +340,19 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     df_remanescente_roteirizavel_bloco_4 = outputs_m4["df_remanescente_roteirizavel_bloco_4"]
 
     # necessário para M6.1
-    df_manifestos_m4 = outputs_m4.get("df_manifestos_fechados_bloco_4", pd.DataFrame())
+    df_manifestos_m4 = outputs_m4.get("df_manifestos_fechados_bloco_4")
     if df_manifestos_m4 is None or not isinstance(df_manifestos_m4, pd.DataFrame):
-        df_manifestos_m4 = outputs_m4.get("df_manifestos_m4", pd.DataFrame())
-    df_itens_manifestados_m4 = outputs_m4.get("df_itens_manifestados_bloco_4", pd.DataFrame())
+        df_manifestos_m4 = outputs_m4.get("df_manifestos_m4")
+    if df_manifestos_m4 is None or not isinstance(df_manifestos_m4, pd.DataFrame):
+        df_manifestos_m4 = pd.DataFrame()
+
+    df_itens_manifestados_m4 = outputs_m4.get("df_itens_manifestos_fechados_bloco_4")
     if df_itens_manifestados_m4 is None or not isinstance(df_itens_manifestados_m4, pd.DataFrame):
-        df_itens_manifestados_m4 = outputs_m4.get("df_itens_manifestos_fechados_bloco_4", pd.DataFrame())
+        df_itens_manifestados_m4 = outputs_m4.get("df_itens_manifestados_bloco_4")
     if df_itens_manifestados_m4 is None or not isinstance(df_itens_manifestados_m4, pd.DataFrame):
-        df_itens_manifestados_m4 = outputs_m4.get("df_itens_manifestados_m4", pd.DataFrame())
+        df_itens_manifestados_m4 = outputs_m4.get("df_itens_manifestados_m4")
+    if df_itens_manifestados_m4 is None or not isinstance(df_itens_manifestados_m4, pd.DataFrame):
+        df_itens_manifestados_m4 = pd.DataFrame()
 
     logs.append(
         _log(
