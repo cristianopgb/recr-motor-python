@@ -151,6 +151,43 @@ def _materializar_candidato_por_blocos(
     return candidato.reset_index(drop=True)
 
 
+def _bloco_compativel_com_veiculo(
+    bloco_df: pd.DataFrame,
+    vehicle_row: pd.Series,
+) -> bool:
+    if bloco_df is None or bloco_df.empty:
+        return False
+    return bool(grupo_respeita_restricao_veiculo(bloco_df, vehicle_row))
+
+
+def _filtrar_blocos_compativeis_por_perfil(
+    city_df: pd.DataFrame,
+    blocks_df: pd.DataFrame,
+    vehicle_row: pd.Series,
+    suffix: str,
+) -> pd.DataFrame:
+    if city_df.empty or blocks_df.empty:
+        return pd.DataFrame(columns=blocks_df.columns)
+
+    cliente_key_col = f"_cliente_key_{suffix}"
+    if cliente_key_col not in city_df.columns or cliente_key_col not in blocks_df.columns:
+        return pd.DataFrame(columns=blocks_df.columns)
+
+    blocos_validos: List[pd.Series] = []
+
+    for _, bloco_row in blocks_df.iterrows():
+        chave = bloco_row[cliente_key_col]
+        bloco_df = city_df[city_df[cliente_key_col] == chave].copy()
+        if _bloco_compativel_com_veiculo(bloco_df, vehicle_row):
+            blocos_validos.append(bloco_row)
+
+    if not blocos_validos:
+        return pd.DataFrame(columns=blocks_df.columns)
+
+    filtrado = pd.DataFrame(blocos_validos).reset_index(drop=True)
+    return filtrado
+
+
 def _validar_hard_constraints(df_itens: pd.DataFrame, vehicle_row: pd.Series) -> Tuple[bool, str]:
     if df_itens.empty:
         return False, "grupo_vazio"
@@ -375,17 +412,14 @@ def _gerar_candidatos_guiados(
         vistos.add(chave)
         candidatos.append(df_candidate.copy())
 
-    # 1) cidade inteira/base inteira
     _adicionar(base)
 
-    # 2) prefixos
     for k in range(1, min(n, MAX_PREFIXOS_POR_PERFIL) + 1):
         cand = base.head(k).copy()
         peso = float(cand["peso_total_bloco"].sum())
         if peso > 0 and (peso <= cap_peso * 1.10 or cap_peso <= 0):
             _adicionar(cand)
 
-    # Descobrir melhor tamanho de prefixo aproximado para faixa alvo
     melhor_k = None
     melhor_gap = None
     acumulado = 0.0
@@ -402,7 +436,6 @@ def _gerar_candidatos_guiados(
     prefixo_base = base.head(melhor_k).copy()
     fora_prefixo = base.iloc[melhor_k:].copy()
 
-    # 3) prefixo + troca de 1
     trocas_1 = 0
     if len(prefixo_base) >= 1 and len(fora_prefixo) >= 1:
         idxs_prefixo = list(range(len(prefixo_base)))
@@ -425,7 +458,6 @@ def _gerar_candidatos_guiados(
             if trocas_1 >= MAX_TROCAS_1:
                 break
 
-    # 4) prefixo + troca de 2
     trocas_2 = 0
     if len(prefixo_base) >= 2 and len(fora_prefixo) >= 2:
         idxs_prefixo = list(range(len(prefixo_base)))
@@ -496,8 +528,31 @@ def _buscar_melhor_fechamento_na_cidade(
     tentativa_idx = 1
 
     for _, vehicle_row in vehicles_city.iterrows():
-        candidatos_blocos = _gerar_candidatos_guiados(
+        blocks_df_compativeis = _filtrar_blocos_compativeis_por_perfil(
+            city_df=city_df,
             blocks_df=blocks_df,
+            vehicle_row=vehicle_row,
+            suffix=suffix,
+        )
+
+        if blocks_df_compativeis.empty:
+            tentativas.append(
+                _tentativa_dict(
+                    cidade=cidade,
+                    uf=uf,
+                    vehicle_row=vehicle_row,
+                    resultado="falhou",
+                    motivo="sem_blocos_compativeis_com_perfil",
+                    df_candidato=pd.DataFrame(),
+                    tentativa_idx=tentativa_idx,
+                    blocos_considerados=0,
+                )
+            )
+            tentativa_idx += 1
+            continue
+
+        candidatos_blocos = _gerar_candidatos_guiados(
+            blocks_df=blocks_df_compativeis,
             vehicle_row=vehicle_row,
             cliente_key_col=cliente_key_col,
         )
@@ -606,9 +661,10 @@ def executar_m5_2_composicao_cidades(
                 "estrategia_m5_2": [
                     "cidade_por_cidade",
                     "solver_guiado_com_poda",
+                    "filtro_previo_blocos_compativeis_por_perfil",
                     "maximiza_ocupacao_e_aproveitamento",
                     "multiplos_fechamentos_na_mesma_cidade",
-                    "VERSAO_M5_2_2026_04_14_B",
+                    "VERSAO_M5_2_2026_04_15_FIX_RESTRICAO",
                 ],
                 "caminhos_pipeline": caminhos_pipeline or {},
             },
@@ -727,9 +783,10 @@ def executar_m5_2_composicao_cidades(
         "estrategia_m5_2": [
             "cidade_por_cidade",
             "solver_guiado_com_poda",
+            "filtro_previo_blocos_compativeis_por_perfil",
             "maximiza_ocupacao_e_aproveitamento",
             "multiplos_fechamentos_na_mesma_cidade",
-            "VERSAO_M5_2_2026_04_14_B",
+            "VERSAO_M5_2_2026_04_15_FIX_RESTRICAO",
         ],
         "caminhos_pipeline": caminhos_pipeline or {},
     }
