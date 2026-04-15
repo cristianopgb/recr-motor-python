@@ -384,6 +384,43 @@ def _get_eligible_vehicles_for_mesorregiao(
     return base
 
 
+def _bloco_compativel_com_veiculo(
+    bloco_df: pd.DataFrame,
+    vehicle_row: pd.Series,
+) -> bool:
+    if bloco_df is None or bloco_df.empty:
+        return False
+    return bool(grupo_respeita_restricao_veiculo(bloco_df, vehicle_row))
+
+
+def _filtrar_blocos_compativeis_por_perfil(
+    pool_df: pd.DataFrame,
+    blocks_df: pd.DataFrame,
+    vehicle_row: pd.Series,
+    suffix: str,
+) -> pd.DataFrame:
+    if pool_df.empty or blocks_df.empty:
+        return pd.DataFrame(columns=blocks_df.columns)
+
+    cliente_key_col = f"_cliente_key_{suffix}"
+    if cliente_key_col not in pool_df.columns or cliente_key_col not in blocks_df.columns:
+        return pd.DataFrame(columns=blocks_df.columns)
+
+    blocos_validos: List[pd.Series] = []
+
+    for _, bloco_row in blocks_df.iterrows():
+        chave = bloco_row[cliente_key_col]
+        bloco_df = pool_df[pool_df[cliente_key_col] == chave].copy()
+        if _bloco_compativel_com_veiculo(bloco_df, vehicle_row):
+            blocos_validos.append(bloco_row)
+
+    if not blocos_validos:
+        return pd.DataFrame(columns=blocks_df.columns)
+
+    filtrado = pd.DataFrame(blocos_validos).reset_index(drop=True)
+    return filtrado
+
+
 def _selecionar_blocos_base_para_busca(blocks_df: pd.DataFrame) -> pd.DataFrame:
     if blocks_df.empty:
         return blocks_df.copy()
@@ -531,8 +568,30 @@ def _buscar_melhor_fechamento_na_mesorregiao(
     tentativa_idx = 1
 
     for _, vehicle_row in vehicles_meso.iterrows():
-        candidatos_blocos = _gerar_candidatos_guiados(
+        blocks_df_compativeis = _filtrar_blocos_compativeis_por_perfil(
+            pool_df=pool_df,
             blocks_df=blocks_df,
+            vehicle_row=vehicle_row,
+            suffix=suffix,
+        )
+
+        if blocks_df_compativeis.empty:
+            tentativas.append(
+                _tentativa_dict(
+                    mesorregiao=mesorregiao,
+                    vehicle_row=vehicle_row,
+                    resultado="falhou",
+                    motivo="sem_blocos_compativeis_com_perfil",
+                    df_candidato=pd.DataFrame(),
+                    tentativa_idx=tentativa_idx,
+                    blocos_considerados=0,
+                )
+            )
+            tentativa_idx += 1
+            continue
+
+        candidatos_blocos = _gerar_candidatos_guiados(
+            blocks_df=blocks_df_compativeis,
             vehicle_row=vehicle_row,
             cliente_key_col=cliente_key_col,
         )
@@ -640,10 +699,11 @@ def executar_m5_4b_composicao_mesorregioes(
                 "estrategia_m5_4": [
                     "mesorregiao_por_mesorregiao",
                     "solver_guiado_com_poda",
+                    "filtro_previo_blocos_compativeis_por_perfil",
                     "poda_de_raio_por_cliente",
                     "maximiza_ocupacao_e_aproveitamento",
                     "multiplos_fechamentos_na_mesma_mesorregiao",
-                    "VERSAO_M5_4B_2026_04_14",
+                    "VERSAO_M5_4B_2026_04_14_FIX_RESTRICAO",
                 ],
                 "caminhos_pipeline": caminhos_pipeline or {},
             },
@@ -758,10 +818,11 @@ def executar_m5_4b_composicao_mesorregioes(
         "estrategia_m5_4": [
             "mesorregiao_por_mesorregiao",
             "solver_guiado_com_poda",
+            "filtro_previo_blocos_compativeis_por_perfil",
             "poda_de_raio_por_cliente",
             "maximiza_ocupacao_e_aproveitamento",
             "multiplos_fechamentos_na_mesma_mesorregiao",
-            "VERSAO_M5_4B_2026_04_14",
+            "VERSAO_M5_4B_2026_04_14_FIX_RESTRICAO",
         ],
         "caminhos_pipeline": caminhos_pipeline or {},
     }
