@@ -8,15 +8,6 @@ import numpy as np
 import pandas as pd
 
 
-# ============================================================
-# MÓDULO 6.2 - OTIMIZAÇÃO ENTRE MANIFESTOS CONSOLIDADOS
-# Regras de negócio preservadas:
-# - nunca misturar mesorregião
-# - nunca gerar remanescente
-# - nunca puxar item de fora do pool do M6.1
-# - otimização local entre manifestos já válidos
-# ============================================================
-
 CHAVES_PARADA = ["destinatario", "cidade", "uf"]
 
 MANIFESTO_ID_ALIASES = [
@@ -146,30 +137,6 @@ def executar_m6_2_otimizacao_manifestos(
     df_veiculos_disponiveis: Optional[pd.DataFrame] = None,
     caminhos_pipeline: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """
-    M6.2 - Otimização local entre manifestos consolidados do M6.1.
-
-    Entradas esperadas:
-    - df_manifestos_base_m6
-    - df_itens_manifestos_base_m6
-    - df_pares_elegiveis_otimizacao_m6
-    - data_base_roteirizacao
-    - df_veiculos_disponiveis (opcional; melhora a troca de perfil)
-    - caminhos_pipeline (opcional)
-
-    Saída:
-    {
-      "outputs_m6_2": {
-        "df_manifestos_otimizados_m6_2": ...,
-        "df_itens_manifestos_otimizados_m6_2": ...,
-        "df_movimentos_otimizacao_m6_2": ...,
-        "df_tentativas_otimizacao_m6_2": ...,
-        "df_estatisticas_antes_depois_m6_2": ...,
-      },
-      "resumo_m6_2": {...}
-    }
-    """
-
     df_manifestos = _normalizar_manifestos(df_manifestos_base_m6)
     df_itens = _normalizar_itens(df_itens_manifestos_base_m6)
     df_pares = _normalizar_pares(df_pares_elegiveis_otimizacao_m6)
@@ -178,7 +145,7 @@ def executar_m6_2_otimizacao_manifestos(
     _validar_entrada_m6_2(df_manifestos, df_itens, df_pares)
 
     if len(df_itens) == 0 or len(df_manifestos) == 0 or len(df_pares) == 0:
-        df_manifestos_saida = _recalcular_manifestos(df_manifestos, df_itens, df_veiculos)
+        df_manifestos_saida = _reconstruir_todos_manifestos(df_manifestos, df_itens, df_veiculos)
         return {
             "outputs_m6_2": {
                 "df_manifestos_otimizados_m6_2": df_manifestos_saida,
@@ -218,7 +185,8 @@ def executar_m6_2_otimizacao_manifestos(
         if id_a == id_b:
             continue
 
-        if id_a not in set(df_itens["manifesto_id"].astype(str)) or id_b not in set(df_itens["manifesto_id"].astype(str)):
+        manifestos_ids_atuais = set(df_itens["manifesto_id"].astype(str).tolist())
+        if id_a not in manifestos_ids_atuais or id_b not in manifestos_ids_atuais:
             tentativas.append(
                 _registrar_tentativa(
                     tipo_movimento="par_invalido_estado_atual",
@@ -280,9 +248,12 @@ def executar_m6_2_otimizacao_manifestos(
         )
         movimentos_aceitos.append(melhor_movimento)
 
-    df_manifestos_final = _recalcular_manifestos(df_manifestos, df_itens, df_veiculos)
+    df_manifestos_final = _reconstruir_todos_manifestos(df_manifestos, df_itens, df_veiculos)
 
-    _validar_integridade_final(df_itens_manifestos_base_m6=df_itens_manifestos_base_m6, df_itens_final=df_itens)
+    _validar_integridade_final(
+        df_itens_manifestos_base_m6=df_itens_manifestos_base_m6,
+        df_itens_final=df_itens,
+    )
 
     df_movimentos = pd.DataFrame(movimentos_aceitos)
     df_tentativas = pd.DataFrame(tentativas)
@@ -316,10 +287,6 @@ def executar_m6_2_otimizacao_manifestos(
     }
 
 
-# ============================================================
-# NORMALIZAÇÃO
-# ============================================================
-
 def _normalizar_manifestos(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     if df is None or len(df) == 0:
         return pd.DataFrame(
@@ -336,8 +303,7 @@ def _normalizar_manifestos(df: Optional[pd.DataFrame]) -> pd.DataFrame:
             ]
         )
 
-    out = df.copy()
-    out = _deduplicar_colunas(out)
+    out = _deduplicar_colunas(df.copy())
 
     out["manifesto_id"] = _resolver_coluna(out, MANIFESTO_ID_ALIASES, obrigatoria=True).astype(str)
     out["mesorregiao_operacional"] = _resolver_coluna(out, MESORREGIAO_ALIASES, obrigatoria=False, default="").astype(str)
@@ -384,8 +350,7 @@ def _normalizar_itens(df: Optional[pd.DataFrame]) -> pd.DataFrame:
             ]
         )
 
-    out = df.copy()
-    out = _deduplicar_colunas(out)
+    out = _deduplicar_colunas(df.copy())
 
     out["manifesto_id"] = _resolver_coluna(out, MANIFESTO_ID_ALIASES, obrigatoria=True).astype(str)
 
@@ -409,8 +374,7 @@ def _normalizar_pares(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     if df is None or len(df) == 0:
         return pd.DataFrame(columns=["manifesto_id_a", "manifesto_id_b", "score_prioridade"])
 
-    out = df.copy()
-    out = _deduplicar_colunas(out)
+    out = _deduplicar_colunas(df.copy())
 
     col_a = _resolver_primeira_coluna_existente(out, ["manifesto_id_a", "manifesto_a", "id_manifesto_a", "origem_manifesto"])
     col_b = _resolver_primeira_coluna_existente(out, ["manifesto_id_b", "manifesto_b", "id_manifesto_b", "destino_manifesto"])
@@ -450,8 +414,7 @@ def _normalizar_veiculos(df: Optional[pd.DataFrame]) -> pd.DataFrame:
             ]
         )
 
-    out = df.copy()
-    out = _deduplicar_colunas(out)
+    out = _deduplicar_colunas(df.copy())
 
     out["perfil"] = _resolver_coluna(out, PERFIL_ALIASES, obrigatoria=True).astype(str)
     out["capacidade_peso_kg"] = pd.to_numeric(_resolver_coluna(out, CAP_PESO_ALIASES, obrigatoria=False, default=np.nan), errors="coerce")
@@ -472,10 +435,6 @@ def _normalizar_veiculos(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     ]
     return out[cols].drop_duplicates().reset_index(drop=True)
 
-
-# ============================================================
-# VALIDAÇÕES
-# ============================================================
 
 def _validar_entrada_m6_2(
     df_manifestos: pd.DataFrame,
@@ -515,10 +474,6 @@ def _validar_integridade_final(
         raise Exception(f"M6.2 gerou itens duplicados no resultado final: {qtd} duplicidades.")
 
 
-# ============================================================
-# LOOP PRINCIPAL DE OTIMIZAÇÃO
-# ============================================================
-
 def _ordenar_pares_para_otimizacao(df_pares: pd.DataFrame) -> pd.DataFrame:
     out = df_pares.copy()
     out["score_prioridade"] = pd.to_numeric(out["score_prioridade"], errors="coerce").fillna(0)
@@ -538,7 +493,6 @@ def _buscar_melhor_movimento_no_par(
 
     candidatos_aceitos: List[Dict[str, Any]] = []
 
-    # 1) absorção total
     for origem, destino in [(manifesto_a_id, manifesto_b_id), (manifesto_b_id, manifesto_a_id)]:
         mov = _simular_absorcao_total(
             manifesto_origem=origem,
@@ -551,7 +505,6 @@ def _buscar_melhor_movimento_no_par(
         if mov["aceito"]:
             candidatos_aceitos.append(mov)
 
-    # 2) transferência parcial por mesmo cliente
     grupos_cliente_a = _listar_grupos_moviveis(itens_a, chave="destinatario")
     grupos_cliente_b = _listar_grupos_moviveis(itens_b, chave="destinatario")
 
@@ -583,7 +536,6 @@ def _buscar_melhor_movimento_no_par(
         if mov["aceito"]:
             candidatos_aceitos.append(mov)
 
-    # 3) transferência parcial por mesma cidade
     grupos_cidade_a = _listar_grupos_moviveis(itens_a, chave="cidade")
     grupos_cidade_b = _listar_grupos_moviveis(itens_b, chave="cidade")
 
@@ -615,7 +567,6 @@ def _buscar_melhor_movimento_no_par(
         if mov["aceito"]:
             candidatos_aceitos.append(mov)
 
-    # 4) troca por mesmo cliente
     trocas_cliente = _listar_trocas_possiveis(itens_a, itens_b, chave="destinatario")
     for troca in trocas_cliente:
         mov = _simular_troca_grupos(
@@ -632,7 +583,6 @@ def _buscar_melhor_movimento_no_par(
         if mov["aceito"]:
             candidatos_aceitos.append(mov)
 
-    # 5) troca por mesma cidade
     trocas_cidade = _listar_trocas_possiveis(itens_a, itens_b, chave="cidade")
     for troca in trocas_cidade:
         mov = _simular_troca_grupos(
@@ -664,10 +614,6 @@ def _buscar_melhor_movimento_no_par(
     )
     return candidatos_aceitos[0]
 
-
-# ============================================================
-# SIMULAÇÕES
-# ============================================================
 
 def _simular_absorcao_total(
     manifesto_origem: str,
@@ -701,6 +647,15 @@ def _simular_absorcao_total(
 
     before_a = _calcular_stats_manifesto(manifesto_origem, df_manifestos_estado, itens_origem, df_veiculos)
     before_b = _calcular_stats_manifesto(manifesto_destino, df_manifestos_estado, itens_destino, df_veiculos)
+
+    if not _stats_base_validos(before_a, before_b):
+        return _registrar_tentativa(
+            tipo_movimento="absorcao_total",
+            manifesto_origem=manifesto_origem,
+            manifesto_destino=manifesto_destino,
+            aceito=False,
+            motivo="Par descartado porque as métricas-base do manifesto estão incompletas/NaN.",
+        )
 
     itens_resultado = pd.concat([itens_destino, itens_origem], ignore_index=True)
     melhor_destino = _escolher_melhor_configuracao_para_manifesto(
@@ -786,6 +741,15 @@ def _simular_transferencia_grupo(
 
     before_a = _calcular_stats_manifesto(manifesto_origem, df_manifestos_estado, itens_origem, df_veiculos)
     before_b = _calcular_stats_manifesto(manifesto_destino, df_manifestos_estado, itens_destino, df_veiculos)
+
+    if not _stats_base_validos(before_a, before_b):
+        return _registrar_tentativa(
+            tipo_movimento=f"transferencia_{regra}",
+            manifesto_origem=manifesto_origem,
+            manifesto_destino=manifesto_destino,
+            aceito=False,
+            motivo="Par descartado porque as métricas-base do manifesto estão incompletas/NaN.",
+        )
 
     itens_origem_novo = itens_origem.loc[~itens_origem["id_linha_pipeline"].isin(grupo["id_linha_pipeline"])].copy()
     itens_destino_novo = pd.concat([itens_destino, grupo], ignore_index=True)
@@ -874,6 +838,15 @@ def _simular_troca_grupos(
     before_a = _calcular_stats_manifesto(manifesto_a, df_manifestos_estado, itens_a, df_veiculos)
     before_b = _calcular_stats_manifesto(manifesto_b, df_manifestos_estado, itens_b, df_veiculos)
 
+    if not _stats_base_validos(before_a, before_b):
+        return _registrar_tentativa(
+            tipo_movimento=regra,
+            manifesto_origem=manifesto_a,
+            manifesto_destino=manifesto_b,
+            aceito=False,
+            motivo="Par descartado porque as métricas-base do manifesto estão incompletas/NaN.",
+        )
+
     itens_a_novo = pd.concat(
         [
             itens_a.loc[~itens_a["id_linha_pipeline"].isin(grupo_a["id_linha_pipeline"])],
@@ -946,10 +919,6 @@ def _simular_troca_grupos(
     )
 
 
-# ============================================================
-# APLICAÇÃO DE MOVIMENTO
-# ============================================================
-
 def _aplicar_movimento_aceito(
     df_itens_estado: pd.DataFrame,
     df_manifestos_estado: pd.DataFrame,
@@ -957,39 +926,39 @@ def _aplicar_movimento_aceito(
     df_veiculos: pd.DataFrame,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     out_itens = df_itens_estado.copy()
+    out_manifestos = df_manifestos_estado.copy()
+
     tipo = movimento["tipo_movimento"]
     origem = str(movimento["manifesto_origem"])
     destino = str(movimento["manifesto_destino"])
 
+    manifestos_afetados = {origem, destino}
+
     if tipo == "absorcao_total":
-        ids_movidos = set(movimento.get("ids_movidos", []))
+        ids_movidos = set([str(x) for x in movimento.get("ids_movidos", [])])
         out_itens.loc[out_itens["id_linha_pipeline"].astype(str).isin(ids_movidos), "manifesto_id"] = destino
-        out_itens = out_itens.loc[out_itens["manifesto_id"] != origem].copy() if False else out_itens
-        # Remove o manifesto de origem apenas da base de cabeçalho; os itens já foram movidos
-        out_manifestos = df_manifestos_estado.loc[df_manifestos_estado["manifesto_id"] != origem].copy()
-        out_manifestos = _recalcular_manifestos(out_manifestos, out_itens, df_veiculos)
-        return out_itens.reset_index(drop=True), out_manifestos.reset_index(drop=True)
+        out_manifestos = out_manifestos.loc[out_manifestos["manifesto_id"] != origem].copy()
+        manifestos_afetados = {destino}
 
-    if tipo.startswith("transferencia_"):
-        ids_movidos = set(movimento.get("ids_movidos", []))
+    elif tipo.startswith("transferencia_"):
+        ids_movidos = set([str(x) for x in movimento.get("ids_movidos", [])])
         out_itens.loc[out_itens["id_linha_pipeline"].astype(str).isin(ids_movidos), "manifesto_id"] = destino
-        out_manifestos = _recalcular_manifestos(df_manifestos_estado, out_itens, df_veiculos)
-        return out_itens.reset_index(drop=True), out_manifestos.reset_index(drop=True)
 
-    if tipo.startswith("troca_"):
-        ids_a_para_b = set(movimento.get("ids_movidos_a_para_b", []))
-        ids_b_para_a = set(movimento.get("ids_movidos_b_para_a", []))
+    elif tipo.startswith("troca_"):
+        ids_a_para_b = set([str(x) for x in movimento.get("ids_movidos_a_para_b", [])])
+        ids_b_para_a = set([str(x) for x in movimento.get("ids_movidos_b_para_a", [])])
         out_itens.loc[out_itens["id_linha_pipeline"].astype(str).isin(ids_a_para_b), "manifesto_id"] = destino
         out_itens.loc[out_itens["id_linha_pipeline"].astype(str).isin(ids_b_para_a), "manifesto_id"] = origem
-        out_manifestos = _recalcular_manifestos(df_manifestos_estado, out_itens, df_veiculos)
-        return out_itens.reset_index(drop=True), out_manifestos.reset_index(drop=True)
 
-    return df_itens_estado.copy(), df_manifestos_estado.copy()
+    out_manifestos = _reconstruir_manifestos_afetados(
+        df_manifestos_estado=out_manifestos,
+        df_itens_estado=out_itens,
+        df_veiculos=df_veiculos,
+        manifestos_afetados=manifestos_afetados,
+    )
 
+    return out_itens.reset_index(drop=True), out_manifestos.reset_index(drop=True)
 
-# ============================================================
-# ESTATÍSTICAS / SCORE / REGRAS
-# ============================================================
 
 def _calcular_stats_manifesto(
     manifesto_id: str,
@@ -1012,7 +981,7 @@ def _calcular_stats_manifesto(
     ocup_max = _num_safe(manifesto_row.get("ocupacao_maxima_perc", 100), default=100)
     mesorregiao = _txt_norm(manifesto_row.get("mesorregiao_operacional", ""))
 
-    if (pd.isna(cap_peso) or pd.isna(cap_vol) or pd.isna(max_km)) and len(df_veiculos) > 0 and perfil_atual != "":
+    if (pd.isna(cap_peso) or pd.isna(cap_vol) or pd.isna(max_km) or perfil_atual == "") and len(df_veiculos) > 0:
         match = df_veiculos.loc[df_veiculos["perfil"].astype(str).str.upper() == perfil_atual]
         if len(match) > 0:
             v = match.iloc[0]
@@ -1034,8 +1003,19 @@ def _calcular_stats_manifesto(
 
     ocup_peso = peso_total / cap_peso if pd.notna(cap_peso) and cap_peso > 0 else np.nan
     ocup_vol = vol_total / cap_vol if pd.notna(cap_vol) and cap_vol > 0 else np.nan
-    ocup_dominante = float(np.nanmax([ocup_peso, ocup_vol])) if pd.notna(ocup_peso) or pd.notna(ocup_vol) else np.nan
-    ocup_secundaria = float(np.nanmin([ocup_peso, ocup_vol])) if pd.notna(ocup_peso) or pd.notna(ocup_vol) else np.nan
+
+    if pd.notna(ocup_peso) and pd.notna(ocup_vol):
+        ocup_dominante = float(max(ocup_peso, ocup_vol))
+        ocup_secundaria = float(min(ocup_peso, ocup_vol))
+    elif pd.notna(ocup_peso):
+        ocup_dominante = float(ocup_peso)
+        ocup_secundaria = float(ocup_peso)
+    elif pd.notna(ocup_vol):
+        ocup_dominante = float(ocup_vol)
+        ocup_secundaria = float(ocup_vol)
+    else:
+        ocup_dominante = np.nan
+        ocup_secundaria = np.nan
 
     return ManifestoStats(
         manifesto_id=str(manifesto_id),
@@ -1103,7 +1083,9 @@ def _escolher_melhor_configuracao_para_manifesto(
                 }
             )
 
-    opcoes_df = pd.DataFrame(opcoes).drop_duplicates(subset=["perfil", "capacidade_peso_kg", "capacidade_vol_m3", "max_entregas", "max_km_distancia"])
+    opcoes_df = pd.DataFrame(opcoes).drop_duplicates(
+        subset=["perfil", "capacidade_peso_kg", "capacidade_vol_m3", "max_entregas", "max_km_distancia"]
+    )
     if len(opcoes_df) == 0:
         return None
 
@@ -1134,7 +1116,7 @@ def _escolher_melhor_configuracao_para_manifesto(
         key=lambda s: (
             1 if s.perfil in prefs else 0,
             -abs((s.ocupacao_dominante * 100) - 85) if pd.notna(s.ocupacao_dominante) else -9999,
-            -s.capacidade_peso_kg if pd.notna(s.capacidade_peso_kg) else -9999,
+            -(s.capacidade_peso_kg if pd.notna(s.capacidade_peso_kg) else -9999),
         ),
         reverse=True,
     )
@@ -1160,8 +1142,19 @@ def _calcular_stats_com_configuracao(
 
     ocup_peso = peso_total / capacidade_peso_kg if pd.notna(capacidade_peso_kg) and capacidade_peso_kg > 0 else np.nan
     ocup_vol = vol_total / capacidade_vol_m3 if pd.notna(capacidade_vol_m3) and capacidade_vol_m3 > 0 else np.nan
-    ocup_dominante = float(np.nanmax([ocup_peso, ocup_vol])) if pd.notna(ocup_peso) or pd.notna(ocup_vol) else np.nan
-    ocup_secundaria = float(np.nanmin([ocup_peso, ocup_vol])) if pd.notna(ocup_peso) or pd.notna(ocup_vol) else np.nan
+
+    if pd.notna(ocup_peso) and pd.notna(ocup_vol):
+        ocup_dominante = float(max(ocup_peso, ocup_vol))
+        ocup_secundaria = float(min(ocup_peso, ocup_vol))
+    elif pd.notna(ocup_peso):
+        ocup_dominante = float(ocup_peso)
+        ocup_secundaria = float(ocup_peso)
+    elif pd.notna(ocup_vol):
+        ocup_dominante = float(ocup_vol)
+        ocup_secundaria = float(ocup_vol)
+    else:
+        ocup_dominante = np.nan
+        ocup_secundaria = np.nan
 
     return ManifestoStats(
         manifesto_id=str(manifesto_id),
@@ -1188,13 +1181,11 @@ def _configuracao_valida_para_itens(stats: ManifestoStats, itens_manifesto: pd.D
     if len(itens_manifesto) == 0:
         return False
 
-    # mesma mesorregião sempre
     mesorregioes = {_txt_norm(x) for x in itens_manifesto["mesorregiao_operacional"].astype(str).tolist()}
     mesorregioes.discard("")
     if len(mesorregioes) > 1:
         return False
 
-    # restrição de veículo: se houver, o perfil final precisa atender
     restricoes = {_txt_norm(x) for x in itens_manifesto["restricao_veiculo"].astype(str).tolist()}
     restricoes.discard("")
     if len(restricoes) > 1:
@@ -1208,7 +1199,6 @@ def _configuracao_valida_para_itens(stats: ManifestoStats, itens_manifesto: pd.D
         return False
     if pd.isna(stats.max_km_distancia) or stats.max_km_distancia <= 0:
         return False
-
     if stats.peso_total > stats.capacidade_peso_kg + 1e-9:
         return False
     if stats.vol_total > stats.capacidade_vol_m3 + 1e-9:
@@ -1217,7 +1207,6 @@ def _configuracao_valida_para_itens(stats: ManifestoStats, itens_manifesto: pd.D
         return False
     if stats.distancia_total_km > stats.max_km_distancia + 1e-9:
         return False
-
     if pd.isna(stats.ocupacao_dominante):
         return False
 
@@ -1232,112 +1221,195 @@ def _configuracao_valida_para_itens(stats: ManifestoStats, itens_manifesto: pd.D
     return True
 
 
+def _stats_base_validos(before_a: ManifestoStats, before_b: ManifestoStats) -> bool:
+    campos = [
+        before_a.ocupacao_dominante,
+        before_b.ocupacao_dominante,
+        before_a.distancia_total_km,
+        before_b.distancia_total_km,
+    ]
+    return all(pd.notna(x) for x in campos)
+
+
 def _comparar_par_antes_depois(
     before_a: ManifestoStats,
     before_b: ManifestoStats,
     after_a: Optional[ManifestoStats],
     after_b: Optional[ManifestoStats],
 ) -> Tuple[bool, Dict[str, Any]]:
-    before_ocup_media = np.nanmean([before_a.ocupacao_dominante, before_b.ocupacao_dominante]) * 100
+    if not _stats_base_validos(before_a, before_b):
+        metricas = {
+            "ocupacao_media_antes_perc": 0.0,
+            "ocupacao_media_depois_perc": 0.0,
+            "ganho_ocupacao_media_perc": 0.0,
+            "distancia_total_antes_km": 0.0,
+            "distancia_total_depois_km": 0.0,
+            "ganho_distancia_total_km": 0.0,
+            "balanceamento_antes_perc": 0.0,
+            "balanceamento_depois_perc": 0.0,
+            "ganho_balanceamento_perc": 0.0,
+            "delta_manifestos_reduzidos": 0,
+        }
+        return False, metricas
+
+    before_ocup_media = float(np.mean([before_a.ocupacao_dominante, before_b.ocupacao_dominante]) * 100)
     before_dist_total = float(before_a.distancia_total_km + before_b.distancia_total_km)
-    before_balanceamento = (np.nanmin([before_a.ocupacao_dominante, before_b.ocupacao_dominante]) * 100)
+    before_balanceamento = float(min(before_a.ocupacao_dominante, before_b.ocupacao_dominante) * 100)
 
     after_stats = [x for x in [after_a, after_b] if x is not None]
-    after_ocup_media = np.nanmean([x.ocupacao_dominante for x in after_stats]) * 100
+    if len(after_stats) == 0:
+        metricas = {
+            "ocupacao_media_antes_perc": round(before_ocup_media, 4),
+            "ocupacao_media_depois_perc": 0.0,
+            "ganho_ocupacao_media_perc": 0.0,
+            "distancia_total_antes_km": round(before_dist_total, 4),
+            "distancia_total_depois_km": 0.0,
+            "ganho_distancia_total_km": 0.0,
+            "balanceamento_antes_perc": round(before_balanceamento, 4),
+            "balanceamento_depois_perc": 0.0,
+            "ganho_balanceamento_perc": 0.0,
+            "delta_manifestos_reduzidos": 0,
+        }
+        return False, metricas
+
+    campos_after = [x.ocupacao_dominante for x in after_stats] + [x.distancia_total_km for x in after_stats]
+    if not all(pd.notna(x) for x in campos_after):
+        metricas = {
+            "ocupacao_media_antes_perc": round(before_ocup_media, 4),
+            "ocupacao_media_depois_perc": 0.0,
+            "ganho_ocupacao_media_perc": 0.0,
+            "distancia_total_antes_km": round(before_dist_total, 4),
+            "distancia_total_depois_km": 0.0,
+            "ganho_distancia_total_km": 0.0,
+            "balanceamento_antes_perc": round(before_balanceamento, 4),
+            "balanceamento_depois_perc": 0.0,
+            "ganho_balanceamento_perc": 0.0,
+            "delta_manifestos_reduzidos": 0,
+        }
+        return False, metricas
+
+    after_ocup_media = float(np.mean([x.ocupacao_dominante for x in after_stats]) * 100)
     after_dist_total = float(sum([x.distancia_total_km for x in after_stats]))
-    after_balanceamento = (np.nanmin([x.ocupacao_dominante for x in after_stats]) * 100) if len(after_stats) > 0 else 0.0
+    after_balanceamento = float(min([x.ocupacao_dominante for x in after_stats]) * 100)
 
     delta_ocup = float(after_ocup_media - before_ocup_media)
     delta_dist_reducao = float(before_dist_total - after_dist_total)
     delta_balanceamento = float(after_balanceamento - before_balanceamento)
 
     melhora_aceita = (
-        (
-            delta_ocup > 1e-9
-            and delta_dist_reducao >= -1e-9
-        )
-        or (
-            delta_dist_reducao > 1e-9
-            and delta_ocup >= -1e-9
-        )
+        ((delta_ocup > 1e-9) and (delta_dist_reducao >= -1e-9))
+        or ((delta_dist_reducao > 1e-9) and (delta_ocup >= -1e-9))
     )
 
     metricas = {
-        "ocupacao_media_antes_perc": round(float(before_ocup_media), 4),
-        "ocupacao_media_depois_perc": round(float(after_ocup_media), 4),
-        "ganho_ocupacao_media_perc": round(float(delta_ocup), 4),
-        "distancia_total_antes_km": round(float(before_dist_total), 4),
-        "distancia_total_depois_km": round(float(after_dist_total), 4),
-        "ganho_distancia_total_km": round(float(delta_dist_reducao), 4),
-        "balanceamento_antes_perc": round(float(before_balanceamento), 4),
-        "balanceamento_depois_perc": round(float(after_balanceamento), 4),
-        "ganho_balanceamento_perc": round(float(delta_balanceamento), 4),
+        "ocupacao_media_antes_perc": round(before_ocup_media, 4),
+        "ocupacao_media_depois_perc": round(after_ocup_media, 4),
+        "ganho_ocupacao_media_perc": round(delta_ocup, 4),
+        "distancia_total_antes_km": round(before_dist_total, 4),
+        "distancia_total_depois_km": round(after_dist_total, 4),
+        "ganho_distancia_total_km": round(delta_dist_reducao, 4),
+        "balanceamento_antes_perc": round(before_balanceamento, 4),
+        "balanceamento_depois_perc": round(after_balanceamento, 4),
+        "ganho_balanceamento_perc": round(delta_balanceamento, 4),
         "delta_manifestos_reduzidos": 0,
     }
     return melhora_aceita, metricas
 
 
-# ============================================================
-# RECONSTRUÇÃO DOS CABEÇALHOS
-# ============================================================
-
-def _recalcular_manifestos(
+def _reconstruir_manifestos_afetados(
     df_manifestos_estado: pd.DataFrame,
     df_itens_estado: pd.DataFrame,
     df_veiculos: pd.DataFrame,
+    manifestos_afetados: set[str],
 ) -> pd.DataFrame:
-    if len(df_itens_estado) == 0:
-        return pd.DataFrame(columns=df_manifestos_estado.columns)
+    out = df_manifestos_estado.copy()
+    ids_atuais = set(df_itens_estado["manifesto_id"].astype(str).unique().tolist())
 
-    base_headers = df_manifestos_estado.copy()
-    manifestos_presentes = sorted(df_itens_estado["manifesto_id"].astype(str).unique().tolist())
-
-    registros: List[Dict[str, Any]] = []
-
-    for manifesto_id in manifestos_presentes:
-        itens = df_itens_estado.loc[df_itens_estado["manifesto_id"] == manifesto_id].copy()
-
-        if len(base_headers.loc[base_headers["manifesto_id"] == manifesto_id]) == 0:
+    for manifesto_id in list(manifestos_afetados):
+        if manifesto_id not in ids_atuais:
+            out = out.loc[out["manifesto_id"] != manifesto_id].copy()
             continue
 
+        itens = df_itens_estado.loc[df_itens_estado["manifesto_id"] == manifesto_id].copy()
         best = _escolher_melhor_configuracao_para_manifesto(
             manifesto_id=manifesto_id,
-            df_manifestos_estado=base_headers,
+            df_manifestos_estado=out,
             itens_manifesto=itens,
             df_veiculos=df_veiculos,
-            perfis_preferenciais=[_txt_norm(base_headers.loc[base_headers["manifesto_id"] == manifesto_id, "perfil"].head(1).iloc[0])],
+            perfis_preferenciais=[
+                _txt_norm(out.loc[out["manifesto_id"] == manifesto_id, "perfil"].head(1).iloc[0])
+                if len(out.loc[out["manifesto_id"] == manifesto_id]) > 0
+                else ""
+            ],
         )
         if best is None:
             raise Exception(
                 f"M6.2 deixou o manifesto {manifesto_id} em estado inválido após aplicação de movimento."
             )
 
-        header = base_headers.loc[base_headers["manifesto_id"] == manifesto_id].head(1).iloc[0].to_dict()
-        header["manifesto_id"] = best.manifesto_id
-        header["mesorregiao_operacional"] = best.mesorregiao
-        header["perfil"] = best.perfil
-        header["capacidade_peso_kg"] = best.capacidade_peso_kg
-        header["capacidade_vol_m3"] = best.capacidade_vol_m3
-        header["max_entregas"] = best.max_entregas
-        header["max_km_distancia"] = best.max_km_distancia
-        header["ocupacao_minima_perc"] = best.ocupacao_minima_perc
-        header["ocupacao_maxima_perc"] = best.ocupacao_maxima_perc
-        header["peso_total_kg"] = best.peso_total
-        header["vol_total_m3"] = best.vol_total
-        header["qtd_entregas"] = best.qtd_entregas
-        header["distancia_total_km"] = best.distancia_total_km
-        header["ocupacao_peso_perc"] = round(best.ocupacao_peso * 100, 4) if pd.notna(best.ocupacao_peso) else np.nan
-        header["ocupacao_vol_perc"] = round(best.ocupacao_vol * 100, 4) if pd.notna(best.ocupacao_vol) else np.nan
-        header["ocupacao_dominante_perc"] = round(best.ocupacao_dominante * 100, 4) if pd.notna(best.ocupacao_dominante) else np.nan
-        header["ocupacao_secundaria_perc"] = round(best.ocupacao_secundaria * 100, 4) if pd.notna(best.ocupacao_secundaria) else np.nan
-        registros.append(header)
+        out = _atualizar_header_manifesto(out, best)
 
-    return pd.DataFrame(registros).reset_index(drop=True)
+    return out.reset_index(drop=True)
 
 
-# ============================================================
-# LISTAGEM DE OPORTUNIDADES
-# ============================================================
+def _reconstruir_todos_manifestos(
+    df_manifestos_estado: pd.DataFrame,
+    df_itens_estado: pd.DataFrame,
+    df_veiculos: pd.DataFrame,
+) -> pd.DataFrame:
+    out = df_manifestos_estado.copy()
+    ids_atuais = sorted(df_itens_estado["manifesto_id"].astype(str).unique().tolist())
+
+    out = out.loc[out["manifesto_id"].astype(str).isin(ids_atuais)].copy()
+
+    for manifesto_id in ids_atuais:
+        itens = df_itens_estado.loc[df_itens_estado["manifesto_id"] == manifesto_id].copy()
+        best = _escolher_melhor_configuracao_para_manifesto(
+            manifesto_id=manifesto_id,
+            df_manifestos_estado=out,
+            itens_manifesto=itens,
+            df_veiculos=df_veiculos,
+            perfis_preferenciais=[
+                _txt_norm(out.loc[out["manifesto_id"] == manifesto_id, "perfil"].head(1).iloc[0])
+                if len(out.loc[out["manifesto_id"] == manifesto_id]) > 0
+                else ""
+            ],
+        )
+        if best is None:
+            raise Exception(
+                f"M6.2 não conseguiu reconstruir o manifesto {manifesto_id} no fechamento final do módulo."
+            )
+        out = _atualizar_header_manifesto(out, best)
+
+    return out.reset_index(drop=True)
+
+
+def _atualizar_header_manifesto(df_manifestos_estado: pd.DataFrame, best: ManifestoStats) -> pd.DataFrame:
+    out = df_manifestos_estado.copy()
+    idx = out.index[out["manifesto_id"] == best.manifesto_id]
+    if len(idx) == 0:
+        raise Exception(f"M6.2 não encontrou cabeçalho para atualizar o manifesto {best.manifesto_id}.")
+    i = idx[0]
+
+    out.loc[i, "manifesto_id"] = best.manifesto_id
+    out.loc[i, "mesorregiao_operacional"] = best.mesorregiao
+    out.loc[i, "perfil"] = best.perfil
+    out.loc[i, "capacidade_peso_kg"] = best.capacidade_peso_kg
+    out.loc[i, "capacidade_vol_m3"] = best.capacidade_vol_m3
+    out.loc[i, "max_entregas"] = best.max_entregas
+    out.loc[i, "max_km_distancia"] = best.max_km_distancia
+    out.loc[i, "ocupacao_minima_perc"] = best.ocupacao_minima_perc
+    out.loc[i, "ocupacao_maxima_perc"] = best.ocupacao_maxima_perc
+    out.loc[i, "peso_total_kg"] = best.peso_total
+    out.loc[i, "vol_total_m3"] = best.vol_total
+    out.loc[i, "qtd_entregas"] = best.qtd_entregas
+    out.loc[i, "distancia_total_km"] = best.distancia_total_km
+    out.loc[i, "ocupacao_peso_perc"] = round(best.ocupacao_peso * 100, 4) if pd.notna(best.ocupacao_peso) else np.nan
+    out.loc[i, "ocupacao_vol_perc"] = round(best.ocupacao_vol * 100, 4) if pd.notna(best.ocupacao_vol) else np.nan
+    out.loc[i, "ocupacao_dominante_perc"] = round(best.ocupacao_dominante * 100, 4) if pd.notna(best.ocupacao_dominante) else np.nan
+    out.loc[i, "ocupacao_secundaria_perc"] = round(best.ocupacao_secundaria * 100, 4) if pd.notna(best.ocupacao_secundaria) else np.nan
+    return out
+
 
 def _listar_grupos_moviveis(df_itens_manifesto: pd.DataFrame, chave: str) -> List[Dict[str, Any]]:
     if chave not in df_itens_manifesto.columns or len(df_itens_manifesto) == 0:
@@ -1402,10 +1474,6 @@ def _listar_trocas_possiveis(
     )
     return trocas
 
-
-# ============================================================
-# RESUMOS / SAÍDA
-# ============================================================
 
 def _montar_estatisticas_antes_depois(
     df_manifestos_antes: pd.DataFrame,
@@ -1518,10 +1586,6 @@ def _registrar_tentativa(
     reg.setdefault("ganho_balanceamento_perc", 0.0)
     return reg
 
-
-# ============================================================
-# HELPERS
-# ============================================================
 
 def _resolver_coluna(
     df: pd.DataFrame,
