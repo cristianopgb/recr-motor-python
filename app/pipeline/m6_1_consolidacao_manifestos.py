@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from itertools import combinations
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -17,15 +16,14 @@ import pandas as pd
 # - calcular score de criticidade com prioridade em BAIXA OCUPAÇÃO
 # - gerar pares elegíveis para o M6.2 SOMENTE dentro da mesma mesorregião
 #
-# NÃO FAZ
-# - não troca itens
-# - não reotimiza
-# - não gera remanescente
+# CONTRATO NOVO
+# - o cabeçalho consolidado agora passa a carregar também:
+#   - max_paradas_veiculo
 #
-# REGRA CENTRAL DE PODA
-# - nunca misturar mesorregiões
-# - priorizar manifestos com pior ocupação
-# - km entra como dado auxiliar, não como driver principal
+# REGRA DE SEGURANÇA
+# - se o limite real de paradas do veículo não vier dos módulos anteriores,
+#   o M6.1 falha de forma explícita.
+# - não usar qtd_paradas atual do manifesto como se fosse limite do veículo.
 # =========================================================================================
 
 
@@ -84,39 +82,85 @@ def _garantir_colunas(df: pd.DataFrame, colunas: List[str]) -> pd.DataFrame:
     return out
 
 
-def _col_veiculo_tipo(df: pd.DataFrame) -> str:
-    for c in ["veiculo_tipo", "tipo"]:
+def _resolver_coluna_existente(
+    df: pd.DataFrame,
+    candidatos: List[str],
+    nome_logico: str,
+    obrigatoria: bool = True,
+) -> str:
+    for c in candidatos:
         if c in df.columns:
             return c
-    return "veiculo_tipo"
+
+    if obrigatoria:
+        raise Exception(
+            f"M6.1 não encontrou a coluna obrigatória '{nome_logico}'. "
+            f"Esperado um destes nomes: {candidatos}. "
+            f"Corrija o contrato do módulo anterior."
+        )
+
+    return ""
+
+
+def _col_veiculo_tipo(df: pd.DataFrame) -> str:
+    return _resolver_coluna_existente(
+        df,
+        ["veiculo_tipo", "tipo"],
+        "veiculo_tipo",
+        obrigatoria=True,
+    )
 
 
 def _col_veiculo_perfil(df: pd.DataFrame) -> str:
-    for c in ["veiculo_perfil", "perfil"]:
-        if c in df.columns:
-            return c
-    return "veiculo_perfil"
+    return _resolver_coluna_existente(
+        df,
+        ["veiculo_perfil", "perfil"],
+        "veiculo_perfil",
+        obrigatoria=True,
+    )
 
 
 def _col_km_manifesto(df: pd.DataFrame) -> str:
-    for c in ["km_referencia", "km_total", "km_manifesto", "km_base_antes_m6"]:
-        if c in df.columns:
-            return c
-    return "km_referencia"
+    return _resolver_coluna_existente(
+        df,
+        ["km_referencia", "km_total", "km_manifesto", "km_base_antes_m6"],
+        "km_manifesto",
+        obrigatoria=True,
+    )
 
 
 def _col_peso_manifesto(df: pd.DataFrame) -> str:
-    for c in ["base_carga_oficial", "peso_total_kg", "peso_total", "peso_base_antes_m6"]:
-        if c in df.columns:
-            return c
-    return "base_carga_oficial"
+    return _resolver_coluna_existente(
+        df,
+        ["base_carga_oficial", "peso_total_kg", "peso_total", "peso_base_antes_m6"],
+        "peso_manifesto",
+        obrigatoria=True,
+    )
 
 
 def _col_ocupacao_manifesto(df: pd.DataFrame) -> str:
-    for c in ["ocupacao_oficial_perc", "ocupacao_perc", "ocupacao_base_antes_m6"]:
-        if c in df.columns:
-            return c
-    return "ocupacao_oficial_perc"
+    return _resolver_coluna_existente(
+        df,
+        ["ocupacao_oficial_perc", "ocupacao_perc", "ocupacao_base_antes_m6"],
+        "ocupacao_manifesto",
+        obrigatoria=True,
+    )
+
+
+def _col_max_paradas_manifesto(df: pd.DataFrame) -> str:
+    # Lista controlada e curta.
+    # Se nenhuma existir, o contrato anterior está incompleto e o M6.1 deve falhar.
+    return _resolver_coluna_existente(
+        df,
+        [
+            "max_paradas_veiculo",
+            "max_entregas_veiculo",
+            "max_entregas",
+            "limite_entregas",
+        ],
+        "max_paradas_veiculo",
+        obrigatoria=True,
+    )
 
 
 # =========================================================================================
@@ -137,6 +181,7 @@ def _padronizar_manifestos(
     col_km = _col_km_manifesto(df)
     col_peso = _col_peso_manifesto(df)
     col_ocup = _col_ocupacao_manifesto(df)
+    col_max_paradas = _col_max_paradas_manifesto(df)
 
     colunas_minimas = [
         "manifesto_id",
@@ -145,6 +190,7 @@ def _padronizar_manifestos(
         col_km,
         col_peso,
         col_ocup,
+        col_max_paradas,
         "capacidade_peso_kg_veiculo",
         "max_km_distancia_veiculo",
         "qtd_itens",
@@ -164,6 +210,7 @@ def _padronizar_manifestos(
         "ocupacao_base_antes_m6": pd.to_numeric(df[col_ocup], errors="coerce").fillna(0.0),
         "capacidade_peso_kg_veiculo": pd.to_numeric(df["capacidade_peso_kg_veiculo"], errors="coerce").fillna(0.0),
         "max_km_distancia_veiculo": pd.to_numeric(df["max_km_distancia_veiculo"], errors="coerce").fillna(0.0),
+        "max_paradas_veiculo": pd.to_numeric(df[col_max_paradas], errors="coerce").fillna(0).astype(int),
         "qtd_itens_base_antes_m6": pd.to_numeric(df["qtd_itens"], errors="coerce").fillna(0).astype(int),
         "qtd_ctes_base_antes_m6": pd.to_numeric(df["qtd_ctes"], errors="coerce").fillna(0).astype(int),
         "qtd_paradas_base_antes_m6": pd.to_numeric(df["qtd_paradas"], errors="coerce").fillna(0).astype(int),
@@ -175,6 +222,25 @@ def _padronizar_manifestos(
 
     out = out[out["manifesto_id"] != ""].copy()
     out = out.drop_duplicates(subset=["manifesto_id"], keep="first").reset_index(drop=True)
+
+    # validações contratuais duras
+    if (out["capacidade_peso_kg_veiculo"] <= 0).any():
+        manifestos_invalidos = out.loc[out["capacidade_peso_kg_veiculo"] <= 0, "manifesto_id"].astype(str).tolist()[:20]
+        raise Exception(
+            f"M6.1 encontrou manifestos sem capacidade_peso_kg_veiculo válida: {manifestos_invalidos}"
+        )
+
+    if (out["max_km_distancia_veiculo"] <= 0).any():
+        manifestos_invalidos = out.loc[out["max_km_distancia_veiculo"] <= 0, "manifesto_id"].astype(str).tolist()[:20]
+        raise Exception(
+            f"M6.1 encontrou manifestos sem max_km_distancia_veiculo válido: {manifestos_invalidos}"
+        )
+
+    if (out["max_paradas_veiculo"] <= 0).any():
+        manifestos_invalidos = out.loc[out["max_paradas_veiculo"] <= 0, "manifesto_id"].astype(str).tolist()[:20]
+        raise Exception(
+            f"M6.1 encontrou manifestos sem max_paradas_veiculo válido: {manifestos_invalidos}"
+        )
 
     return out
 
@@ -355,7 +421,7 @@ def _aplicar_score_criticidade_por_mesorregiao(
 
     partes: List[pd.DataFrame] = []
 
-    for meso, grupo in df.groupby("mesorregiao_manifesto_m6", dropna=False, sort=False):
+    for _, grupo in df.groupby("mesorregiao_manifesto_m6", dropna=False, sort=False):
         g = grupo.copy()
 
         ocup_min = float(g["ocupacao_recalculada_antes_m6"].min()) if not g.empty else 0.0
@@ -373,11 +439,9 @@ def _aplicar_score_criticidade_por_mesorregiao(
         else:
             km_norm = pd.Series([0.0] * len(g), index=g.index)
 
-        # PRIORIDADE MAIOR PARA BAIXA OCUPAÇÃO
         g["score_ocupacao_ruim_m6"] = (1.0 - ocup_norm).clip(lower=0.0, upper=1.0)
         g["score_km_ruim_m6"] = km_norm.clip(lower=0.0, upper=1.0)
 
-        # peso maior para ocupação
         g["score_criticidade_m6"] = (
             0.75 * g["score_ocupacao_ruim_m6"]
             + 0.25 * g["score_km_ruim_m6"]
@@ -405,11 +469,7 @@ def _aplicar_score_criticidade_por_mesorregiao(
 
 # =========================================================================================
 # GERAÇÃO DE PARES ELEGÍVEIS
-# REGRA:
-# - só mesma mesorregião
-# - prioriza manifestos mais críticos
-# - não trava por tipo de veículo igual
-# - faz poda leve por plausibilidade de peso/km
+# MANTIDO PARA AUDITORIA / COMPATIBILIDADE
 # =========================================================================================
 def _par_elegivel_por_faixa(r1: pd.Series, r2: pd.Series) -> Tuple[bool, str]:
     meso_1 = _safe_text(r1.get("mesorregiao_manifesto_m6"))
@@ -443,7 +503,6 @@ def _par_elegivel_por_faixa(r1: pd.Series, r2: pd.Series) -> Tuple[bool, str]:
     if menor_km <= 0:
         return False, "km_invalido"
 
-    # poda leve, sem matar oportunidades demais
     razao_peso = maior_peso / menor_peso
     razao_km = maior_km / menor_km
 
@@ -478,14 +537,12 @@ def _gerar_pares_elegiveis_otimizacao(
         if len(g) < 2:
             continue
 
-        # foca nos mais críticos
         top_criticos = max(1, int(round(len(g) * 0.5)))
         top_criticos = min(top_criticos, len(g))
 
         for i in range(top_criticos):
             row_i = g.iloc[i]
 
-            # compara com poucos candidatos da mesma meso
             candidatos_j = g.drop(index=i).reset_index(drop=True)
             candidatos_j = candidatos_j.sort_values(
                 by=[
@@ -660,6 +717,7 @@ def executar_m6_1_consolidacao_manifestos(
         "estrategia_m6_1": [
             "consolidacao_multiorigem_manifestos",
             "padronizacao_itens_e_manifestos",
+            "contrato_com_max_paradas_veiculo",
             "estatistica_antes_da_otimizacao",
             "score_criticidade_com_prioridade_ocupacao",
             "pares_somente_dentro_da_mesma_mesorregiao",
@@ -697,6 +755,11 @@ def executar_m6_1_consolidacao_manifestos(
             sorted(df_manifestos_base_m6["veiculo_tipo"].fillna("").astype(str).str.strip().unique().tolist())
             if not df_manifestos_base_m6.empty
             else []
+        ),
+        "max_paradas_veiculo_por_manifesto": (
+            df_manifestos_base_m6.set_index("manifesto_id")["max_paradas_veiculo"].to_dict()
+            if not df_manifestos_base_m6.empty
+            else {}
         ),
     }
 
