@@ -7,33 +7,28 @@ import numpy as np
 import pandas as pd
 
 
-# ============================================================
-# M6.2 - COMPLEMENTO DE OCUPAÇÃO
-# CONTRATO FECHADO
-#
-# Entradas oficiais:
-# - df_manifestos_base_m6
-# - df_estatisticas_manifestos_antes_m6
-# - df_itens_manifestos_base_m6
-# - df_remanescente_m5_4
-#
-# Regras:
-# - usa ocupacao_base_antes_m6 do M6.1
-# - usa capacidade_peso_kg_veiculo do M6.1
-# - usa max_km_distancia_veiculo do M6.1
-# - usa mesorregiao_manifesto_m6 da base de estatísticas do M6.1
-# - elegíveis: ocupação < 85%
-# - busca remanescente nesta ordem:
-#     1. mesmo cliente
-#     2. mesma cidade
-#     3. mesma sub-região
-#     4. mesma mesorregião
-# - prioridade:
-#     1. agendado primeiro
-#     2. folga positiva menor -> maior
-#     3. folga negativa por último
-# - ocupação calculada por peso_calculado / capacidade_peso_kg_veiculo
-# ============================================================
+# =========================================================================================
+# M6.2 - COMPLEMENTO DE OCUPAÇÃO POR ENCAIXE DE FOLGA
+# -----------------------------------------------------------------------------------------
+# REGRA
+# - selecionar manifestos com ocupação < 85
+# - ordenar da menor ocupação para a maior
+# - calcular espaço disponível em peso e paradas
+# - buscar remanescente nesta ordem:
+#     1. mesma cidade
+#     2. mesma sub-região
+#     3. mesma mesorregião
+# - dentro de cada camada:
+#     - agendado primeiro
+#     - folga positiva menor -> maior
+#     - folga negativa por último
+# - raio NÃO é cálculo incremental:
+#     - validação seca: km individual do item <= max_km_distancia_veiculo
+# - não parar só porque já melhorou:
+#     - continua até não caber mais item elegível
+# - ao aceitar item:
+#     - remove item do remanescente imediatamente
+# =========================================================================================
 
 
 COLS_MANIFESTOS_OBRIGATORIAS = [
@@ -47,6 +42,7 @@ COLS_MANIFESTOS_OBRIGATORIAS = [
     "ocupacao_base_antes_m6",
     "capacidade_peso_kg_veiculo",
     "max_km_distancia_veiculo",
+    "max_paradas_veiculo",
     "qtd_itens_base_antes_m6",
     "qtd_ctes_base_antes_m6",
     "qtd_paradas_base_antes_m6",
@@ -60,6 +56,7 @@ COLS_ESTATS_OBRIGATORIAS = [
 COLS_ITENS_OBRIGATORIAS = [
     "manifesto_id",
     "id_linha_pipeline",
+    "nro_documento",
     "destinatario",
     "cidade",
     "uf",
@@ -67,11 +64,13 @@ COLS_ITENS_OBRIGATORIAS = [
     "mesorregiao",
     "distancia_rodoviaria_est_km",
     "peso_calculado",
+    "peso_kg",
     "vol_m3",
 ]
 
 COLS_REMANESCENTE_OBRIGATORIAS = [
     "id_linha_pipeline",
+    "nro_documento",
     "destinatario",
     "cidade",
     "uf",
@@ -79,6 +78,7 @@ COLS_REMANESCENTE_OBRIGATORIAS = [
     "mesorregiao",
     "distancia_rodoviaria_est_km",
     "peso_calculado",
+    "peso_kg",
     "vol_m3",
 ]
 
@@ -111,6 +111,26 @@ def executar_m6_2_complemento_ocupacao(
     if "origem_item_m6_2" not in df_itens.columns:
         df_itens["origem_item_m6_2"] = "original_m6_1"
 
+    # estado inicial de saída no cabeçalho
+    df_manifestos["perfil_final_m6_2"] = (
+        df_manifestos["veiculo_perfil"].replace("", np.nan).fillna(df_manifestos["veiculo_tipo"])
+    )
+    df_manifestos["capacidade_peso_kg"] = df_manifestos["capacidade_peso_kg_veiculo"]
+    df_manifestos["max_km_distancia"] = df_manifestos["max_km_distancia_veiculo"]
+    df_manifestos["ocupacao_entrada_perc"] = df_manifestos["ocupacao_base_antes_m6"]
+    df_manifestos["ocupacao_final_m6_2"] = df_manifestos["ocupacao_base_antes_m6"]
+    df_manifestos["peso_final_m6_2"] = df_manifestos["peso_base_antes_m6"]
+    df_manifestos["km_final_m6_2"] = df_manifestos["km_base_antes_m6"]
+    df_manifestos["qtd_itens_final_m6_2"] = df_manifestos["qtd_itens_base_antes_m6"]
+    df_manifestos["qtd_paradas_final_m6_2"] = df_manifestos["qtd_paradas_base_antes_m6"]
+    df_manifestos["flag_otimizado_m6_2"] = False
+    df_manifestos["espaco_disponivel_peso_kg_m6_2"] = (
+        df_manifestos["capacidade_peso_kg_veiculo"] - df_manifestos["peso_base_antes_m6"]
+    ).clip(lower=0.0)
+    df_manifestos["paradas_disponiveis_m6_2"] = (
+        df_manifestos["max_paradas_veiculo"] - df_manifestos["qtd_paradas_base_antes_m6"]
+    ).clip(lower=0)
+
     manifestos_alvo = _selecionar_manifestos_alvo(df_manifestos, ocupacao_alvo_perc)
 
     tentativas: List[Dict[str, Any]] = []
@@ -124,132 +144,165 @@ def executar_m6_2_complemento_ocupacao(
         manifesto = row_manifesto.iloc[0].to_dict()
         itens_manifesto_atual = df_itens.loc[df_itens["manifesto_id"] == manifesto_id].copy()
         if itens_manifesto_atual.empty:
-            tentativas.append(
-                {
-                    "manifesto_id": manifesto_id,
-                    "tipo_tentativa": "manifesto_sem_itens",
-                    "nivel_hierarquia": None,
-                    "aceito": False,
-                    "motivo": "Manifesto elegível sem itens associados.",
-                }
-            )
+            tentativas.append({
+                "manifesto_id": manifesto_id,
+                "tipo_tentativa": "manifesto_sem_itens",
+                "nivel_hierarquia": None,
+                "aceito": False,
+                "motivo": "Manifesto elegível sem itens associados.",
+            })
             continue
 
         meso_manifesto = _txt_norm(manifesto.get("mesorregiao_manifesto", ""))
         if meso_manifesto == "":
-            tentativas.append(
-                {
-                    "manifesto_id": manifesto_id,
-                    "tipo_tentativa": "manifesto_sem_mesorregiao_oficial",
-                    "nivel_hierarquia": None,
-                    "aceito": False,
-                    "motivo": "Manifesto sem mesorregião oficial vinda do M6.1.",
-                }
-            )
+            tentativas.append({
+                "manifesto_id": manifesto_id,
+                "tipo_tentativa": "manifesto_sem_mesorregiao_oficial",
+                "nivel_hierarquia": None,
+                "aceito": False,
+                "motivo": "Manifesto sem mesorregião oficial vinda do M6.1.",
+            })
             continue
 
-        rem_mesmo_meso = df_remanescente.loc[
-            df_remanescente["mesorregiao"].astype(str).str.upper() == meso_manifesto
-        ].copy()
+        houve_movimento_neste_manifesto = False
 
-        if rem_mesmo_meso.empty:
-            tentativas.append(
-                {
+        while True:
+            manifesto = df_manifestos.loc[df_manifestos["manifesto_id"] == manifesto_id].head(1).iloc[0].to_dict()
+            itens_manifesto_atual = df_itens.loc[df_itens["manifesto_id"] == manifesto_id].copy()
+
+            estado_atual = _calcular_estado_manifesto(manifesto, itens_manifesto_atual)
+
+            if estado_atual["espaco_disponivel_peso_kg"] <= 0:
+                tentativas.append({
+                    "manifesto_id": manifesto_id,
+                    "tipo_tentativa": "sem_espaco_peso",
+                    "nivel_hierarquia": None,
+                    "aceito": False,
+                    "motivo": "Manifesto sem espaço de peso disponível.",
+                })
+                break
+
+            if estado_atual["paradas_disponiveis"] <= 0:
+                tentativas.append({
+                    "manifesto_id": manifesto_id,
+                    "tipo_tentativa": "sem_paradas_disponiveis",
+                    "nivel_hierarquia": None,
+                    "aceito": False,
+                    "motivo": "Manifesto sem paradas disponíveis.",
+                })
+                break
+
+            if estado_atual["ocupacao_final_m6_2"] >= 100.0:
+                tentativas.append({
+                    "manifesto_id": manifesto_id,
+                    "tipo_tentativa": "ocupacao_ja_no_limite",
+                    "nivel_hierarquia": None,
+                    "aceito": False,
+                    "motivo": "Manifesto já atingiu limite de 100% de ocupação.",
+                })
+                break
+
+            rem_mesmo_meso = df_remanescente.loc[
+                df_remanescente["mesorregiao"].astype(str).str.upper() == meso_manifesto
+            ].copy()
+
+            if rem_mesmo_meso.empty:
+                tentativas.append({
                     "manifesto_id": manifesto_id,
                     "tipo_tentativa": "sem_remanescente_mesma_mesorregiao",
                     "nivel_hierarquia": None,
                     "aceito": False,
                     "motivo": "Não há remanescente do M5 na mesma mesorregião do manifesto.",
-                }
-            )
-            continue
+                })
+                break
 
-        houve_movimento_neste_manifesto = False
+            contexto_manifesto = {
+                "cidade_dominante": _cidade_dominante(itens_manifesto_atual),
+                "subregiao_dominante": _subregiao_dominante(itens_manifesto_atual),
+                "mesorregiao": meso_manifesto,
+            }
 
-        contexto_manifesto = {
-            "cliente_dominante": _cliente_dominante(itens_manifesto_atual),
-            "cidade_dominante": _cidade_dominante(itens_manifesto_atual),
-            "subregiao_dominante": _subregiao_dominante(itens_manifesto_atual),
-            "mesorregiao": meso_manifesto,
-        }
+            niveis_hierarquia = [
+                ("mesma_cidade", "cidade"),
+                ("mesma_subregiao", "subregiao"),
+                ("mesma_mesorregiao", "mesorregiao"),
+            ]
 
-        niveis_hierarquia = [
-            ("mesmo_cliente", "destinatario"),
-            ("mesma_cidade", "cidade"),
-            ("mesma_subregiao", "subregiao"),
-            ("mesma_mesorregiao", "mesorregiao"),
-        ]
+            aceitou_algum_item_neste_ciclo = False
 
-        for nome_nivel, coluna_nivel in niveis_hierarquia:
-            candidatos = _selecionar_candidatos_por_hierarquia(
-                rem_mesmo_meso=rem_mesmo_meso,
-                nome_nivel=nome_nivel,
-                coluna_nivel=coluna_nivel,
-                contexto_manifesto=contexto_manifesto,
-            )
+            for nome_nivel, coluna_nivel in niveis_hierarquia:
+                candidatos = _selecionar_candidatos_por_hierarquia(
+                    rem_mesmo_meso=rem_mesmo_meso,
+                    nome_nivel=nome_nivel,
+                    coluna_nivel=coluna_nivel,
+                    contexto_manifesto=contexto_manifesto,
+                )
 
-            if candidatos.empty:
-                tentativas.append(
-                    {
+                if candidatos.empty:
+                    tentativas.append({
                         "manifesto_id": manifesto_id,
                         "tipo_tentativa": "sem_candidatos_nivel",
                         "nivel_hierarquia": nome_nivel,
                         "aceito": False,
                         "motivo": f"Sem candidatos no nível {nome_nivel}.",
-                    }
-                )
-                continue
-
-            candidatos_ordenados = _ordenar_candidatos_por_prioridade_operacional(candidatos)
-
-            for _, item_row in candidatos_ordenados.iterrows():
-                item_df = pd.DataFrame([item_row.to_dict()])
-
-                valido, motivo, comparativo = _simular_adicao_item(
-                    manifesto=manifesto,
-                    itens_manifesto=itens_manifesto_atual,
-                    item_candidato=item_df,
-                )
-
-                tentativa = {
-                    "manifesto_id": manifesto_id,
-                    "tipo_tentativa": "adicao_item_remanescente_m5",
-                    "nivel_hierarquia": nome_nivel,
-                    "id_linha_pipeline": str(item_row["id_linha_pipeline"]),
-                    "destinatario": str(item_row.get("destinatario", "")),
-                    "cidade": str(item_row.get("cidade", "")),
-                    "subregiao": str(item_row.get("subregiao", "")),
-                    "mesorregiao": str(item_row.get("mesorregiao", "")),
-                    "agendada": bool(item_row.get("agendada", False)),
-                    "folga_dias": _to_float(item_row.get("folga_dias")),
-                    "aceito": bool(valido),
-                    "motivo": motivo,
-                    **comparativo,
-                }
-                tentativas.append(tentativa)
-
-                if not valido:
+                    })
                     continue
 
-                houve_movimento_neste_manifesto = True
+                candidatos_ordenados = _ordenar_candidatos_por_prioridade_operacional(candidatos)
 
-                item_aplicar = item_df.copy()
-                item_aplicar["manifesto_id"] = manifesto_id
-                item_aplicar["flag_otimizado_m6_2"] = True
-                item_aplicar["origem_item_m6_2"] = "adicionado_do_remanescente_m5"
+                for _, item_row in candidatos_ordenados.iterrows():
+                    manifesto = df_manifestos.loc[df_manifestos["manifesto_id"] == manifesto_id].head(1).iloc[0].to_dict()
+                    itens_manifesto_atual = df_itens.loc[df_itens["manifesto_id"] == manifesto_id].copy()
+                    estado_atual = _calcular_estado_manifesto(manifesto, itens_manifesto_atual)
 
-                df_itens = pd.concat([df_itens, item_aplicar], ignore_index=True)
+                    item_df = pd.DataFrame([item_row.to_dict()])
 
-                df_remanescente = df_remanescente.loc[
-                    df_remanescente["id_linha_pipeline"].astype(str) != str(item_row["id_linha_pipeline"])
-                ].copy()
+                    valido, motivo, comparativo = _simular_adicao_item_por_folga(
+                        manifesto=manifesto,
+                        itens_manifesto=itens_manifesto_atual,
+                        item_candidato=item_df,
+                        estado_atual=estado_atual,
+                    )
 
-                df_manifestos = _recalcular_manifesto_unico(df_manifestos, df_itens, manifesto_id)
-                manifesto = df_manifestos.loc[df_manifestos["manifesto_id"] == manifesto_id].head(1).iloc[0].to_dict()
-                itens_manifesto_atual = df_itens.loc[df_itens["manifesto_id"] == manifesto_id].copy()
+                    tentativa = {
+                        "manifesto_id": manifesto_id,
+                        "tipo_tentativa": "adicao_item_remanescente_m5",
+                        "nivel_hierarquia": nome_nivel,
+                        "id_linha_pipeline": str(item_row["id_linha_pipeline"]),
+                        "destinatario": str(item_row.get("destinatario", "")),
+                        "cidade": str(item_row.get("cidade", "")),
+                        "subregiao": str(item_row.get("subregiao", "")),
+                        "mesorregiao": str(item_row.get("mesorregiao", "")),
+                        "agendada": bool(item_row.get("agendada", False)),
+                        "folga_dias": _to_float(item_row.get("folga_dias")),
+                        "aceito": bool(valido),
+                        "motivo": motivo,
+                        **comparativo,
+                    }
+                    tentativas.append(tentativa)
 
-                movimentos_aceitos.append(
-                    {
+                    if not valido:
+                        continue
+
+                    # aceita item
+                    houve_movimento_neste_manifesto = True
+                    aceitou_algum_item_neste_ciclo = True
+
+                    item_aplicar = item_df.copy()
+                    item_aplicar["manifesto_id"] = manifesto_id
+                    item_aplicar["flag_otimizado_m6_2"] = True
+                    item_aplicar["origem_item_m6_2"] = "adicionado_do_remanescente_m5"
+
+                    df_itens = pd.concat([df_itens, item_aplicar], ignore_index=True)
+
+                    # remove imediatamente do remanescente
+                    df_remanescente = df_remanescente.loc[
+                        df_remanescente["id_linha_pipeline"].astype(str) != str(item_row["id_linha_pipeline"])
+                    ].copy()
+
+                    df_manifestos = _recalcular_manifesto_unico(df_manifestos, df_itens, manifesto_id)
+
+                    movimentos_aceitos.append({
                         "manifesto_id": manifesto_id,
                         "nivel_hierarquia": nome_nivel,
                         "id_linha_pipeline": str(item_row["id_linha_pipeline"]),
@@ -260,29 +313,32 @@ def executar_m6_2_complemento_ocupacao(
                         "agendada": bool(item_row.get("agendada", False)),
                         "folga_dias": _to_float(item_row.get("folga_dias")),
                         **comparativo,
-                    }
-                )
+                    })
 
-                ocupacao_depois = float(manifesto.get("ocupacao_final_m6_2", 0) or 0)
-                if ocupacao_depois >= ocupacao_alvo_perc:
+                    # segue tentando encaixar mais, sem parar cedo
                     break
 
-            manifesto_atualizado = df_manifestos.loc[df_manifestos["manifesto_id"] == manifesto_id].head(1)
-            if not manifesto_atualizado.empty:
-                ocupacao_depois = float(manifesto_atualizado.iloc[0].get("ocupacao_final_m6_2", 0) or 0)
-                if ocupacao_depois >= ocupacao_alvo_perc:
+                if aceitou_algum_item_neste_ciclo:
                     break
 
-        if not houve_movimento_neste_manifesto:
-            tentativas.append(
-                {
+            if not aceitou_algum_item_neste_ciclo:
+                tentativas.append({
                     "manifesto_id": manifesto_id,
-                    "tipo_tentativa": "sem_movimento_aceito",
+                    "tipo_tentativa": "sem_item_compativel_restante",
                     "nivel_hierarquia": None,
                     "aceito": False,
-                    "motivo": "Nenhum item do remanescente do M5 pôde ser adicionado respeitando as restrições.",
-                }
-            )
+                    "motivo": "Não há mais item compatível que caiba nas restrições restantes.",
+                })
+                break
+
+        if not houve_movimento_neste_manifesto:
+            tentativas.append({
+                "manifesto_id": manifesto_id,
+                "tipo_tentativa": "sem_movimento_aceito",
+                "nivel_hierarquia": None,
+                "aceito": False,
+                "motivo": "Nenhum item do remanescente do M5 pôde ser adicionado respeitando as restrições.",
+            })
 
     df_manifestos = _recalcular_todos_manifestos(df_manifestos, df_itens)
 
@@ -328,19 +384,12 @@ def executar_m6_2_complemento_ocupacao(
     }
 
 
-# ============================================================
+# =========================================================================================
 # NORMALIZAÇÃO
-# ============================================================
-
+# =========================================================================================
 def _normalizar_manifestos(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     _validar_colunas_minimas(out, COLS_MANIFESTOS_OBRIGATORIAS, "df_manifestos_base_m6")
-
-    out["manifesto_id"] = out["manifesto_id"].astype(str)
-    out["origem_manifesto_modulo"] = out["origem_manifesto_modulo"].astype(str)
-    out["origem_manifesto_tipo"] = out["origem_manifesto_tipo"].astype(str)
-    out["veiculo_tipo"] = out["veiculo_tipo"].astype(str)
-    out["veiculo_perfil"] = out["veiculo_perfil"].astype(str)
 
     cols_num = [
         "peso_base_antes_m6",
@@ -348,6 +397,7 @@ def _normalizar_manifestos(df: pd.DataFrame) -> pd.DataFrame:
         "ocupacao_base_antes_m6",
         "capacidade_peso_kg_veiculo",
         "max_km_distancia_veiculo",
+        "max_paradas_veiculo",
         "qtd_itens_base_antes_m6",
         "qtd_ctes_base_antes_m6",
         "qtd_paradas_base_antes_m6",
@@ -355,21 +405,11 @@ def _normalizar_manifestos(df: pd.DataFrame) -> pd.DataFrame:
     for col in cols_num:
         out[col] = pd.to_numeric(out[col], errors="coerce")
 
-    out["perfil_final_m6_2"] = out["veiculo_perfil"].replace("", np.nan).fillna(out["veiculo_tipo"])
-    out["capacidade_peso_kg"] = out["capacidade_peso_kg_veiculo"]
-    out["max_km_distancia"] = out["max_km_distancia_veiculo"]
-
-    # ocupação oficial de entrada
-    out["ocupacao_entrada_perc"] = out["ocupacao_base_antes_m6"]
-    out["ocupacao_final_m6_2"] = out["ocupacao_base_antes_m6"]
-
-    # placeholders de saída
-    out["peso_final_m6_2"] = out["peso_base_antes_m6"]
-    out["km_final_m6_2"] = out["km_base_antes_m6"]
-    out["qtd_itens_final_m6_2"] = out["qtd_itens_base_antes_m6"]
-    out["qtd_paradas_final_m6_2"] = out["qtd_paradas_base_antes_m6"]
-    out["flag_otimizado_m6_2"] = False
-    out["mesorregiao_manifesto"] = ""
+    out["manifesto_id"] = out["manifesto_id"].astype(str)
+    out["origem_manifesto_modulo"] = out["origem_manifesto_modulo"].astype(str)
+    out["origem_manifesto_tipo"] = out["origem_manifesto_tipo"].astype(str)
+    out["veiculo_tipo"] = out["veiculo_tipo"].astype(str)
+    out["veiculo_perfil"] = out["veiculo_perfil"].astype(str)
 
     return out.reset_index(drop=True)
 
@@ -380,9 +420,6 @@ def _normalizar_estatisticas_m6(df: pd.DataFrame) -> pd.DataFrame:
 
     out["manifesto_id"] = out["manifesto_id"].astype(str)
     out["mesorregiao_manifesto_m6"] = out["mesorregiao_manifesto_m6"].astype(str)
-
-    if "ocupacao_recalculada_antes_m6" in out.columns:
-        out["ocupacao_recalculada_antes_m6"] = pd.to_numeric(out["ocupacao_recalculada_antes_m6"], errors="coerce")
 
     return out.reset_index(drop=True)
 
@@ -398,14 +435,14 @@ def _normalizar_itens_manifestos(df: pd.DataFrame) -> pd.DataFrame:
     out["uf"] = out["uf"].astype(str)
     out["subregiao"] = out["subregiao"].astype(str)
     out["mesorregiao"] = out["mesorregiao"].astype(str)
-    out["restricao_veiculo"] = out["restricao_veiculo"].astype(str) if "restricao_veiculo" in out.columns else ""
 
     cols_num = ["distancia_rodoviaria_est_km", "peso_calculado", "peso_kg", "vol_m3"]
     for col in cols_num:
-        if col in out.columns:
-            out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0)
-        else:
-            out[col] = 0.0
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0)
+
+    if "restricao_veiculo" not in out.columns:
+        out["restricao_veiculo"] = ""
+    out["restricao_veiculo"] = out["restricao_veiculo"].fillna("").astype(str)
 
     return out.reset_index(drop=True)
 
@@ -421,18 +458,13 @@ def _normalizar_remanescente(df: pd.DataFrame) -> pd.DataFrame:
     out["subregiao"] = out["subregiao"].astype(str)
     out["mesorregiao"] = out["mesorregiao"].astype(str)
 
-    cols_num = ["distancia_rodoviaria_est_km", "peso_calculado", "vol_m3"]
+    cols_num = ["distancia_rodoviaria_est_km", "peso_calculado", "peso_kg", "vol_m3"]
     for col in cols_num:
         out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0)
 
-    if "peso_kg" in out.columns:
-        out["peso_kg"] = pd.to_numeric(out["peso_kg"], errors="coerce").fillna(0)
-    else:
-        out["peso_kg"] = 0.0
-
     if "restricao_veiculo" not in out.columns:
         out["restricao_veiculo"] = ""
-    out["restricao_veiculo"] = out["restricao_veiculo"].astype(str)
+    out["restricao_veiculo"] = out["restricao_veiculo"].fillna("").astype(str)
 
     if "agendada" not in out.columns:
         out["agendada"] = False
@@ -444,10 +476,6 @@ def _normalizar_remanescente(df: pd.DataFrame) -> pd.DataFrame:
 
     return out.reset_index(drop=True)
 
-
-# ============================================================
-# VALIDAÇÃO DE CONTRATO
-# ============================================================
 
 def _validar_colunas_minimas(df: pd.DataFrame, cols: List[str], nome_df: str) -> None:
     faltando = [c for c in cols if c not in df.columns]
@@ -475,7 +503,6 @@ def _validar_entrada(
         raise Exception("M6.2 recebeu duplicidade de id_linha_pipeline no remanescente do M5.")
 
     if df_estats["manifesto_id"].duplicated().any():
-        # Se houver mais de uma linha por manifesto, a base estatística está ambígua para este uso
         raise Exception("M6.2 recebeu df_estatisticas_manifestos_antes_m6 com manifesto_id duplicado.")
 
 
@@ -493,24 +520,16 @@ def _enriquecer_manifestos_com_estatisticas(
     return out
 
 
-# ============================================================
+# =========================================================================================
 # LÓGICA DE NEGÓCIO
-# ============================================================
-
+# =========================================================================================
 def _selecionar_manifestos_alvo(df_manifestos: pd.DataFrame, ocupacao_alvo_perc: float) -> List[str]:
     base = df_manifestos.copy()
-    base["ocupacao_entrada_perc"] = pd.to_numeric(base["ocupacao_entrada_perc"], errors="coerce")
-    base = base.loc[base["ocupacao_entrada_perc"].notna()].copy()
-    base = base.loc[base["ocupacao_entrada_perc"] < ocupacao_alvo_perc].copy()
-    base = base.sort_values(by=["ocupacao_entrada_perc", "qtd_paradas_base_antes_m6"], ascending=[True, True])
+    base["ocupacao_base_antes_m6"] = pd.to_numeric(base["ocupacao_base_antes_m6"], errors="coerce")
+    base = base.loc[base["ocupacao_base_antes_m6"].notna()].copy()
+    base = base.loc[base["ocupacao_base_antes_m6"] < ocupacao_alvo_perc].copy()
+    base = base.sort_values(by=["ocupacao_base_antes_m6", "peso_base_antes_m6"], ascending=[True, False])
     return base["manifesto_id"].astype(str).tolist()
-
-
-def _cliente_dominante(df_itens_manifesto: pd.DataFrame) -> str:
-    if df_itens_manifesto.empty:
-        return ""
-    vc = df_itens_manifesto["destinatario"].astype(str).str.strip().value_counts()
-    return str(vc.index[0]).strip() if len(vc) > 0 else ""
 
 
 def _cidade_dominante(df_itens_manifesto: pd.DataFrame) -> str:
@@ -536,12 +555,6 @@ def _selecionar_candidatos_por_hierarquia(
     base = rem_mesmo_meso.copy()
     if base.empty:
         return base
-
-    if nome_nivel == "mesmo_cliente":
-        alvo = _txt_norm(contexto_manifesto.get("cliente_dominante", ""))
-        if alvo == "":
-            return pd.DataFrame()
-        return base.loc[base["destinatario"].astype(str).str.upper() == alvo].copy()
 
     if nome_nivel == "mesma_cidade":
         alvo = _txt_norm(contexto_manifesto.get("cidade_dominante", ""))
@@ -595,99 +608,94 @@ def _ordenar_candidatos_por_prioridade_operacional(df: pd.DataFrame) -> pd.DataF
     return out
 
 
-def _simular_adicao_item(
+def _calcular_estado_manifesto(
     manifesto: Dict[str, Any],
-    itens_manifesto: pd.DataFrame,
-    item_candidato: pd.DataFrame,
-) -> Tuple[bool, str, Dict[str, Any]]:
-    antes = _calcular_metricas_manifesto(manifesto, itens_manifesto)
-    depois_df = pd.concat([itens_manifesto, item_candidato], ignore_index=True)
-    depois = _calcular_metricas_manifesto(manifesto, depois_df)
+    df_itens_manifesto: pd.DataFrame,
+) -> Dict[str, Any]:
+    capacidade_peso = _to_float(manifesto.get("capacidade_peso_kg_veiculo"), default=0.0)
+    max_paradas = _to_int(manifesto.get("max_paradas_veiculo"), default=0)
 
-    comparativo = {
-        "ocupacao_antes_perc": round(float(antes["ocupacao_final_m6_2"]), 4),
-        "ocupacao_depois_perc": round(float(depois["ocupacao_final_m6_2"]), 4),
-        "ganho_ocupacao_perc": round(float(depois["ocupacao_final_m6_2"] - antes["ocupacao_final_m6_2"]), 4),
-        "distancia_antes_km": round(float(antes["km_final_m6_2"]), 4),
-        "distancia_depois_km": round(float(depois["km_final_m6_2"]), 4),
-        "delta_distancia_km": round(float(depois["km_final_m6_2"] - antes["km_final_m6_2"]), 4),
-        "qtd_paradas_antes": int(antes["qtd_paradas_final_m6_2"]),
-        "qtd_paradas_depois": int(depois["qtd_paradas_final_m6_2"]),
-    }
+    peso_total = float(pd.to_numeric(df_itens_manifesto["peso_calculado"], errors="coerce").fillna(0).sum())
+    km_atual = float(pd.to_numeric(df_itens_manifesto["distancia_rodoviaria_est_km"], errors="coerce").fillna(0).max())
+    qtd_itens = int(len(df_itens_manifesto))
+    qtd_paradas = int(_contar_entregas(df_itens_manifesto))
+    ocupacao = (peso_total / capacidade_peso * 100.0) if capacidade_peso > 0 else 0.0
 
-    restricoes = _validar_restricoes_manifesto(manifesto, depois_df)
-    if restricoes is not True:
-        return False, str(restricoes), comparativo
-
-    if depois["ocupacao_final_m6_2"] <= antes["ocupacao_final_m6_2"]:
-        return False, "A adição do item não melhora a ocupação do manifesto.", comparativo
-
-    if depois["km_final_m6_2"] > antes["km_final_m6_2"]:
-        return False, "A adição do item piora a distância máxima do manifesto.", comparativo
-
-    ocup_max = _to_float(manifesto.get("ocupacao_maxima_perc"))
-    if ocup_max is not None and depois["ocupacao_final_m6_2"] > ocup_max:
-        return False, "A adição do item ultrapassa a ocupação máxima do manifesto.", comparativo
-
-    return True, "Item aceito no complemento de ocupação.", comparativo
-
-
-def _calcular_metricas_manifesto(manifesto: Dict[str, Any], df_itens: pd.DataFrame) -> Dict[str, Any]:
-    capacidade_peso = _to_float(manifesto.get("capacidade_peso_kg"))
-    if capacidade_peso is None or capacidade_peso <= 0:
-        raise Exception(f"M6.2 encontrou manifesto sem capacidade_peso_kg válida: {manifesto.get('manifesto_id')}")
-
-    peso_total = float(pd.to_numeric(df_itens["peso_calculado"], errors="coerce").fillna(0).sum())
-    vol_total = float(pd.to_numeric(df_itens["vol_m3"], errors="coerce").fillna(0).sum())
-    distancia_total = float(pd.to_numeric(df_itens["distancia_rodoviaria_est_km"], errors="coerce").fillna(0).max())
-    qtd_itens = int(len(df_itens))
-    qtd_paradas = int(_contar_entregas(df_itens))
-
-    ocupacao = (peso_total / capacidade_peso) * 100.0
+    espaco_disponivel_peso_kg = max(capacidade_peso - peso_total, 0.0)
+    paradas_disponiveis = max(max_paradas - qtd_paradas, 0)
 
     return {
-        "peso_final_m6_2": peso_total,
-        "vol_total_m3": vol_total,
-        "km_final_m6_2": distancia_total,
+        "peso_total_kg": peso_total,
+        "km_final_m6_2": km_atual,
         "qtd_itens_final_m6_2": qtd_itens,
         "qtd_paradas_final_m6_2": qtd_paradas,
         "ocupacao_final_m6_2": ocupacao,
+        "espaco_disponivel_peso_kg": espaco_disponivel_peso_kg,
+        "paradas_disponiveis": paradas_disponiveis,
     }
 
 
-def _validar_restricoes_manifesto(manifesto: Dict[str, Any], df_itens: pd.DataFrame) -> bool | str:
-    metricas = _calcular_metricas_manifesto(manifesto, df_itens)
+def _simular_adicao_item_por_folga(
+    manifesto: Dict[str, Any],
+    itens_manifesto: pd.DataFrame,
+    item_candidato: pd.DataFrame,
+    estado_atual: Dict[str, Any],
+) -> Tuple[bool, str, Dict[str, Any]]:
+    item = item_candidato.iloc[0].to_dict()
 
-    capacidade_peso = _to_float(manifesto.get("capacidade_peso_kg"))
-    max_km = _to_float(manifesto.get("max_km_distancia"))
-    max_entregas = _to_int(manifesto.get("qtd_paradas_base_antes_m6"))  # fallback auditável; não trava se não existir
-    meso_manifesto = _txt_norm(manifesto.get("mesorregiao_manifesto", ""))
+    peso_item = _to_float(item.get("peso_calculado"), default=0.0) or 0.0
+    km_item = _to_float(item.get("distancia_rodoviaria_est_km"), default=0.0) or 0.0
+    max_km_veiculo = _to_float(manifesto.get("max_km_distancia_veiculo"), default=0.0) or 0.0
     perfil_manifesto = _txt_norm(manifesto.get("perfil_final_m6_2", ""))
+    meso_manifesto = _txt_norm(manifesto.get("mesorregiao_manifesto", ""))
 
-    if capacidade_peso is not None and metricas["peso_final_m6_2"] > capacidade_peso:
-        return "Excede capacidade de peso."
+    qtd_paradas_antes = int(estado_atual["qtd_paradas_final_m6_2"])
+    ocupacao_antes = float(estado_atual["ocupacao_final_m6_2"])
+    km_antes = float(estado_atual["km_final_m6_2"])
 
-    if max_km is not None and metricas["km_final_m6_2"] > max_km:
-        return "Excede raio/distância máxima."
+    itens_depois = pd.concat([itens_manifesto, item_candidato], ignore_index=True)
+    estado_depois = _calcular_estado_manifesto(manifesto, itens_depois)
 
-    if max_entregas is not None and metricas["qtd_paradas_final_m6_2"] > max_entregas:
-        return "Excede máximo de paradas do manifesto."
+    comparativo = {
+        "ocupacao_antes_perc": round(ocupacao_antes, 4),
+        "ocupacao_depois_perc": round(float(estado_depois["ocupacao_final_m6_2"]), 4),
+        "ganho_ocupacao_perc": round(float(estado_depois["ocupacao_final_m6_2"] - ocupacao_antes), 4),
+        "distancia_antes_km": round(km_antes, 4),
+        "distancia_depois_km": round(float(estado_depois["km_final_m6_2"]), 4),
+        "delta_distancia_km": round(float(estado_depois["km_final_m6_2"] - km_antes), 4),
+        "qtd_paradas_antes": qtd_paradas_antes,
+        "qtd_paradas_depois": int(estado_depois["qtd_paradas_final_m6_2"]),
+        "espaco_disponivel_antes_kg": round(float(estado_atual["espaco_disponivel_peso_kg"]), 4),
+        "espaco_disponivel_depois_kg": round(float(estado_depois["espaco_disponivel_peso_kg"]), 4),
+    }
 
-    mesorregioes = set(df_itens["mesorregiao"].astype(str).str.strip().str.upper().tolist())
-    mesorregioes.discard("")
-    if len(mesorregioes) > 1:
-        return "Mistura mais de uma mesorregião no manifesto."
-    if len(mesorregioes) == 1 and list(mesorregioes)[0] != meso_manifesto:
-        return "Item do remanescente está em mesorregião diferente do manifesto."
+    if peso_item <= 0:
+        return False, "Item com peso_calculado inválido.", comparativo
 
-    restricoes = set(df_itens["restricao_veiculo"].astype(str).str.strip().str.upper().tolist())
-    restricoes.discard("")
-    if len(restricoes) > 1:
-        return "Itens com restrições de veículo conflitantes."
-    if len(restricoes) == 1 and perfil_manifesto != "" and list(restricoes)[0] != perfil_manifesto:
-        return "Restrição de veículo do item é incompatível com o perfil do manifesto."
+    if peso_item > float(estado_atual["espaco_disponivel_peso_kg"]):
+        return False, "Item não cabe no espaço disponível em peso.", comparativo
 
-    return True
+    # raio seco por item versus restrição do perfil
+    if max_km_veiculo > 0 and km_item > max_km_veiculo:
+        return False, "Item excede o raio máximo do perfil do veículo.", comparativo
+
+    if estado_depois["qtd_paradas_final_m6_2"] > _to_int(manifesto.get("max_paradas_veiculo"), default=0):
+        return False, "Item excede o limite de paradas do veículo.", comparativo
+
+    if _txt_norm(item.get("mesorregiao", "")) != meso_manifesto:
+        return False, "Item está em mesorregião diferente do manifesto.", comparativo
+
+    restricao_item = _txt_norm(item.get("restricao_veiculo", ""))
+    if restricao_item != "" and perfil_manifesto != "" and restricao_item != perfil_manifesto:
+        return False, "Restrição de veículo do item é incompatível com o perfil do manifesto.", comparativo
+
+    if float(estado_depois["ocupacao_final_m6_2"]) > 100.0:
+        return False, "Item faria o manifesto ultrapassar 100% de ocupação.", comparativo
+
+    if float(estado_depois["ocupacao_final_m6_2"]) <= ocupacao_antes:
+        return False, "Item não melhora a ocupação do manifesto.", comparativo
+
+    return True, "Item aceito no complemento de ocupação.", comparativo
 
 
 def _recalcular_manifesto_unico(
@@ -703,16 +711,20 @@ def _recalcular_manifesto_unico(
     i = idx[0]
     manifesto = out.loc[i].to_dict()
     itens = df_itens.loc[df_itens["manifesto_id"].astype(str) == str(manifesto_id)].copy()
-    metricas = _calcular_metricas_manifesto(manifesto, itens)
 
-    out.loc[i, "peso_final_m6_2"] = metricas["peso_final_m6_2"]
-    out.loc[i, "km_final_m6_2"] = metricas["km_final_m6_2"]
-    out.loc[i, "qtd_itens_final_m6_2"] = metricas["qtd_itens_final_m6_2"]
-    out.loc[i, "qtd_paradas_final_m6_2"] = metricas["qtd_paradas_final_m6_2"]
-    out.loc[i, "ocupacao_final_m6_2"] = metricas["ocupacao_final_m6_2"]
+    estado = _calcular_estado_manifesto(manifesto, itens)
+
+    out.loc[i, "peso_final_m6_2"] = estado["peso_total_kg"]
+    out.loc[i, "km_final_m6_2"] = estado["km_final_m6_2"]
+    out.loc[i, "qtd_itens_final_m6_2"] = estado["qtd_itens_final_m6_2"]
+    out.loc[i, "qtd_paradas_final_m6_2"] = estado["qtd_paradas_final_m6_2"]
+    out.loc[i, "ocupacao_final_m6_2"] = estado["ocupacao_final_m6_2"]
+    out.loc[i, "espaco_disponivel_peso_kg_m6_2"] = estado["espaco_disponivel_peso_kg"]
+    out.loc[i, "paradas_disponiveis_m6_2"] = estado["paradas_disponiveis"]
     out.loc[i, "flag_otimizado_m6_2"] = bool(
-        metricas["qtd_itens_final_m6_2"] > _to_int(out.loc[i, "qtd_itens_base_antes_m6"], default=0)
+        estado["qtd_itens_final_m6_2"] > _to_int(out.loc[i, "qtd_itens_base_antes_m6"], default=0)
     )
+
     return out
 
 
@@ -723,10 +735,9 @@ def _recalcular_todos_manifestos(df_manifestos: pd.DataFrame, df_itens: pd.DataF
     return out.reset_index(drop=True)
 
 
-# ============================================================
+# =========================================================================================
 # INTEGRIDADE
-# ============================================================
-
+# =========================================================================================
 def _validar_integridade_final(
     df_itens_manifestos_final: pd.DataFrame,
     df_remanescente_final: pd.DataFrame,
@@ -761,10 +772,9 @@ def _validar_integridade_final(
         )
 
 
-# ============================================================
+# =========================================================================================
 # HELPERS
-# ============================================================
-
+# =========================================================================================
 def _to_bool(valor: Any) -> bool:
     if isinstance(valor, bool):
         return valor
