@@ -21,6 +21,7 @@ MESORREGIAO_ALIASES = [
     "mesorregiao",
     "mesorregiao_destino",
     "mesoregiao",
+    "mesorregiao",
 ]
 
 SUBREGIAO_ALIASES = [
@@ -28,35 +29,41 @@ SUBREGIAO_ALIASES = [
     "subregiao",
     "sub_regiao",
     "subregiao_destino",
+    "subregiao",
 ]
 
 PERFIL_ALIASES = [
+    "veiculo_perfil",
+    "veiculo_tipo",
     "perfil_veiculo",
     "perfil",
     "tipo_veiculo",
-    "veiculo_perfil",
     "veiculo",
 ]
 
 CAP_PESO_ALIASES = [
+    "capacidade_peso_kg_veiculo",
     "capacidade_peso_kg",
     "cap_peso_kg",
     "peso_capacidade_kg",
 ]
 
 CAP_VOL_ALIASES = [
+    "capacidade_vol_m3_veiculo",
     "capacidade_vol_m3",
     "cap_vol_m3",
     "volume_capacidade_m3",
 ]
 
 MAX_ENTREGAS_ALIASES = [
+    "max_entregas_veiculo",
     "max_entregas",
     "maximo_entregas",
     "limite_entregas",
 ]
 
 MAX_KM_ALIASES = [
+    "max_km_distancia_veiculo",
     "max_km_distancia",
     "max_km",
     "raio_max_km",
@@ -74,6 +81,7 @@ OCUP_MAX_ALIASES = [
 ]
 
 OCUP_DOMINANTE_ALIASES = [
+    "ocupacao_base_antes_m6",
     "ocupacao_dominante_perc",
     "ocupacao_perc",
     "ocupacao",
@@ -345,6 +353,7 @@ def executar_m6_2_complemento_ocupacao(
             "folga_negativa_por_ultimo",
             "nao_mexe_nos_demais_manifestos",
             "nao_gera_duplicidade",
+            "ocupacao_calculada_por_peso_calculado_dividido_pela_capacidade_do_veiculo",
         ],
         "caminhos_pipeline": caminhos_pipeline or {},
     }
@@ -369,13 +378,44 @@ def _normalizar_manifestos(df: pd.DataFrame) -> pd.DataFrame:
     out["manifesto_id"] = _resolver_coluna(out, MANIFESTO_ID_ALIASES, obrigatoria=True).astype(str)
     out["mesorregiao_operacional"] = _resolver_coluna(out, MESORREGIAO_ALIASES, obrigatoria=False, default="").astype(str)
     out["perfil"] = _resolver_coluna(out, PERFIL_ALIASES, obrigatoria=False, default="").astype(str)
-    out["capacidade_peso_kg"] = pd.to_numeric(_resolver_coluna(out, CAP_PESO_ALIASES, obrigatoria=False, default=np.nan), errors="coerce")
-    out["capacidade_vol_m3"] = pd.to_numeric(_resolver_coluna(out, CAP_VOL_ALIASES, obrigatoria=False, default=np.nan), errors="coerce")
-    out["max_entregas"] = pd.to_numeric(_resolver_coluna(out, MAX_ENTREGAS_ALIASES, obrigatoria=False, default=np.nan), errors="coerce")
-    out["max_km_distancia"] = pd.to_numeric(_resolver_coluna(out, MAX_KM_ALIASES, obrigatoria=False, default=np.nan), errors="coerce")
-    out["ocupacao_minima_perc"] = pd.to_numeric(_resolver_coluna(out, OCUP_MIN_ALIASES, obrigatoria=False, default=70), errors="coerce").fillna(70)
-    out["ocupacao_maxima_perc"] = pd.to_numeric(_resolver_coluna(out, OCUP_MAX_ALIASES, obrigatoria=False, default=100), errors="coerce").fillna(100)
-    out["ocupacao_dominante_perc"] = pd.to_numeric(_resolver_coluna(out, OCUP_DOMINANTE_ALIASES, obrigatoria=False, default=np.nan), errors="coerce")
+
+    out["capacidade_peso_kg"] = pd.to_numeric(
+        _resolver_coluna(out, CAP_PESO_ALIASES, obrigatoria=False, default=np.nan),
+        errors="coerce",
+    )
+    out["capacidade_vol_m3"] = pd.to_numeric(
+        _resolver_coluna(out, CAP_VOL_ALIASES, obrigatoria=False, default=np.nan),
+        errors="coerce",
+    )
+    out["max_entregas"] = pd.to_numeric(
+        _resolver_coluna(out, MAX_ENTREGAS_ALIASES, obrigatoria=False, default=np.nan),
+        errors="coerce",
+    )
+    out["max_km_distancia"] = pd.to_numeric(
+        _resolver_coluna(out, MAX_KM_ALIASES, obrigatoria=False, default=np.nan),
+        errors="coerce",
+    )
+    out["ocupacao_minima_perc"] = pd.to_numeric(
+        _resolver_coluna(out, OCUP_MIN_ALIASES, obrigatoria=False, default=70),
+        errors="coerce",
+    ).fillna(70)
+    out["ocupacao_maxima_perc"] = pd.to_numeric(
+        _resolver_coluna(out, OCUP_MAX_ALIASES, obrigatoria=False, default=100),
+        errors="coerce",
+    ).fillna(100)
+    out["ocupacao_dominante_perc"] = pd.to_numeric(
+        _resolver_coluna(out, OCUP_DOMINANTE_ALIASES, obrigatoria=False, default=np.nan),
+        errors="coerce",
+    )
+
+    # fallback para campos já existentes no M6.1
+    if "veiculo_tipo" in out.columns:
+        out["perfil"] = out["perfil"].replace("", np.nan)
+        out["perfil"] = out["perfil"].fillna(out["veiculo_tipo"].astype(str))
+
+    if "veiculo_perfil" in out.columns:
+        out["perfil"] = out["perfil"].replace("", np.nan)
+        out["perfil"] = out["perfil"].fillna(out["veiculo_perfil"].astype(str))
 
     if "qtd_entregas" not in out.columns:
         out["qtd_entregas"] = np.nan
@@ -385,6 +425,10 @@ def _normalizar_manifestos(df: pd.DataFrame) -> pd.DataFrame:
         out["ocupacao_peso_perc"] = np.nan
     if "ocupacao_vol_perc" not in out.columns:
         out["ocupacao_vol_perc"] = np.nan
+    if "peso_total_kg" not in out.columns:
+        out["peso_total_kg"] = np.nan
+    if "vol_total_m3" not in out.columns:
+        out["vol_total_m3"] = np.nan
 
     return out.reset_index(drop=True)
 
@@ -404,12 +448,40 @@ def _normalizar_itens_manifestos(df: pd.DataFrame) -> pd.DataFrame:
     out["destinatario"] = _resolver_coluna(out, CLIENTE_ALIASES, obrigatoria=False, default="").astype(str)
     out["cidade"] = _resolver_coluna(out, CIDADE_ALIASES, obrigatoria=False, default="").astype(str)
     out["uf"] = _resolver_coluna(out, UF_ALIASES, obrigatoria=False, default="").astype(str)
-    out["peso_calculado"] = pd.to_numeric(_resolver_coluna(out, PESO_ITEM_ALIASES, obrigatoria=True), errors="coerce").fillna(0)
-    out["vol_m3"] = pd.to_numeric(_resolver_coluna(out, VOL_ITEM_ALIASES, obrigatoria=False, default=0), errors="coerce").fillna(0)
-    out["distancia_rodoviaria_est_km"] = pd.to_numeric(_resolver_coluna(out, DISTANCIA_ALIASES, obrigatoria=False, default=0), errors="coerce").fillna(0)
-    out["restricao_veiculo"] = _resolver_coluna(out, RESTRICAO_VEICULO_ALIASES, obrigatoria=False, default="").astype(str)
-    out["agendada"] = _normalizar_flag_agendada(_resolver_coluna(out, AGENDADO_ALIASES, obrigatoria=False, default=False))
-    out["folga_dias"] = pd.to_numeric(_resolver_coluna(out, FOLGA_ALIASES, obrigatoria=False, default=np.nan), errors="coerce")
+    out["peso_calculado"] = pd.to_numeric(
+        _resolver_coluna(out, PESO_ITEM_ALIASES, obrigatoria=True),
+        errors="coerce",
+    ).fillna(0)
+    out["vol_m3"] = pd.to_numeric(
+        _resolver_coluna(out, VOL_ITEM_ALIASES, obrigatoria=False, default=0),
+        errors="coerce",
+    ).fillna(0)
+    out["distancia_rodoviaria_est_km"] = pd.to_numeric(
+        _resolver_coluna(out, DISTANCIA_ALIASES, obrigatoria=False, default=0),
+        errors="coerce",
+    ).fillna(0)
+    out["restricao_veiculo"] = _resolver_coluna(
+        out,
+        RESTRICAO_VEICULO_ALIASES,
+        obrigatoria=False,
+        default="",
+    ).astype(str)
+    out["agendada"] = _normalizar_flag_agendada(
+        _resolver_coluna(out, AGENDADO_ALIASES, obrigatoria=False, default=False)
+    )
+    out["folga_dias"] = pd.to_numeric(
+        _resolver_coluna(out, FOLGA_ALIASES, obrigatoria=False, default=np.nan),
+        errors="coerce",
+    )
+
+    # fallback dos nomes originais
+    if "subregiao" in out.columns:
+        out["subregiao_operacional"] = out["subregiao_operacional"].replace("", np.nan)
+        out["subregiao_operacional"] = out["subregiao_operacional"].fillna(out["subregiao"].astype(str))
+
+    if "mesorregiao" in out.columns:
+        out["mesorregiao_operacional"] = out["mesorregiao_operacional"].replace("", np.nan)
+        out["mesorregiao_operacional"] = out["mesorregiao_operacional"].fillna(out["mesorregiao"].astype(str))
 
     return out.reset_index(drop=True)
 
@@ -427,12 +499,39 @@ def _normalizar_itens_remanescente(df: pd.DataFrame) -> pd.DataFrame:
     out["destinatario"] = _resolver_coluna(out, CLIENTE_ALIASES, obrigatoria=False, default="").astype(str)
     out["cidade"] = _resolver_coluna(out, CIDADE_ALIASES, obrigatoria=False, default="").astype(str)
     out["uf"] = _resolver_coluna(out, UF_ALIASES, obrigatoria=False, default="").astype(str)
-    out["peso_calculado"] = pd.to_numeric(_resolver_coluna(out, PESO_ITEM_ALIASES, obrigatoria=True), errors="coerce").fillna(0)
-    out["vol_m3"] = pd.to_numeric(_resolver_coluna(out, VOL_ITEM_ALIASES, obrigatoria=False, default=0), errors="coerce").fillna(0)
-    out["distancia_rodoviaria_est_km"] = pd.to_numeric(_resolver_coluna(out, DISTANCIA_ALIASES, obrigatoria=False, default=0), errors="coerce").fillna(0)
-    out["restricao_veiculo"] = _resolver_coluna(out, RESTRICAO_VEICULO_ALIASES, obrigatoria=False, default="").astype(str)
-    out["agendada"] = _normalizar_flag_agendada(_resolver_coluna(out, AGENDADO_ALIASES, obrigatoria=False, default=False))
-    out["folga_dias"] = pd.to_numeric(_resolver_coluna(out, FOLGA_ALIASES, obrigatoria=False, default=np.nan), errors="coerce")
+    out["peso_calculado"] = pd.to_numeric(
+        _resolver_coluna(out, PESO_ITEM_ALIASES, obrigatoria=True),
+        errors="coerce",
+    ).fillna(0)
+    out["vol_m3"] = pd.to_numeric(
+        _resolver_coluna(out, VOL_ITEM_ALIASES, obrigatoria=False, default=0),
+        errors="coerce",
+    ).fillna(0)
+    out["distancia_rodoviaria_est_km"] = pd.to_numeric(
+        _resolver_coluna(out, DISTANCIA_ALIASES, obrigatoria=False, default=0),
+        errors="coerce",
+    ).fillna(0)
+    out["restricao_veiculo"] = _resolver_coluna(
+        out,
+        RESTRICAO_VEICULO_ALIASES,
+        obrigatoria=False,
+        default="",
+    ).astype(str)
+    out["agendada"] = _normalizar_flag_agendada(
+        _resolver_coluna(out, AGENDADO_ALIASES, obrigatoria=False, default=False)
+    )
+    out["folga_dias"] = pd.to_numeric(
+        _resolver_coluna(out, FOLGA_ALIASES, obrigatoria=False, default=np.nan),
+        errors="coerce",
+    )
+
+    if "subregiao" in out.columns:
+        out["subregiao_operacional"] = out["subregiao_operacional"].replace("", np.nan)
+        out["subregiao_operacional"] = out["subregiao_operacional"].fillna(out["subregiao"].astype(str))
+
+    if "mesorregiao" in out.columns:
+        out["mesorregiao_operacional"] = out["mesorregiao_operacional"].replace("", np.nan)
+        out["mesorregiao_operacional"] = out["mesorregiao_operacional"].fillna(out["mesorregiao"].astype(str))
 
     return out.reset_index(drop=True)
 
@@ -543,10 +642,6 @@ def _ordenar_candidatos_por_prioridade_operacional(df: pd.DataFrame) -> pd.DataF
 
     out["ord_agendada"] = np.where(out["agendada"] == True, 0, 1)
     out["ord_grupo_folga"] = out["folga_dias"].apply(_grupo_folga)
-
-    # positiva menor -> maior
-    # negativa por último
-    # NaN vai no final também
     out["ord_folga"] = out["folga_dias"].fillna(999999)
 
     out = out.sort_values(
@@ -704,7 +799,16 @@ def _recalcular_manifesto_unico(
     if pd.notna(metricas["ocupacao_vol_perc"]):
         out.loc[i, "ocupacao_vol_perc"] = metricas["ocupacao_vol_perc"]
 
-    out.loc[i, "ocupacao_dominante_perc"] = metricas["ocupacao_dominante_perc"]
+    ocupacao_anterior = _to_float(out.loc[i, "ocupacao_dominante_perc"])
+    if (
+        pd.isna(metricas["ocupacao_peso_perc"])
+        and pd.isna(metricas["ocupacao_vol_perc"])
+        and ocupacao_anterior is not None
+    ):
+        out.loc[i, "ocupacao_dominante_perc"] = ocupacao_anterior
+    else:
+        out.loc[i, "ocupacao_dominante_perc"] = metricas["ocupacao_dominante_perc"]
+
     return out
 
 
