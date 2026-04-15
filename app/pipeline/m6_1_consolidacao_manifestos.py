@@ -112,11 +112,13 @@ def _col_veiculo_tipo(df: pd.DataFrame) -> str:
 
 
 def _col_veiculo_perfil(df: pd.DataFrame) -> str:
+    # Perfil separado é desejável, mas não obrigatório.
+    # Se não vier, usamos veiculo_tipo como fallback seguro.
     return _resolver_coluna_existente(
         df,
         ["veiculo_perfil", "perfil"],
         "veiculo_perfil",
-        obrigatoria=True,
+        obrigatoria=False,
     )
 
 
@@ -148,8 +150,6 @@ def _col_ocupacao_manifesto(df: pd.DataFrame) -> str:
 
 
 def _col_max_paradas_manifesto(df: pd.DataFrame) -> str:
-    # Lista controlada e curta.
-    # Se nenhuma existir, o contrato anterior está incompleto e o M6.1 deve falhar.
     return _resolver_coluna_existente(
         df,
         [
@@ -186,7 +186,6 @@ def _padronizar_manifestos(
     colunas_minimas = [
         "manifesto_id",
         col_tipo,
-        col_perfil,
         col_km,
         col_peso,
         col_ocup,
@@ -199,12 +198,17 @@ def _padronizar_manifestos(
     ]
     df = _garantir_colunas(df, colunas_minimas)
 
+    if col_perfil == "":
+        serie_perfil = df[col_tipo]
+    else:
+        serie_perfil = df[col_perfil].replace("", pd.NA).fillna(df[col_tipo])
+
     out = pd.DataFrame({
         "manifesto_id": df["manifesto_id"].astype(str),
         "origem_manifesto_modulo": origem_modulo,
         "origem_manifesto_tipo": tipo_manifesto_origem,
         "veiculo_tipo": df[col_tipo].astype(str),
-        "veiculo_perfil": df[col_perfil].astype(str),
+        "veiculo_perfil": serie_perfil.astype(str),
         "peso_base_antes_m6": pd.to_numeric(df[col_peso], errors="coerce").fillna(0.0),
         "km_base_antes_m6": pd.to_numeric(df[col_km], errors="coerce").fillna(0.0),
         "ocupacao_base_antes_m6": pd.to_numeric(df[col_ocup], errors="coerce").fillna(0.0),
@@ -218,12 +222,18 @@ def _padronizar_manifestos(
 
     out["manifesto_id"] = out["manifesto_id"].fillna("").astype(str).str.strip()
     out["veiculo_tipo"] = out["veiculo_tipo"].fillna("").astype(str).str.strip()
-    out["veiculo_perfil"] = out["veiculo_perfil"].fillna("").astype(str).str.strip()
+    out["veiculo_perfil"] = (
+        out["veiculo_perfil"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .replace("", pd.NA)
+        .fillna(out["veiculo_tipo"])
+    )
 
     out = out[out["manifesto_id"] != ""].copy()
     out = out.drop_duplicates(subset=["manifesto_id"], keep="first").reset_index(drop=True)
 
-    # validações contratuais duras
     if (out["capacidade_peso_kg_veiculo"] <= 0).any():
         manifestos_invalidos = out.loc[out["capacidade_peso_kg_veiculo"] <= 0, "manifesto_id"].astype(str).tolist()[:20]
         raise Exception(
@@ -395,8 +405,6 @@ def _estatisticas_manifestos_antes(
 
 # =========================================================================================
 # SCORE DE CRITICIDADE
-# PRIORIDADE = MELHORAR OCUPAÇÃO
-# km entra como apoio secundário
 # =========================================================================================
 def _aplicar_score_criticidade_por_mesorregiao(
     df_estatisticas_manifestos_antes_m6: pd.DataFrame,
@@ -469,7 +477,6 @@ def _aplicar_score_criticidade_por_mesorregiao(
 
 # =========================================================================================
 # GERAÇÃO DE PARES ELEGÍVEIS
-# MANTIDO PARA AUDITORIA / COMPATIBILIDADE
 # =========================================================================================
 def _par_elegivel_por_faixa(r1: pd.Series, r2: pd.Series) -> Tuple[bool, str]:
     meso_1 = _safe_text(r1.get("mesorregiao_manifesto_m6"))
@@ -718,6 +725,7 @@ def executar_m6_1_consolidacao_manifestos(
             "consolidacao_multiorigem_manifestos",
             "padronizacao_itens_e_manifestos",
             "contrato_com_max_paradas_veiculo",
+            "fallback_veiculo_perfil_para_veiculo_tipo",
             "estatistica_antes_da_otimizacao",
             "score_criticidade_com_prioridade_ocupacao",
             "pares_somente_dentro_da_mesma_mesorregiao",
@@ -778,7 +786,6 @@ def executar_m6_1_consolidacao_manifestos(
     return outputs, meta
 
 
-# Aliases defensivos
 def executar_m6_consolidacao_manifestos(*args: Any, **kwargs: Any):
     return executar_m6_1_consolidacao_manifestos(*args, **kwargs)
 
