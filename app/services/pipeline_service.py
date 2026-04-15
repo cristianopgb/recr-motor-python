@@ -17,6 +17,7 @@ from app.pipeline.m5_3_composicao_subregioes import executar_m5_3_composicao_sub
 from app.pipeline.m5_4a_triagem_mesorregioes import executar_m5_4a_triagem_mesorregioes
 from app.pipeline.m5_4b_composicao_mesorregioes import executar_m5_4b_composicao_mesorregioes
 from app.pipeline.m6_1_consolidacao_manifestos import executar_m6_1_consolidacao_manifestos
+from app.pipeline.m6_2_otimizacao_manifestos import executar_m6_2_otimizacao_manifestos
 from app.schemas import RoteirizacaoRequest
 from app.services.payload_service import PipelineContext, normalizar_payload_para_pipeline
 
@@ -339,7 +340,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     resumo_m4 = meta_m4["resumo_m4"]
     df_remanescente_roteirizavel_bloco_4 = outputs_m4["df_remanescente_roteirizavel_bloco_4"]
 
-    # necessário para M6.1
     df_manifestos_m4 = outputs_m4.get("df_manifestos_fechados_bloco_4")
     if df_manifestos_m4 is None or not isinstance(df_manifestos_m4, pd.DataFrame):
         df_manifestos_m4 = outputs_m4.get("df_manifestos_m4")
@@ -448,9 +448,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
 
     df_subregioes_consolidadas_m5_3 = outputs_m5_3a["df_subregioes_consolidadas_m5_3"]
     df_perfis_elegiveis_por_subregiao_m5_3 = outputs_m5_3a["df_perfis_elegiveis_por_subregiao_m5_3"]
-    df_perfis_descartados_por_subregiao_m5_3 = outputs_m5_3a["df_perfis_descartados_por_subregiao_m5_3"]
     df_saldo_elegivel_composicao_m5_3 = outputs_m5_3a["df_saldo_elegivel_composicao_m5_3"]
-    df_saldo_nao_elegivel_m5_3 = outputs_m5_3a["df_saldo_nao_elegivel_m5_3"]
     df_tentativas_triagem_subregioes_m5_3 = outputs_m5_3a["df_tentativas_triagem_subregioes_m5_3"]
 
     logs.append(
@@ -521,9 +519,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
 
     df_mesorregioes_consolidadas_m5_4 = outputs_m5_4a["df_mesorregioes_consolidadas_m5_4"]
     df_perfis_elegiveis_por_mesorregiao_m5_4 = outputs_m5_4a["df_perfis_elegiveis_por_mesorregiao_m5_4"]
-    df_perfis_descartados_por_mesorregiao_m5_4 = outputs_m5_4a["df_perfis_descartados_por_mesorregiao_m5_4"]
     df_saldo_elegivel_composicao_m5_4 = outputs_m5_4a["df_saldo_elegivel_composicao_m5_4"]
-    df_saldo_nao_elegivel_m5_4 = outputs_m5_4a["df_saldo_nao_elegivel_m5_4"]
     df_tentativas_triagem_mesorregioes_m5_4 = outputs_m5_4a["df_tentativas_triagem_mesorregioes_m5_4"]
 
     logs.append(
@@ -561,7 +557,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     df_premanifestos_m5_4 = outputs_m5_4b["df_premanifestos_m5_4"]
     df_itens_premanifestos_m5_4 = outputs_m5_4b["df_itens_premanifestos_m5_4"]
     df_tentativas_m5_4 = outputs_m5_4b["df_tentativas_m5_4"]
-    df_remanescente_m5_4 = outputs_m5_4b["df_remanescente_m5_4"]
 
     logs.append(
         _log(
@@ -628,14 +623,57 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     )
 
     # =========================================================================================
-    # SERIALIZAÇÃO FINAL - M6.1
+    # M6.2
+    # =========================================================================================
+    t0 = _agora()
+    resultado_m6_2 = executar_m6_2_otimizacao_manifestos(
+        df_manifestos_base_m6=df_manifestos_base_m6,
+        df_itens_manifestos_base_m6=df_itens_manifestos_base_m6,
+        df_pares_elegiveis_otimizacao_m6=df_pares_elegiveis_otimizacao_m6,
+        data_base_roteirizacao=contexto.data_base,
+        df_veiculos_disponiveis=df_veiculos_tratados,
+        caminhos_pipeline=contexto.caminhos_pipeline,
+    )
+    tempo_m6_2 = _duracao_ms(t0)
+    metricas_tempo["m6_2_otimizacao_manifestos_ms"] = tempo_m6_2
+
+    outputs_m6_2 = resultado_m6_2["outputs_m6_2"]
+    resumo_m6_2 = resultado_m6_2["resumo_m6_2"]
+
+    df_manifestos_otimizados_m6_2 = outputs_m6_2["df_manifestos_otimizados_m6_2"]
+    df_itens_manifestos_otimizados_m6_2 = outputs_m6_2["df_itens_manifestos_otimizados_m6_2"]
+    df_movimentos_otimizacao_m6_2 = outputs_m6_2["df_movimentos_otimizacao_m6_2"]
+    df_tentativas_otimizacao_m6_2 = outputs_m6_2["df_tentativas_otimizacao_m6_2"]
+    df_estatisticas_antes_depois_m6_2 = outputs_m6_2["df_estatisticas_antes_depois_m6_2"]
+
+    logs.append(
+        _log(
+            modulo="m6_2_otimizacao_manifestos",
+            status="ok",
+            mensagem="M6.2 executado com sucesso",
+            quantidade_entrada=_safe_len(df_manifestos_base_m6),
+            quantidade_saida=_safe_len(df_manifestos_otimizados_m6_2),
+            tempo_ms=tempo_m6_2,
+            extra={
+                **resumo_m6_2,
+                "total_itens_manifestos_otimizados_m6_2": _safe_len(df_itens_manifestos_otimizados_m6_2),
+                "total_movimentos_otimizacao_m6_2": _safe_len(df_movimentos_otimizacao_m6_2),
+                "total_tentativas_otimizacao_m6_2": _safe_len(df_tentativas_otimizacao_m6_2),
+                "total_estatisticas_antes_depois_m6_2": _safe_len(df_estatisticas_antes_depois_m6_2),
+            },
+        )
+    )
+
+    # =========================================================================================
+    # SERIALIZAÇÃO FINAL - SOMENTE M6.2
     # =========================================================================================
     t0 = _agora()
 
-    manifestos_base_m6 = _serializar_dataframe_para_records(df_manifestos_base_m6, limit=None)
-    itens_manifestos_base_m6 = _serializar_dataframe_para_records(df_itens_manifestos_base_m6, limit=None)
-    estatisticas_manifestos_antes_m6 = _serializar_dataframe_para_records(df_estatisticas_manifestos_antes_m6, limit=None)
-    pares_elegiveis_otimizacao_m6 = _serializar_dataframe_para_records(df_pares_elegiveis_otimizacao_m6, limit=None)
+    manifestos_otimizados_m6_2 = _serializar_dataframe_para_records(df_manifestos_otimizados_m6_2, limit=None)
+    itens_manifestos_otimizados_m6_2 = _serializar_dataframe_para_records(df_itens_manifestos_otimizados_m6_2, limit=None)
+    movimentos_otimizacao_m6_2 = _serializar_dataframe_para_records(df_movimentos_otimizacao_m6_2, limit=None)
+    tentativas_otimizacao_m6_2 = _serializar_dataframe_para_records(df_tentativas_otimizacao_m6_2, limit=None)
+    estatisticas_antes_depois_m6_2 = _serializar_dataframe_para_records(df_estatisticas_antes_depois_m6_2, limit=None)
 
     tempo_serializacao = _duracao_ms(t0)
     metricas_tempo["serializacao_resposta_ms"] = tempo_serializacao
@@ -645,9 +683,9 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
 
     resposta: Dict[str, Any] = {
         "status": "ok",
-        "mensagem": "Motor executou com sucesso até o M6.1 consolidação de manifestos.",
-        "pipeline_real_ate": "M6.1",
-        "modo_resposta": "validacao_manual_m6_1_linha_a_linha",
+        "mensagem": "Motor executou com sucesso até o M6.2 otimização entre manifestos.",
+        "pipeline_real_ate": "M6.2",
+        "modo_resposta": "auditoria_m6_2",
         "resposta_truncada": False,
         "resumo_execucao": {
             "rodada_id": contexto.rodada_id,
@@ -671,19 +709,20 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "total_itens_manifestados_m4": _safe_len(df_itens_manifestados_m4),
             "total_premanifestos_m5_2": _safe_len(df_premanifestos_m5_2),
             "total_itens_manifestados_m5_2": _safe_len(df_itens_premanifestos_m5_2),
-            "total_itens_remanescentes_m5_2": _safe_len(df_remanescente_m5_2),
             "total_subregioes_consolidadas_m5_3": _safe_len(df_subregioes_consolidadas_m5_3),
             "total_premanifestos_m5_3": _safe_len(df_premanifestos_m5_3),
             "total_itens_roteirizados_m5_3": _safe_len(df_itens_premanifestos_m5_3),
-            "total_itens_remanescentes_m5_3": _safe_len(df_remanescente_m5_3),
             "total_mesorregioes_consolidadas_m5_4": _safe_len(df_mesorregioes_consolidadas_m5_4),
             "total_premanifestos_m5_4": _safe_len(df_premanifestos_m5_4),
             "total_itens_roteirizados_m5_4": _safe_len(df_itens_premanifestos_m5_4),
-            "total_itens_remanescentes_m5_4": _safe_len(df_remanescente_m5_4),
             "total_manifestos_base_m6": _safe_len(df_manifestos_base_m6),
             "total_itens_manifestos_base_m6": _safe_len(df_itens_manifestos_base_m6),
-            "total_estatisticas_manifestos_antes_m6": _safe_len(df_estatisticas_manifestos_antes_m6),
             "total_pares_elegiveis_otimizacao_m6": _safe_len(df_pares_elegiveis_otimizacao_m6),
+            "total_manifestos_otimizados_m6_2": _safe_len(df_manifestos_otimizados_m6_2),
+            "total_itens_manifestos_otimizados_m6_2": _safe_len(df_itens_manifestos_otimizados_m6_2),
+            "total_movimentos_otimizacao_m6_2": _safe_len(df_movimentos_otimizacao_m6_2),
+            "total_tentativas_otimizacao_m6_2": _safe_len(df_tentativas_otimizacao_m6_2),
+            "total_estatisticas_antes_depois_m6_2": _safe_len(df_estatisticas_antes_depois_m6_2),
             "resumo_m3": resumo_m3,
             "resumo_m31": resumo_m31,
             "resumo_m4": resumo_m4,
@@ -694,24 +733,28 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "resumo_m5_4a": resumo_m5_4a,
             "resumo_m5_4b": resumo_m5_4b,
             "resumo_m6_1": resumo_m6_1,
+            "resumo_m6_2": resumo_m6_2,
         },
         "contexto_rodada": {
             "filial": contexto.filial,
             "parametros_rodada": contexto.parametros_rodada,
         },
-        "manifestos_base_m6": manifestos_base_m6,
-        "itens_manifestos_base_m6": itens_manifestos_base_m6,
-        "estatisticas_manifestos_antes_m6": estatisticas_manifestos_antes_m6,
-        "pares_elegiveis_otimizacao_m6": pares_elegiveis_otimizacao_m6,
+        "manifestos_otimizados_m6_2": manifestos_otimizados_m6_2,
+        "itens_manifestos_otimizados_m6_2": itens_manifestos_otimizados_m6_2,
+        "movimentos_otimizacao_m6_2": movimentos_otimizacao_m6_2,
+        "tentativas_otimizacao_m6_2": tentativas_otimizacao_m6_2,
+        "estatisticas_antes_depois_m6_2": estatisticas_antes_depois_m6_2,
         "auditoria_serializacao": {
-            "manifestos_base_m6_total": _safe_len(df_manifestos_base_m6),
-            "manifestos_base_m6_retornado": len(manifestos_base_m6),
-            "itens_manifestos_base_m6_total": _safe_len(df_itens_manifestos_base_m6),
-            "itens_manifestos_base_m6_retornado": len(itens_manifestos_base_m6),
-            "estatisticas_manifestos_antes_m6_total": _safe_len(df_estatisticas_manifestos_antes_m6),
-            "estatisticas_manifestos_antes_m6_retornado": len(estatisticas_manifestos_antes_m6),
-            "pares_elegiveis_otimizacao_m6_total": _safe_len(df_pares_elegiveis_otimizacao_m6),
-            "pares_elegiveis_otimizacao_m6_retornado": len(pares_elegiveis_otimizacao_m6),
+            "manifestos_otimizados_m6_2_total": _safe_len(df_manifestos_otimizados_m6_2),
+            "manifestos_otimizados_m6_2_retornado": len(manifestos_otimizados_m6_2),
+            "itens_manifestos_otimizados_m6_2_total": _safe_len(df_itens_manifestos_otimizados_m6_2),
+            "itens_manifestos_otimizados_m6_2_retornado": len(itens_manifestos_otimizados_m6_2),
+            "movimentos_otimizacao_m6_2_total": _safe_len(df_movimentos_otimizacao_m6_2),
+            "movimentos_otimizacao_m6_2_retornado": len(movimentos_otimizacao_m6_2),
+            "tentativas_otimizacao_m6_2_total": _safe_len(df_tentativas_otimizacao_m6_2),
+            "tentativas_otimizacao_m6_2_retornado": len(tentativas_otimizacao_m6_2),
+            "estatisticas_antes_depois_m6_2_total": _safe_len(df_estatisticas_antes_depois_m6_2),
+            "estatisticas_antes_depois_m6_2_retornado": len(estatisticas_antes_depois_m6_2),
         },
         "logs": logs,
     }
@@ -719,209 +762,65 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     if debug:
         resposta["debug"] = {
             "snapshots": {
-                "df_carteira_tratada": _snapshot_dataframe(df_carteira_tratada, "df_carteira_tratada"),
-                "df_carteira_enriquecida": _snapshot_dataframe(df_carteira_enriquecida, "df_carteira_enriquecida"),
-                "df_carteira_triagem": _snapshot_dataframe(df_carteira_triagem, "df_carteira_triagem"),
-                "df_carteira_roteirizavel": _snapshot_dataframe(df_carteira_roteirizavel, "df_carteira_roteirizavel"),
-                "df_input_oficial_bloco_4": _snapshot_dataframe(df_input_oficial_bloco_4, "df_input_oficial_bloco_4"),
-                "df_remanescente_roteirizavel_bloco_4": _snapshot_dataframe(
-                    df_remanescente_roteirizavel_bloco_4,
-                    "df_remanescente_roteirizavel_bloco_4",
-                ),
-                "df_manifestos_m4": _snapshot_dataframe(df_manifestos_m4, "df_manifestos_m4"),
-                "df_itens_manifestados_m4": _snapshot_dataframe(df_itens_manifestados_m4, "df_itens_manifestados_m4"),
-                "df_saldo_elegivel_composicao_m5_1": _snapshot_dataframe(
-                    df_saldo_elegivel_composicao_m5_1,
-                    "df_saldo_elegivel_composicao_m5_1",
-                ),
-                "df_perfis_elegiveis_por_cidade_m5_1": _snapshot_dataframe(
-                    df_perfis_elegiveis_por_cidade_m5_1,
-                    "df_perfis_elegiveis_por_cidade_m5_1",
-                ),
-                "df_premanifestos_m5_2": _snapshot_dataframe(df_premanifestos_m5_2, "df_premanifestos_m5_2"),
-                "df_itens_premanifestos_m5_2": _snapshot_dataframe(
-                    df_itens_premanifestos_m5_2,
-                    "df_itens_premanifestos_m5_2",
-                ),
-                "df_remanescente_m5_2": _snapshot_dataframe(df_remanescente_m5_2, "df_remanescente_m5_2"),
-                "df_tentativas_m5_2": _snapshot_dataframe(df_tentativas_m5_2, "df_tentativas_m5_2"),
-                "df_subregioes_consolidadas_m5_3": _snapshot_dataframe(
-                    df_subregioes_consolidadas_m5_3,
-                    "df_subregioes_consolidadas_m5_3",
-                ),
-                "df_perfis_elegiveis_por_subregiao_m5_3": _snapshot_dataframe(
-                    df_perfis_elegiveis_por_subregiao_m5_3,
-                    "df_perfis_elegiveis_por_subregiao_m5_3",
-                ),
-                "df_perfis_descartados_por_subregiao_m5_3": _snapshot_dataframe(
-                    df_perfis_descartados_por_subregiao_m5_3,
-                    "df_perfis_descartados_por_subregiao_m5_3",
-                ),
-                "df_saldo_elegivel_composicao_m5_3": _snapshot_dataframe(
-                    df_saldo_elegivel_composicao_m5_3,
-                    "df_saldo_elegivel_composicao_m5_3",
-                ),
-                "df_saldo_nao_elegivel_m5_3": _snapshot_dataframe(
-                    df_saldo_nao_elegivel_m5_3,
-                    "df_saldo_nao_elegivel_m5_3",
-                ),
-                "df_tentativas_triagem_subregioes_m5_3": _snapshot_dataframe(
-                    df_tentativas_triagem_subregioes_m5_3,
-                    "df_tentativas_triagem_subregioes_m5_3",
-                ),
-                "df_premanifestos_m5_3": _snapshot_dataframe(df_premanifestos_m5_3, "df_premanifestos_m5_3"),
-                "df_itens_premanifestos_m5_3": _snapshot_dataframe(
-                    df_itens_premanifestos_m5_3,
-                    "df_itens_premanifestos_m5_3",
-                ),
-                "df_remanescente_m5_3": _snapshot_dataframe(df_remanescente_m5_3, "df_remanescente_m5_3"),
-                "df_tentativas_m5_3": _snapshot_dataframe(df_tentativas_m5_3, "df_tentativas_m5_3"),
-                "df_mesorregioes_consolidadas_m5_4": _snapshot_dataframe(
-                    df_mesorregioes_consolidadas_m5_4,
-                    "df_mesorregioes_consolidadas_m5_4",
-                ),
-                "df_perfis_elegiveis_por_mesorregiao_m5_4": _snapshot_dataframe(
-                    df_perfis_elegiveis_por_mesorregiao_m5_4,
-                    "df_perfis_elegiveis_por_mesorregiao_m5_4",
-                ),
-                "df_perfis_descartados_por_mesorregiao_m5_4": _snapshot_dataframe(
-                    df_perfis_descartados_por_mesorregiao_m5_4,
-                    "df_perfis_descartados_por_mesorregiao_m5_4",
-                ),
-                "df_saldo_elegivel_composicao_m5_4": _snapshot_dataframe(
-                    df_saldo_elegivel_composicao_m5_4,
-                    "df_saldo_elegivel_composicao_m5_4",
-                ),
-                "df_saldo_nao_elegivel_m5_4": _snapshot_dataframe(
-                    df_saldo_nao_elegivel_m5_4,
-                    "df_saldo_nao_elegivel_m5_4",
-                ),
-                "df_tentativas_triagem_mesorregioes_m5_4": _snapshot_dataframe(
-                    df_tentativas_triagem_mesorregioes_m5_4,
-                    "df_tentativas_triagem_mesorregioes_m5_4",
-                ),
-                "df_premanifestos_m5_4": _snapshot_dataframe(df_premanifestos_m5_4, "df_premanifestos_m5_4"),
-                "df_itens_premanifestos_m5_4": _snapshot_dataframe(
-                    df_itens_premanifestos_m5_4,
-                    "df_itens_premanifestos_m5_4",
-                ),
-                "df_remanescente_m5_4": _snapshot_dataframe(df_remanescente_m5_4, "df_remanescente_m5_4"),
-                "df_tentativas_m5_4": _snapshot_dataframe(df_tentativas_m5_4, "df_tentativas_m5_4"),
                 "df_manifestos_base_m6": _snapshot_dataframe(df_manifestos_base_m6, "df_manifestos_base_m6"),
                 "df_itens_manifestos_base_m6": _snapshot_dataframe(
                     df_itens_manifestos_base_m6,
                     "df_itens_manifestos_base_m6",
                 ),
-                "df_estatisticas_manifestos_antes_m6": _snapshot_dataframe(
-                    df_estatisticas_manifestos_antes_m6,
-                    "df_estatisticas_manifestos_antes_m6",
-                ),
                 "df_pares_elegiveis_otimizacao_m6": _snapshot_dataframe(
                     df_pares_elegiveis_otimizacao_m6,
                     "df_pares_elegiveis_otimizacao_m6",
                 ),
+                "df_manifestos_otimizados_m6_2": _snapshot_dataframe(
+                    df_manifestos_otimizados_m6_2,
+                    "df_manifestos_otimizados_m6_2",
+                ),
+                "df_itens_manifestos_otimizados_m6_2": _snapshot_dataframe(
+                    df_itens_manifestos_otimizados_m6_2,
+                    "df_itens_manifestos_otimizados_m6_2",
+                ),
+                "df_movimentos_otimizacao_m6_2": _snapshot_dataframe(
+                    df_movimentos_otimizacao_m6_2,
+                    "df_movimentos_otimizacao_m6_2",
+                ),
+                "df_tentativas_otimizacao_m6_2": _snapshot_dataframe(
+                    df_tentativas_otimizacao_m6_2,
+                    "df_tentativas_otimizacao_m6_2",
+                ),
+                "df_estatisticas_antes_depois_m6_2": _snapshot_dataframe(
+                    df_estatisticas_antes_depois_m6_2,
+                    "df_estatisticas_antes_depois_m6_2",
+                ),
             },
             "resumos_dataframes": {
-                "df_carteira_tratada": _montar_resumo_dataframe(df_carteira_tratada, "df_carteira_tratada"),
-                "df_carteira_enriquecida": _montar_resumo_dataframe(df_carteira_enriquecida, "df_carteira_enriquecida"),
-                "df_carteira_triagem": _montar_resumo_dataframe(df_carteira_triagem, "df_carteira_triagem"),
-                "df_carteira_roteirizavel": _montar_resumo_dataframe(df_carteira_roteirizavel, "df_carteira_roteirizavel"),
-                "df_input_oficial_bloco_4": _montar_resumo_dataframe(df_input_oficial_bloco_4, "df_input_oficial_bloco_4"),
-                "df_remanescente_roteirizavel_bloco_4": _montar_resumo_dataframe(
-                    df_remanescente_roteirizavel_bloco_4,
-                    "df_remanescente_roteirizavel_bloco_4",
-                ),
-                "df_manifestos_m4": _montar_resumo_dataframe(df_manifestos_m4, "df_manifestos_m4"),
-                "df_itens_manifestados_m4": _montar_resumo_dataframe(df_itens_manifestados_m4, "df_itens_manifestados_m4"),
-                "df_saldo_elegivel_composicao_m5_1": _montar_resumo_dataframe(
-                    df_saldo_elegivel_composicao_m5_1,
-                    "df_saldo_elegivel_composicao_m5_1",
-                ),
-                "df_perfis_elegiveis_por_cidade_m5_1": _montar_resumo_dataframe(
-                    df_perfis_elegiveis_por_cidade_m5_1,
-                    "df_perfis_elegiveis_por_cidade_m5_1",
-                ),
-                "df_premanifestos_m5_2": _montar_resumo_dataframe(df_premanifestos_m5_2, "df_premanifestos_m5_2"),
-                "df_itens_premanifestos_m5_2": _montar_resumo_dataframe(
-                    df_itens_premanifestos_m5_2,
-                    "df_itens_premanifestos_m5_2",
-                ),
-                "df_remanescente_m5_2": _montar_resumo_dataframe(df_remanescente_m5_2, "df_remanescente_m5_2"),
-                "df_tentativas_m5_2": _montar_resumo_dataframe(df_tentativas_m5_2, "df_tentativas_m5_2"),
-                "df_subregioes_consolidadas_m5_3": _montar_resumo_dataframe(
-                    df_subregioes_consolidadas_m5_3,
-                    "df_subregioes_consolidadas_m5_3",
-                ),
-                "df_perfis_elegiveis_por_subregiao_m5_3": _montar_resumo_dataframe(
-                    df_perfis_elegiveis_por_subregiao_m5_3,
-                    "df_perfis_elegiveis_por_subregiao_m5_3",
-                ),
-                "df_perfis_descartados_por_subregiao_m5_3": _montar_resumo_dataframe(
-                    df_perfis_descartados_por_subregiao_m5_3,
-                    "df_perfis_descartados_por_subregiao_m5_3",
-                ),
-                "df_saldo_elegivel_composicao_m5_3": _montar_resumo_dataframe(
-                    df_saldo_elegivel_composicao_m5_3,
-                    "df_saldo_elegivel_composicao_m5_3",
-                ),
-                "df_saldo_nao_elegivel_m5_3": _montar_resumo_dataframe(
-                    df_saldo_nao_elegivel_m5_3,
-                    "df_saldo_nao_elegivel_m5_3",
-                ),
-                "df_tentativas_triagem_subregioes_m5_3": _montar_resumo_dataframe(
-                    df_tentativas_triagem_subregioes_m5_3,
-                    "df_tentativas_triagem_subregioes_m5_3",
-                ),
-                "df_premanifestos_m5_3": _montar_resumo_dataframe(df_premanifestos_m5_3, "df_premanifestos_m5_3"),
-                "df_itens_premanifestos_m5_3": _montar_resumo_dataframe(
-                    df_itens_premanifestos_m5_3,
-                    "df_itens_premanifestos_m5_3",
-                ),
-                "df_remanescente_m5_3": _montar_resumo_dataframe(df_remanescente_m5_3, "df_remanescente_m5_3"),
-                "df_tentativas_m5_3": _montar_resumo_dataframe(df_tentativas_m5_3, "df_tentativas_m5_3"),
-                "df_mesorregioes_consolidadas_m5_4": _montar_resumo_dataframe(
-                    df_mesorregioes_consolidadas_m5_4,
-                    "df_mesorregioes_consolidadas_m5_4",
-                ),
-                "df_perfis_elegiveis_por_mesorregiao_m5_4": _montar_resumo_dataframe(
-                    df_perfis_elegiveis_por_mesorregiao_m5_4,
-                    "df_perfis_elegiveis_por_mesorregiao_m5_4",
-                ),
-                "df_perfis_descartados_por_mesorregiao_m5_4": _montar_resumo_dataframe(
-                    df_perfis_descartados_por_mesorregiao_m5_4,
-                    "df_perfis_descartados_por_mesorregiao_m5_4",
-                ),
-                "df_saldo_elegivel_composicao_m5_4": _montar_resumo_dataframe(
-                    df_saldo_elegivel_composicao_m5_4,
-                    "df_saldo_elegivel_composicao_m5_4",
-                ),
-                "df_saldo_nao_elegivel_m5_4": _montar_resumo_dataframe(
-                    df_saldo_nao_elegivel_m5_4,
-                    "df_saldo_nao_elegivel_m5_4",
-                ),
-                "df_tentativas_triagem_mesorregioes_m5_4": _montar_resumo_dataframe(
-                    df_tentativas_triagem_mesorregioes_m5_4,
-                    "df_tentativas_triagem_mesorregioes_m5_4",
-                ),
-                "df_premanifestos_m5_4": _montar_resumo_dataframe(df_premanifestos_m5_4, "df_premanifestos_m5_4"),
-                "df_itens_premanifestos_m5_4": _montar_resumo_dataframe(
-                    df_itens_premanifestos_m5_4,
-                    "df_itens_premanifestos_m5_4",
-                ),
-                "df_remanescente_m5_4": _montar_resumo_dataframe(df_remanescente_m5_4, "df_remanescente_m5_4"),
-                "df_tentativas_m5_4": _montar_resumo_dataframe(df_tentativas_m5_4, "df_tentativas_m5_4"),
                 "df_manifestos_base_m6": _montar_resumo_dataframe(df_manifestos_base_m6, "df_manifestos_base_m6"),
                 "df_itens_manifestos_base_m6": _montar_resumo_dataframe(
                     df_itens_manifestos_base_m6,
                     "df_itens_manifestos_base_m6",
                 ),
-                "df_estatisticas_manifestos_antes_m6": _montar_resumo_dataframe(
-                    df_estatisticas_manifestos_antes_m6,
-                    "df_estatisticas_manifestos_antes_m6",
-                ),
                 "df_pares_elegiveis_otimizacao_m6": _montar_resumo_dataframe(
                     df_pares_elegiveis_otimizacao_m6,
                     "df_pares_elegiveis_otimizacao_m6",
+                ),
+                "df_manifestos_otimizados_m6_2": _montar_resumo_dataframe(
+                    df_manifestos_otimizados_m6_2,
+                    "df_manifestos_otimizados_m6_2",
+                ),
+                "df_itens_manifestos_otimizados_m6_2": _montar_resumo_dataframe(
+                    df_itens_manifestos_otimizados_m6_2,
+                    "df_itens_manifestos_otimizados_m6_2",
+                ),
+                "df_movimentos_otimizacao_m6_2": _montar_resumo_dataframe(
+                    df_movimentos_otimizacao_m6_2,
+                    "df_movimentos_otimizacao_m6_2",
+                ),
+                "df_tentativas_otimizacao_m6_2": _montar_resumo_dataframe(
+                    df_tentativas_otimizacao_m6_2,
+                    "df_tentativas_otimizacao_m6_2",
+                ),
+                "df_estatisticas_antes_depois_m6_2": _montar_resumo_dataframe(
+                    df_estatisticas_antes_depois_m6_2,
+                    "df_estatisticas_antes_depois_m6_2",
                 ),
             },
         }
