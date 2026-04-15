@@ -598,6 +598,8 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     resumo_m6_1 = meta_m6_1["resumo_m6_1"]
     df_manifestos_base_m6 = outputs_m6_1["df_manifestos_base_m6"]
     df_itens_manifestos_base_m6 = outputs_m6_1["df_itens_manifestos_base_m6"]
+    df_estatisticas_manifestos_antes_m6 = outputs_m6_1["df_estatisticas_manifestos_antes_m6"]
+    df_pares_elegiveis_otimizacao_m6 = outputs_m6_1["df_pares_elegiveis_otimizacao_m6"]
 
     logs.append(
         _log(
@@ -615,6 +617,8 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             extra={
                 **resumo_m6_1,
                 "total_itens_manifestos_base_m6": _safe_len(df_itens_manifestos_base_m6),
+                "total_estatisticas_manifestos_antes_m6": _safe_len(df_estatisticas_manifestos_antes_m6),
+                "total_pares_elegiveis_otimizacao_m6": _safe_len(df_pares_elegiveis_otimizacao_m6),
             },
         )
     )
@@ -625,8 +629,9 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     t0 = _agora()
     resultado_m6_2 = executar_m6_2_complemento_ocupacao(
         df_manifestos_base_m6=df_manifestos_base_m6,
+        df_estatisticas_manifestos_antes_m6=df_estatisticas_manifestos_antes_m6,
         df_itens_manifestos_base_m6=df_itens_manifestos_base_m6,
-        df_remanescente_m5=df_remanescente_m5_4,
+        df_remanescente_m5_4=df_remanescente_m5_4,
         data_base_roteirizacao=contexto.data_base,
         tipo_roteirizacao=contexto.tipo_roteirizacao,
         caminhos_pipeline=contexto.caminhos_pipeline,
@@ -719,6 +724,8 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "total_remanescente_m5_4": _safe_len(df_remanescente_m5_4),
             "total_manifestos_base_m6": _safe_len(df_manifestos_base_m6),
             "total_itens_manifestos_base_m6": _safe_len(df_itens_manifestos_base_m6),
+            "total_estatisticas_manifestos_antes_m6": _safe_len(df_estatisticas_manifestos_antes_m6),
+            "total_pares_elegiveis_otimizacao_m6": _safe_len(df_pares_elegiveis_otimizacao_m6),
             "total_manifestos_m6_2": _safe_len(df_manifestos_m6_2),
             "total_itens_manifestos_m6_2": _safe_len(df_itens_manifestos_m6_2),
             "total_remanescente_m6_2": _safe_len(df_remanescente_m6_2),
@@ -768,6 +775,10 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         resposta["debug"] = {
             "snapshots": {
                 "df_manifestos_base_m6": _snapshot_dataframe(df_manifestos_base_m6, "df_manifestos_base_m6"),
+                "df_estatisticas_manifestos_antes_m6": _snapshot_dataframe(
+                    df_estatisticas_manifestos_antes_m6,
+                    "df_estatisticas_manifestos_antes_m6",
+                ),
                 "df_itens_manifestos_base_m6": _snapshot_dataframe(
                     df_itens_manifestos_base_m6,
                     "df_itens_manifestos_base_m6",
@@ -788,6 +799,10 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             },
             "resumos_dataframes": {
                 "df_manifestos_base_m6": _montar_resumo_dataframe(df_manifestos_base_m6, "df_manifestos_base_m6"),
+                "df_estatisticas_manifestos_antes_m6": _montar_resumo_dataframe(
+                    df_estatisticas_manifestos_antes_m6,
+                    "df_estatisticas_manifestos_antes_m6",
+                ),
                 "df_itens_manifestos_base_m6": _montar_resumo_dataframe(
                     df_itens_manifestos_base_m6,
                     "df_itens_manifestos_base_m6",
