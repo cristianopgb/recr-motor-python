@@ -28,6 +28,7 @@ PERFIL_ALIASES = [
     "perfil",
     "tipo_veiculo",
     "veiculo_perfil",
+    "veiculo",
 ]
 
 CAP_PESO_ALIASES = [
@@ -63,6 +64,12 @@ OCUP_MIN_ALIASES = [
 OCUP_MAX_ALIASES = [
     "ocupacao_maxima_perc",
     "ocup_max_perc",
+]
+
+OCUP_DOMINANTE_ALIASES = [
+    "ocupacao_dominante_perc",
+    "ocupacao_perc",
+    "ocupacao",
 ]
 
 DISTANCIA_ALIASES = [
@@ -129,12 +136,13 @@ def executar_m6_2_complemento_ocupacao(
     if "origem_item_m6_2" not in df_itens.columns:
         df_itens["origem_item_m6_2"] = "original_m6_1"
 
-    df_manifestos = _recalcular_todos_manifestos(df_manifestos, df_itens)
+    # IMPORTANTE:
+    # Aqui nós NÃO recalculamos toda a ocupação antes de selecionar alvos.
+    # A seleção usa a ocupação oficial já consolidada pelo M6.1.
+    manifestos_alvo = _selecionar_manifestos_alvo(df_manifestos, ocupacao_alvo_perc)
 
     tentativas: List[Dict[str, Any]] = []
     movimentos_aceitos: List[Dict[str, Any]] = []
-
-    manifestos_alvo = _selecionar_manifestos_alvo(df_manifestos, ocupacao_alvo_perc)
 
     for manifesto_id in manifestos_alvo:
         row_manifesto = df_manifestos.loc[df_manifestos["manifesto_id"] == manifesto_id].head(1)
@@ -167,8 +175,16 @@ def executar_m6_2_complemento_ocupacao(
         cliente_dominante = _cliente_dominante(itens_manifesto_atual)
         cidade_dominante = _cidade_dominante(itens_manifesto_atual)
 
-        grupos_cliente = _montar_grupos_remanescente(rem_mesmo_meso, chave="destinatario", valor_prioritario=cliente_dominante)
-        grupos_cidade = _montar_grupos_remanescente(rem_mesmo_meso, chave="cidade", valor_prioritario=cidade_dominante)
+        grupos_cliente = _montar_grupos_remanescente(
+            rem_mesmo_meso,
+            chave="destinatario",
+            valor_prioritario=cliente_dominante,
+        )
+        grupos_cidade = _montar_grupos_remanescente(
+            rem_mesmo_meso,
+            chave="cidade",
+            valor_prioritario=cidade_dominante,
+        )
 
         houve_movimento_neste_manifesto = False
 
@@ -190,7 +206,9 @@ def executar_m6_2_complemento_ocupacao(
 
             for grupo in grupos:
                 ids_grupo = grupo["ids"]
-                itens_grupo = df_remanescente.loc[df_remanescente["id_linha_pipeline"].isin(ids_grupo)].copy()
+                itens_grupo = df_remanescente.loc[
+                    df_remanescente["id_linha_pipeline"].isin(ids_grupo)
+                ].copy()
                 if itens_grupo.empty:
                     continue
 
@@ -225,11 +243,19 @@ def executar_m6_2_complemento_ocupacao(
                 itens_grupo_aplicar["origem_item_m6_2"] = "adicionado_do_remanescente_m5"
 
                 df_itens = pd.concat([df_itens, itens_grupo_aplicar], ignore_index=True)
-                df_remanescente = df_remanescente.loc[~df_remanescente["id_linha_pipeline"].isin(ids_grupo)].copy()
+                df_remanescente = df_remanescente.loc[
+                    ~df_remanescente["id_linha_pipeline"].isin(ids_grupo)
+                ].copy()
 
                 df_manifestos = _recalcular_manifesto_unico(df_manifestos, df_itens, manifesto_id)
-                manifesto = df_manifestos.loc[df_manifestos["manifesto_id"] == manifesto_id].head(1).iloc[0].to_dict()
-                itens_manifesto_atual = df_itens.loc[df_itens["manifesto_id"] == manifesto_id].copy()
+
+                manifesto = df_manifestos.loc[
+                    df_manifestos["manifesto_id"] == manifesto_id
+                ].head(1).iloc[0].to_dict()
+
+                itens_manifesto_atual = df_itens.loc[
+                    df_itens["manifesto_id"] == manifesto_id
+                ].copy()
 
                 movimentos_aceitos.append(
                     {
@@ -246,9 +272,13 @@ def executar_m6_2_complemento_ocupacao(
                 if ocupacao_depois >= ocupacao_alvo_perc:
                     break
 
-            manifesto_atualizado = df_manifestos.loc[df_manifestos["manifesto_id"] == manifesto_id].head(1)
+            manifesto_atualizado = df_manifestos.loc[
+                df_manifestos["manifesto_id"] == manifesto_id
+            ].head(1)
             if not manifesto_atualizado.empty:
-                ocupacao_depois = float(manifesto_atualizado.iloc[0].get("ocupacao_dominante_perc", 0) or 0)
+                ocupacao_depois = float(
+                    manifesto_atualizado.iloc[0].get("ocupacao_dominante_perc", 0) or 0
+                )
                 if ocupacao_depois >= ocupacao_alvo_perc:
                     break
 
@@ -263,9 +293,16 @@ def executar_m6_2_complemento_ocupacao(
                 }
             )
 
+    # Recalcula somente no fechamento final, preservando as ocupações oficiais
+    # quando não houver capacidade disponível.
     df_manifestos = _recalcular_todos_manifestos(df_manifestos, df_itens)
 
-    _validar_integridade_final(df_itens, df_remanescente, df_itens_manifestos_base_m6, df_remanescente_original)
+    _validar_integridade_final(
+        df_itens,
+        df_remanescente,
+        df_itens_manifestos_base_m6,
+        df_remanescente_original,
+    )
 
     df_tentativas = pd.DataFrame(tentativas)
     df_movimentos_aceitos = pd.DataFrame(movimentos_aceitos)
@@ -283,9 +320,11 @@ def executar_m6_2_complemento_ocupacao(
         "tentativas_total_m6_2": int(len(df_tentativas)),
         "itens_manifestos_total_m6_2": int(len(df_itens)),
         "itens_remanescente_m6_2": int(len(df_remanescente)),
-        "itens_adicionados_a_manifestos_m6_2": int(len(df_itens.loc[df_itens["flag_otimizado_m6_2"] == True])),
+        "itens_adicionados_a_manifestos_m6_2": int(
+            len(df_itens.loc[df_itens["flag_otimizado_m6_2"] == True])
+        ),
         "estrategia_m6_2": [
-            "seleciona_manifestos_abaixo_de_85",
+            "seleciona_manifestos_abaixo_de_85_usando_ocupacao_oficial_m6_1",
             "usa_apenas_remanescente_oficial_m5",
             "nunca_mistura_mesorregiao",
             "prioriza_mesmo_cliente",
@@ -316,12 +355,45 @@ def _normalizar_manifestos(df: pd.DataFrame) -> pd.DataFrame:
     out["manifesto_id"] = _resolver_coluna(out, MANIFESTO_ID_ALIASES, obrigatoria=True).astype(str)
     out["mesorregiao_operacional"] = _resolver_coluna(out, MESORREGIAO_ALIASES, obrigatoria=False, default="").astype(str)
     out["perfil"] = _resolver_coluna(out, PERFIL_ALIASES, obrigatoria=False, default="").astype(str)
-    out["capacidade_peso_kg"] = pd.to_numeric(_resolver_coluna(out, CAP_PESO_ALIASES, obrigatoria=False, default=np.nan), errors="coerce")
-    out["capacidade_vol_m3"] = pd.to_numeric(_resolver_coluna(out, CAP_VOL_ALIASES, obrigatoria=False, default=np.nan), errors="coerce")
-    out["max_entregas"] = pd.to_numeric(_resolver_coluna(out, MAX_ENTREGAS_ALIASES, obrigatoria=False, default=np.nan), errors="coerce")
-    out["max_km_distancia"] = pd.to_numeric(_resolver_coluna(out, MAX_KM_ALIASES, obrigatoria=False, default=np.nan), errors="coerce")
-    out["ocupacao_minima_perc"] = pd.to_numeric(_resolver_coluna(out, OCUP_MIN_ALIASES, obrigatoria=False, default=70), errors="coerce").fillna(70)
-    out["ocupacao_maxima_perc"] = pd.to_numeric(_resolver_coluna(out, OCUP_MAX_ALIASES, obrigatoria=False, default=100), errors="coerce").fillna(100)
+    out["capacidade_peso_kg"] = pd.to_numeric(
+        _resolver_coluna(out, CAP_PESO_ALIASES, obrigatoria=False, default=np.nan),
+        errors="coerce",
+    )
+    out["capacidade_vol_m3"] = pd.to_numeric(
+        _resolver_coluna(out, CAP_VOL_ALIASES, obrigatoria=False, default=np.nan),
+        errors="coerce",
+    )
+    out["max_entregas"] = pd.to_numeric(
+        _resolver_coluna(out, MAX_ENTREGAS_ALIASES, obrigatoria=False, default=np.nan),
+        errors="coerce",
+    )
+    out["max_km_distancia"] = pd.to_numeric(
+        _resolver_coluna(out, MAX_KM_ALIASES, obrigatoria=False, default=np.nan),
+        errors="coerce",
+    )
+    out["ocupacao_minima_perc"] = pd.to_numeric(
+        _resolver_coluna(out, OCUP_MIN_ALIASES, obrigatoria=False, default=70),
+        errors="coerce",
+    ).fillna(70)
+    out["ocupacao_maxima_perc"] = pd.to_numeric(
+        _resolver_coluna(out, OCUP_MAX_ALIASES, obrigatoria=False, default=100),
+        errors="coerce",
+    ).fillna(100)
+
+    # Aqui preservamos a ocupação oficial vinda do M6.1
+    out["ocupacao_dominante_perc"] = pd.to_numeric(
+        _resolver_coluna(out, OCUP_DOMINANTE_ALIASES, obrigatoria=False, default=np.nan),
+        errors="coerce",
+    )
+
+    if "qtd_entregas" not in out.columns:
+        out["qtd_entregas"] = np.nan
+    if "distancia_total_km" not in out.columns:
+        out["distancia_total_km"] = np.nan
+    if "ocupacao_peso_perc" not in out.columns:
+        out["ocupacao_peso_perc"] = np.nan
+    if "ocupacao_vol_perc" not in out.columns:
+        out["ocupacao_vol_perc"] = np.nan
 
     return out.reset_index(drop=True)
 
@@ -340,10 +412,24 @@ def _normalizar_itens_manifestos(df: pd.DataFrame) -> pd.DataFrame:
     out["destinatario"] = _resolver_coluna(out, CLIENTE_ALIASES, obrigatoria=False, default="").astype(str)
     out["cidade"] = _resolver_coluna(out, CIDADE_ALIASES, obrigatoria=False, default="").astype(str)
     out["uf"] = _resolver_coluna(out, UF_ALIASES, obrigatoria=False, default="").astype(str)
-    out["peso_calculado"] = pd.to_numeric(_resolver_coluna(out, PESO_ITEM_ALIASES, obrigatoria=True), errors="coerce").fillna(0)
-    out["vol_m3"] = pd.to_numeric(_resolver_coluna(out, VOL_ITEM_ALIASES, obrigatoria=False, default=0), errors="coerce").fillna(0)
-    out["distancia_rodoviaria_est_km"] = pd.to_numeric(_resolver_coluna(out, DISTANCIA_ALIASES, obrigatoria=False, default=0), errors="coerce").fillna(0)
-    out["restricao_veiculo"] = _resolver_coluna(out, RESTRICAO_VEICULO_ALIASES, obrigatoria=False, default="").astype(str)
+    out["peso_calculado"] = pd.to_numeric(
+        _resolver_coluna(out, PESO_ITEM_ALIASES, obrigatoria=True),
+        errors="coerce",
+    ).fillna(0)
+    out["vol_m3"] = pd.to_numeric(
+        _resolver_coluna(out, VOL_ITEM_ALIASES, obrigatoria=False, default=0),
+        errors="coerce",
+    ).fillna(0)
+    out["distancia_rodoviaria_est_km"] = pd.to_numeric(
+        _resolver_coluna(out, DISTANCIA_ALIASES, obrigatoria=False, default=0),
+        errors="coerce",
+    ).fillna(0)
+    out["restricao_veiculo"] = _resolver_coluna(
+        out,
+        RESTRICAO_VEICULO_ALIASES,
+        obrigatoria=False,
+        default="",
+    ).astype(str)
 
     return out.reset_index(drop=True)
 
@@ -360,10 +446,24 @@ def _normalizar_itens_remanescente(df: pd.DataFrame) -> pd.DataFrame:
     out["destinatario"] = _resolver_coluna(out, CLIENTE_ALIASES, obrigatoria=False, default="").astype(str)
     out["cidade"] = _resolver_coluna(out, CIDADE_ALIASES, obrigatoria=False, default="").astype(str)
     out["uf"] = _resolver_coluna(out, UF_ALIASES, obrigatoria=False, default="").astype(str)
-    out["peso_calculado"] = pd.to_numeric(_resolver_coluna(out, PESO_ITEM_ALIASES, obrigatoria=True), errors="coerce").fillna(0)
-    out["vol_m3"] = pd.to_numeric(_resolver_coluna(out, VOL_ITEM_ALIASES, obrigatoria=False, default=0), errors="coerce").fillna(0)
-    out["distancia_rodoviaria_est_km"] = pd.to_numeric(_resolver_coluna(out, DISTANCIA_ALIASES, obrigatoria=False, default=0), errors="coerce").fillna(0)
-    out["restricao_veiculo"] = _resolver_coluna(out, RESTRICAO_VEICULO_ALIASES, obrigatoria=False, default="").astype(str)
+    out["peso_calculado"] = pd.to_numeric(
+        _resolver_coluna(out, PESO_ITEM_ALIASES, obrigatoria=True),
+        errors="coerce",
+    ).fillna(0)
+    out["vol_m3"] = pd.to_numeric(
+        _resolver_coluna(out, VOL_ITEM_ALIASES, obrigatoria=False, default=0),
+        errors="coerce",
+    ).fillna(0)
+    out["distancia_rodoviaria_est_km"] = pd.to_numeric(
+        _resolver_coluna(out, DISTANCIA_ALIASES, obrigatoria=False, default=0),
+        errors="coerce",
+    ).fillna(0)
+    out["restricao_veiculo"] = _resolver_coluna(
+        out,
+        RESTRICAO_VEICULO_ALIASES,
+        obrigatoria=False,
+        default="",
+    ).astype(str)
 
     return out.reset_index(drop=True)
 
@@ -393,9 +493,16 @@ def _validar_entrada(
 
 def _selecionar_manifestos_alvo(df_manifestos: pd.DataFrame, ocupacao_alvo_perc: float) -> List[str]:
     base = df_manifestos.copy()
-    base["ocupacao_dominante_perc"] = pd.to_numeric(base.get("ocupacao_dominante_perc", np.nan), errors="coerce").fillna(0)
+    base["ocupacao_dominante_perc"] = pd.to_numeric(
+        base["ocupacao_dominante_perc"],
+        errors="coerce",
+    )
+
+    # Se não houver ocupação oficial válida, o manifesto não entra como alvo
+    base = base.loc[base["ocupacao_dominante_perc"].notna()].copy()
     base = base.loc[base["ocupacao_dominante_perc"] < ocupacao_alvo_perc].copy()
     base = base.sort_values(by=["ocupacao_dominante_perc", "qtd_entregas"], ascending=[True, True])
+
     return base["manifesto_id"].astype(str).tolist()
 
 
@@ -491,46 +598,65 @@ def _simular_adicao_grupo(
 
 
 def _calcular_metricas_manifesto(manifesto: Dict[str, Any], df_itens: pd.DataFrame) -> Dict[str, Any]:
-    capacidade_peso = float(pd.to_numeric(manifesto.get("capacidade_peso_kg", np.nan), errors="coerce"))
-    capacidade_vol = float(pd.to_numeric(manifesto.get("capacidade_vol_m3", np.nan), errors="coerce"))
+    capacidade_peso = _to_float(manifesto.get("capacidade_peso_kg"))
+    capacidade_vol = _to_float(manifesto.get("capacidade_vol_m3"))
 
     peso_total = float(pd.to_numeric(df_itens["peso_calculado"], errors="coerce").fillna(0).sum())
     vol_total = float(pd.to_numeric(df_itens["vol_m3"], errors="coerce").fillna(0).sum())
     distancia_total = float(pd.to_numeric(df_itens["distancia_rodoviaria_est_km"], errors="coerce").fillna(0).max())
     qtd_entregas = int(_contar_entregas(df_itens))
 
-    ocup_peso = (peso_total / capacidade_peso * 100) if capacidade_peso > 0 else 0.0
-    ocup_vol = (vol_total / capacidade_vol * 100) if capacidade_vol > 0 else 0.0
-    ocup_dominante = max(ocup_peso, ocup_vol)
+    ocupacao_existente = _to_float(manifesto.get("ocupacao_dominante_perc"))
+
+    if capacidade_peso is not None and capacidade_peso > 0:
+        ocup_peso = (peso_total / capacidade_peso) * 100.0
+    else:
+        ocup_peso = np.nan
+
+    if capacidade_vol is not None and capacidade_vol > 0:
+        ocup_vol = (vol_total / capacidade_vol) * 100.0
+    else:
+        ocup_vol = np.nan
+
+    if pd.notna(ocup_peso) and pd.notna(ocup_vol):
+        ocup_dominante = max(ocup_peso, ocup_vol)
+    elif pd.notna(ocup_peso):
+        ocup_dominante = ocup_peso
+    elif pd.notna(ocup_vol):
+        ocup_dominante = ocup_vol
+    elif ocupacao_existente is not None:
+        ocup_dominante = ocupacao_existente
+    else:
+        ocup_dominante = 0.0
 
     return {
         "peso_total_kg": peso_total,
         "vol_total_m3": vol_total,
         "distancia_total_km": distancia_total,
         "qtd_entregas": qtd_entregas,
-        "ocupacao_peso_perc": ocup_peso,
-        "ocupacao_vol_perc": ocup_vol,
-        "ocupacao_dominante_perc": ocup_dominante,
+        "ocupacao_peso_perc": ocup_peso if pd.notna(ocup_peso) else np.nan,
+        "ocupacao_vol_perc": ocup_vol if pd.notna(ocup_vol) else np.nan,
+        "ocupacao_dominante_perc": float(ocup_dominante),
     }
 
 
 def _validar_restricoes_manifesto(manifesto: Dict[str, Any], df_itens: pd.DataFrame) -> bool | str:
     metricas = _calcular_metricas_manifesto(manifesto, df_itens)
 
-    capacidade_peso = float(pd.to_numeric(manifesto.get("capacidade_peso_kg", np.nan), errors="coerce"))
-    capacidade_vol = float(pd.to_numeric(manifesto.get("capacidade_vol_m3", np.nan), errors="coerce"))
-    max_entregas = int(pd.to_numeric(manifesto.get("max_entregas", np.nan), errors="coerce"))
-    max_km = float(pd.to_numeric(manifesto.get("max_km_distancia", np.nan), errors="coerce"))
+    capacidade_peso = _to_float(manifesto.get("capacidade_peso_kg"))
+    capacidade_vol = _to_float(manifesto.get("capacidade_vol_m3"))
+    max_entregas = _to_int(manifesto.get("max_entregas"))
+    max_km = _to_float(manifesto.get("max_km_distancia"))
     perfil_manifesto = str(manifesto.get("perfil", "")).strip().upper()
     meso_manifesto = str(manifesto.get("mesorregiao_operacional", "")).strip().upper()
 
-    if metricas["peso_total_kg"] > capacidade_peso:
+    if capacidade_peso is not None and metricas["peso_total_kg"] > capacidade_peso:
         return "Excede capacidade de peso."
-    if metricas["vol_total_m3"] > capacidade_vol:
+    if capacidade_vol is not None and metricas["vol_total_m3"] > capacidade_vol:
         return "Excede capacidade de volume."
-    if metricas["qtd_entregas"] > max_entregas:
+    if max_entregas is not None and metricas["qtd_entregas"] > max_entregas:
         return "Excede máximo de entregas."
-    if metricas["distancia_total_km"] > max_km:
+    if max_km is not None and metricas["distancia_total_km"] > max_km:
         return "Excede raio/distância máxima."
 
     mesorregioes = set(df_itens["mesorregiao_operacional"].astype(str).str.strip().str.upper().tolist())
@@ -544,7 +670,7 @@ def _validar_restricoes_manifesto(manifesto: Dict[str, Any], df_itens: pd.DataFr
     restricoes.discard("")
     if len(restricoes) > 1:
         return "Itens com restrições de veículo conflitantes."
-    if len(restricoes) == 1 and list(restricoes)[0] != perfil_manifesto:
+    if len(restricoes) == 1 and perfil_manifesto != "" and list(restricoes)[0] != perfil_manifesto:
         return "Restrição de veículo do item é incompatível com o perfil do manifesto."
 
     return True
@@ -569,8 +695,12 @@ def _recalcular_manifesto_unico(
     out.loc[i, "vol_total_m3"] = metricas["vol_total_m3"]
     out.loc[i, "distancia_total_km"] = metricas["distancia_total_km"]
     out.loc[i, "qtd_entregas"] = metricas["qtd_entregas"]
-    out.loc[i, "ocupacao_peso_perc"] = metricas["ocupacao_peso_perc"]
-    out.loc[i, "ocupacao_vol_perc"] = metricas["ocupacao_vol_perc"]
+
+    if pd.notna(metricas["ocupacao_peso_perc"]):
+        out.loc[i, "ocupacao_peso_perc"] = metricas["ocupacao_peso_perc"]
+    if pd.notna(metricas["ocupacao_vol_perc"]):
+        out.loc[i, "ocupacao_vol_perc"] = metricas["ocupacao_vol_perc"]
+
     out.loc[i, "ocupacao_dominante_perc"] = metricas["ocupacao_dominante_perc"]
 
     return out
@@ -612,7 +742,9 @@ def _validar_integridade_final(
 
     intersec = ids_final_manifestos.intersection(ids_final_remanescente)
     if intersec:
-        raise Exception(f"M6.2 deixou itens ao mesmo tempo no manifesto e no remanescente: {list(intersec)[:20]}")
+        raise Exception(
+            f"M6.2 deixou itens ao mesmo tempo no manifesto e no remanescente: {list(intersec)[:20]}"
+        )
 
 
 def _resolver_coluna(
@@ -648,10 +780,25 @@ def _txt_norm(valor: Any) -> str:
     return str(valor).strip().upper()
 
 
+def _to_float(valor: Any) -> Optional[float]:
+    x = pd.to_numeric(valor, errors="coerce")
+    if pd.isna(x):
+        return None
+    return float(x)
+
+
+def _to_int(valor: Any) -> Optional[int]:
+    x = pd.to_numeric(valor, errors="coerce")
+    if pd.isna(x):
+        return None
+    return int(x)
+
+
 def _contar_entregas(df: pd.DataFrame) -> int:
     cols = [c for c in CHAVES_PARADA if c in df.columns]
     if len(cols) < 3:
         return int(len(df))
+
     chave = (
         df["destinatario"].astype(str).str.strip().str.upper()
         + "|"
