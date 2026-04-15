@@ -17,7 +17,7 @@ from app.pipeline.m5_3_composicao_subregioes import executar_m5_3_composicao_sub
 from app.pipeline.m5_4a_triagem_mesorregioes import executar_m5_4a_triagem_mesorregioes
 from app.pipeline.m5_4b_composicao_mesorregioes import executar_m5_4b_composicao_mesorregioes
 from app.pipeline.m6_1_consolidacao_manifestos import executar_m6_1_consolidacao_manifestos
-from app.pipeline.m6_2_otimizacao_manifestos import executar_m6_2_otimizacao_manifestos
+from app.pipeline.m6_2_complemento_ocupacao import executar_m6_2_complemento_ocupacao
 from app.schemas import RoteirizacaoRequest
 from app.services.payload_service import PipelineContext, normalizar_payload_para_pipeline
 
@@ -557,6 +557,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     df_premanifestos_m5_4 = outputs_m5_4b["df_premanifestos_m5_4"]
     df_itens_premanifestos_m5_4 = outputs_m5_4b["df_itens_premanifestos_m5_4"]
     df_tentativas_m5_4 = outputs_m5_4b["df_tentativas_m5_4"]
+    df_remanescente_m5_4 = outputs_m5_4b["df_remanescente_m5_4"]
 
     logs.append(
         _log(
@@ -597,8 +598,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     resumo_m6_1 = meta_m6_1["resumo_m6_1"]
     df_manifestos_base_m6 = outputs_m6_1["df_manifestos_base_m6"]
     df_itens_manifestos_base_m6 = outputs_m6_1["df_itens_manifestos_base_m6"]
-    df_estatisticas_manifestos_antes_m6 = outputs_m6_1["df_estatisticas_manifestos_antes_m6"]
-    df_pares_elegiveis_otimizacao_m6 = outputs_m6_1["df_pares_elegiveis_otimizacao_m6"]
 
     logs.append(
         _log(
@@ -616,64 +615,66 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             extra={
                 **resumo_m6_1,
                 "total_itens_manifestos_base_m6": _safe_len(df_itens_manifestos_base_m6),
-                "total_estatisticas_manifestos_antes_m6": _safe_len(df_estatisticas_manifestos_antes_m6),
-                "total_pares_elegiveis_otimizacao_m6": _safe_len(df_pares_elegiveis_otimizacao_m6),
             },
         )
     )
 
     # =========================================================================================
-    # M6.2
+    # M6.2 NOVO - COMPLEMENTO DE OCUPAÇÃO
     # =========================================================================================
     t0 = _agora()
-    resultado_m6_2 = executar_m6_2_otimizacao_manifestos(
+    resultado_m6_2 = executar_m6_2_complemento_ocupacao(
         df_manifestos_base_m6=df_manifestos_base_m6,
         df_itens_manifestos_base_m6=df_itens_manifestos_base_m6,
-        df_pares_elegiveis_otimizacao_m6=df_pares_elegiveis_otimizacao_m6,
+        df_remanescente_m5=df_remanescente_m5_4,
         data_base_roteirizacao=contexto.data_base,
-        df_veiculos_disponiveis=df_veiculos_tratados,
+        tipo_roteirizacao=contexto.tipo_roteirizacao,
         caminhos_pipeline=contexto.caminhos_pipeline,
+        ocupacao_alvo_perc=85.0,
     )
     tempo_m6_2 = _duracao_ms(t0)
-    metricas_tempo["m6_2_otimizacao_manifestos_ms"] = tempo_m6_2
+    metricas_tempo["m6_2_complemento_ocupacao_ms"] = tempo_m6_2
 
     outputs_m6_2 = resultado_m6_2["outputs_m6_2"]
     resumo_m6_2 = resultado_m6_2["resumo_m6_2"]
 
-    df_manifestos_otimizados_m6_2 = outputs_m6_2["df_manifestos_otimizados_m6_2"]
-    df_itens_manifestos_otimizados_m6_2 = outputs_m6_2["df_itens_manifestos_otimizados_m6_2"]
-    df_movimentos_otimizacao_m6_2 = outputs_m6_2["df_movimentos_otimizacao_m6_2"]
-    df_tentativas_otimizacao_m6_2 = outputs_m6_2["df_tentativas_otimizacao_m6_2"]
-    df_estatisticas_antes_depois_m6_2 = outputs_m6_2["df_estatisticas_antes_depois_m6_2"]
+    df_manifestos_m6_2 = outputs_m6_2["df_manifestos_m6_2"]
+    df_itens_manifestos_m6_2 = outputs_m6_2["df_itens_manifestos_m6_2"]
+    df_remanescente_m6_2 = outputs_m6_2["df_remanescente_m6_2"]
+    df_remanescente_m5_original_m6_2 = outputs_m6_2["df_remanescente_m5_original_m6_2"]
+    df_tentativas_m6_2 = outputs_m6_2["df_tentativas_m6_2"]
+    df_movimentos_aceitos_m6_2 = outputs_m6_2["df_movimentos_aceitos_m6_2"]
 
     logs.append(
         _log(
-            modulo="m6_2_otimizacao_manifestos",
+            modulo="m6_2_complemento_ocupacao",
             status="ok",
             mensagem="M6.2 executado com sucesso",
             quantidade_entrada=_safe_len(df_manifestos_base_m6),
-            quantidade_saida=_safe_len(df_manifestos_otimizados_m6_2),
+            quantidade_saida=_safe_len(df_manifestos_m6_2),
             tempo_ms=tempo_m6_2,
             extra={
                 **resumo_m6_2,
-                "total_itens_manifestos_otimizados_m6_2": _safe_len(df_itens_manifestos_otimizados_m6_2),
-                "total_movimentos_otimizacao_m6_2": _safe_len(df_movimentos_otimizacao_m6_2),
-                "total_tentativas_otimizacao_m6_2": _safe_len(df_tentativas_otimizacao_m6_2),
-                "total_estatisticas_antes_depois_m6_2": _safe_len(df_estatisticas_antes_depois_m6_2),
+                "total_itens_manifestos_m6_2": _safe_len(df_itens_manifestos_m6_2),
+                "total_remanescente_m6_2": _safe_len(df_remanescente_m6_2),
+                "total_remanescente_m5_original_m6_2": _safe_len(df_remanescente_m5_original_m6_2),
+                "total_tentativas_m6_2": _safe_len(df_tentativas_m6_2),
+                "total_movimentos_aceitos_m6_2": _safe_len(df_movimentos_aceitos_m6_2),
             },
         )
     )
 
     # =========================================================================================
-    # SERIALIZAÇÃO FINAL - SOMENTE M6.2
+    # SERIALIZAÇÃO FINAL - SOMENTE NOVO M6.2
     # =========================================================================================
     t0 = _agora()
 
-    manifestos_otimizados_m6_2 = _serializar_dataframe_para_records(df_manifestos_otimizados_m6_2, limit=None)
-    itens_manifestos_otimizados_m6_2 = _serializar_dataframe_para_records(df_itens_manifestos_otimizados_m6_2, limit=None)
-    movimentos_otimizacao_m6_2 = _serializar_dataframe_para_records(df_movimentos_otimizacao_m6_2, limit=None)
-    tentativas_otimizacao_m6_2 = _serializar_dataframe_para_records(df_tentativas_otimizacao_m6_2, limit=None)
-    estatisticas_antes_depois_m6_2 = _serializar_dataframe_para_records(df_estatisticas_antes_depois_m6_2, limit=None)
+    manifestos_m6_2 = _serializar_dataframe_para_records(df_manifestos_m6_2, limit=None)
+    itens_manifestos_m6_2 = _serializar_dataframe_para_records(df_itens_manifestos_m6_2, limit=None)
+    remanescente_m6_2 = _serializar_dataframe_para_records(df_remanescente_m6_2, limit=None)
+    remanescente_m5_original_m6_2 = _serializar_dataframe_para_records(df_remanescente_m5_original_m6_2, limit=None)
+    tentativas_m6_2 = _serializar_dataframe_para_records(df_tentativas_m6_2, limit=None)
+    movimentos_aceitos_m6_2 = _serializar_dataframe_para_records(df_movimentos_aceitos_m6_2, limit=None)
 
     tempo_serializacao = _duracao_ms(t0)
     metricas_tempo["serializacao_resposta_ms"] = tempo_serializacao
@@ -683,9 +684,9 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
 
     resposta: Dict[str, Any] = {
         "status": "ok",
-        "mensagem": "Motor executou com sucesso até o M6.2 otimização entre manifestos.",
+        "mensagem": "Motor executou com sucesso até o M6.2 complemento de ocupação.",
         "pipeline_real_ate": "M6.2",
-        "modo_resposta": "auditoria_m6_2",
+        "modo_resposta": "auditoria_m6_2_complemento_ocupacao",
         "resposta_truncada": False,
         "resumo_execucao": {
             "rodada_id": contexto.rodada_id,
@@ -715,14 +716,15 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "total_mesorregioes_consolidadas_m5_4": _safe_len(df_mesorregioes_consolidadas_m5_4),
             "total_premanifestos_m5_4": _safe_len(df_premanifestos_m5_4),
             "total_itens_roteirizados_m5_4": _safe_len(df_itens_premanifestos_m5_4),
+            "total_remanescente_m5_4": _safe_len(df_remanescente_m5_4),
             "total_manifestos_base_m6": _safe_len(df_manifestos_base_m6),
             "total_itens_manifestos_base_m6": _safe_len(df_itens_manifestos_base_m6),
-            "total_pares_elegiveis_otimizacao_m6": _safe_len(df_pares_elegiveis_otimizacao_m6),
-            "total_manifestos_otimizados_m6_2": _safe_len(df_manifestos_otimizados_m6_2),
-            "total_itens_manifestos_otimizados_m6_2": _safe_len(df_itens_manifestos_otimizados_m6_2),
-            "total_movimentos_otimizacao_m6_2": _safe_len(df_movimentos_otimizacao_m6_2),
-            "total_tentativas_otimizacao_m6_2": _safe_len(df_tentativas_otimizacao_m6_2),
-            "total_estatisticas_antes_depois_m6_2": _safe_len(df_estatisticas_antes_depois_m6_2),
+            "total_manifestos_m6_2": _safe_len(df_manifestos_m6_2),
+            "total_itens_manifestos_m6_2": _safe_len(df_itens_manifestos_m6_2),
+            "total_remanescente_m6_2": _safe_len(df_remanescente_m6_2),
+            "total_remanescente_m5_original_m6_2": _safe_len(df_remanescente_m5_original_m6_2),
+            "total_tentativas_m6_2": _safe_len(df_tentativas_m6_2),
+            "total_movimentos_aceitos_m6_2": _safe_len(df_movimentos_aceitos_m6_2),
             "resumo_m3": resumo_m3,
             "resumo_m31": resumo_m31,
             "resumo_m4": resumo_m4,
@@ -739,22 +741,25 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "filial": contexto.filial,
             "parametros_rodada": contexto.parametros_rodada,
         },
-        "manifestos_otimizados_m6_2": manifestos_otimizados_m6_2,
-        "itens_manifestos_otimizados_m6_2": itens_manifestos_otimizados_m6_2,
-        "movimentos_otimizacao_m6_2": movimentos_otimizacao_m6_2,
-        "tentativas_otimizacao_m6_2": tentativas_otimizacao_m6_2,
-        "estatisticas_antes_depois_m6_2": estatisticas_antes_depois_m6_2,
+        "manifestos_m6_2": manifestos_m6_2,
+        "itens_manifestos_m6_2": itens_manifestos_m6_2,
+        "remanescente_m6_2": remanescente_m6_2,
+        "remanescente_m5_original_m6_2": remanescente_m5_original_m6_2,
+        "tentativas_m6_2": tentativas_m6_2,
+        "movimentos_aceitos_m6_2": movimentos_aceitos_m6_2,
         "auditoria_serializacao": {
-            "manifestos_otimizados_m6_2_total": _safe_len(df_manifestos_otimizados_m6_2),
-            "manifestos_otimizados_m6_2_retornado": len(manifestos_otimizados_m6_2),
-            "itens_manifestos_otimizados_m6_2_total": _safe_len(df_itens_manifestos_otimizados_m6_2),
-            "itens_manifestos_otimizados_m6_2_retornado": len(itens_manifestos_otimizados_m6_2),
-            "movimentos_otimizacao_m6_2_total": _safe_len(df_movimentos_otimizacao_m6_2),
-            "movimentos_otimizacao_m6_2_retornado": len(movimentos_otimizacao_m6_2),
-            "tentativas_otimizacao_m6_2_total": _safe_len(df_tentativas_otimizacao_m6_2),
-            "tentativas_otimizacao_m6_2_retornado": len(tentativas_otimizacao_m6_2),
-            "estatisticas_antes_depois_m6_2_total": _safe_len(df_estatisticas_antes_depois_m6_2),
-            "estatisticas_antes_depois_m6_2_retornado": len(estatisticas_antes_depois_m6_2),
+            "manifestos_m6_2_total": _safe_len(df_manifestos_m6_2),
+            "manifestos_m6_2_retornado": len(manifestos_m6_2),
+            "itens_manifestos_m6_2_total": _safe_len(df_itens_manifestos_m6_2),
+            "itens_manifestos_m6_2_retornado": len(itens_manifestos_m6_2),
+            "remanescente_m6_2_total": _safe_len(df_remanescente_m6_2),
+            "remanescente_m6_2_retornado": len(remanescente_m6_2),
+            "remanescente_m5_original_m6_2_total": _safe_len(df_remanescente_m5_original_m6_2),
+            "remanescente_m5_original_m6_2_retornado": len(remanescente_m5_original_m6_2),
+            "tentativas_m6_2_total": _safe_len(df_tentativas_m6_2),
+            "tentativas_m6_2_retornado": len(tentativas_m6_2),
+            "movimentos_aceitos_m6_2_total": _safe_len(df_movimentos_aceitos_m6_2),
+            "movimentos_aceitos_m6_2_retornado": len(movimentos_aceitos_m6_2),
         },
         "logs": logs,
     }
@@ -767,29 +772,18 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                     df_itens_manifestos_base_m6,
                     "df_itens_manifestos_base_m6",
                 ),
-                "df_pares_elegiveis_otimizacao_m6": _snapshot_dataframe(
-                    df_pares_elegiveis_otimizacao_m6,
-                    "df_pares_elegiveis_otimizacao_m6",
+                "df_remanescente_m5_4": _snapshot_dataframe(df_remanescente_m5_4, "df_remanescente_m5_4"),
+                "df_manifestos_m6_2": _snapshot_dataframe(df_manifestos_m6_2, "df_manifestos_m6_2"),
+                "df_itens_manifestos_m6_2": _snapshot_dataframe(df_itens_manifestos_m6_2, "df_itens_manifestos_m6_2"),
+                "df_remanescente_m6_2": _snapshot_dataframe(df_remanescente_m6_2, "df_remanescente_m6_2"),
+                "df_remanescente_m5_original_m6_2": _snapshot_dataframe(
+                    df_remanescente_m5_original_m6_2,
+                    "df_remanescente_m5_original_m6_2",
                 ),
-                "df_manifestos_otimizados_m6_2": _snapshot_dataframe(
-                    df_manifestos_otimizados_m6_2,
-                    "df_manifestos_otimizados_m6_2",
-                ),
-                "df_itens_manifestos_otimizados_m6_2": _snapshot_dataframe(
-                    df_itens_manifestos_otimizados_m6_2,
-                    "df_itens_manifestos_otimizados_m6_2",
-                ),
-                "df_movimentos_otimizacao_m6_2": _snapshot_dataframe(
-                    df_movimentos_otimizacao_m6_2,
-                    "df_movimentos_otimizacao_m6_2",
-                ),
-                "df_tentativas_otimizacao_m6_2": _snapshot_dataframe(
-                    df_tentativas_otimizacao_m6_2,
-                    "df_tentativas_otimizacao_m6_2",
-                ),
-                "df_estatisticas_antes_depois_m6_2": _snapshot_dataframe(
-                    df_estatisticas_antes_depois_m6_2,
-                    "df_estatisticas_antes_depois_m6_2",
+                "df_tentativas_m6_2": _snapshot_dataframe(df_tentativas_m6_2, "df_tentativas_m6_2"),
+                "df_movimentos_aceitos_m6_2": _snapshot_dataframe(
+                    df_movimentos_aceitos_m6_2,
+                    "df_movimentos_aceitos_m6_2",
                 ),
             },
             "resumos_dataframes": {
@@ -798,29 +792,21 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                     df_itens_manifestos_base_m6,
                     "df_itens_manifestos_base_m6",
                 ),
-                "df_pares_elegiveis_otimizacao_m6": _montar_resumo_dataframe(
-                    df_pares_elegiveis_otimizacao_m6,
-                    "df_pares_elegiveis_otimizacao_m6",
+                "df_remanescente_m5_4": _montar_resumo_dataframe(df_remanescente_m5_4, "df_remanescente_m5_4"),
+                "df_manifestos_m6_2": _montar_resumo_dataframe(df_manifestos_m6_2, "df_manifestos_m6_2"),
+                "df_itens_manifestos_m6_2": _montar_resumo_dataframe(
+                    df_itens_manifestos_m6_2,
+                    "df_itens_manifestos_m6_2",
                 ),
-                "df_manifestos_otimizados_m6_2": _montar_resumo_dataframe(
-                    df_manifestos_otimizados_m6_2,
-                    "df_manifestos_otimizados_m6_2",
+                "df_remanescente_m6_2": _montar_resumo_dataframe(df_remanescente_m6_2, "df_remanescente_m6_2"),
+                "df_remanescente_m5_original_m6_2": _montar_resumo_dataframe(
+                    df_remanescente_m5_original_m6_2,
+                    "df_remanescente_m5_original_m6_2",
                 ),
-                "df_itens_manifestos_otimizados_m6_2": _montar_resumo_dataframe(
-                    df_itens_manifestos_otimizados_m6_2,
-                    "df_itens_manifestos_otimizados_m6_2",
-                ),
-                "df_movimentos_otimizacao_m6_2": _montar_resumo_dataframe(
-                    df_movimentos_otimizacao_m6_2,
-                    "df_movimentos_otimizacao_m6_2",
-                ),
-                "df_tentativas_otimizacao_m6_2": _montar_resumo_dataframe(
-                    df_tentativas_otimizacao_m6_2,
-                    "df_tentativas_otimizacao_m6_2",
-                ),
-                "df_estatisticas_antes_depois_m6_2": _montar_resumo_dataframe(
-                    df_estatisticas_antes_depois_m6_2,
-                    "df_estatisticas_antes_depois_m6_2",
+                "df_tentativas_m6_2": _montar_resumo_dataframe(df_tentativas_m6_2, "df_tentativas_m6_2"),
+                "df_movimentos_aceitos_m6_2": _montar_resumo_dataframe(
+                    df_movimentos_aceitos_m6_2,
+                    "df_movimentos_aceitos_m6_2",
                 ),
             },
         }
