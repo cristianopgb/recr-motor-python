@@ -7,30 +7,9 @@ import pandas as pd
 
 # =========================================================================================
 # M6.1 - CONSOLIDAÇÃO E PREPARAÇÃO DA OTIMIZAÇÃO
-# -----------------------------------------------------------------------------------------
-# OBJETIVO
-# - consolidar todos os manifestos/pré-manifestos válidos dos blocos anteriores
-# - consolidar todos os itens desses manifestos
-# - calcular estatísticas "antes" da otimização
-# - identificar a mesorregião operacional de cada manifesto
-# - calcular score de criticidade com prioridade em BAIXA OCUPAÇÃO
-# - gerar pares elegíveis para o M6.2 SOMENTE dentro da mesma mesorregião
-#
-# CONTRATO NOVO
-# - o cabeçalho consolidado passa a carregar também:
-#   - max_paradas_veiculo
-#   - veiculo_exclusivo_flag
-#
-# REGRA DE SEGURANÇA
-# - se o limite real de paradas do veículo não vier dos módulos anteriores,
-#   o M6.1 falha de forma explícita.
-# - não usar qtd_paradas atual do manifesto como se fosse limite do veículo.
 # =========================================================================================
 
 
-# =========================================================================================
-# HELPERS BÁSICOS
-# =========================================================================================
 def _safe_text(value: Any) -> str:
     if value is None:
         return ""
@@ -118,30 +97,15 @@ def _resolver_coluna_existente(
 
 
 def _col_manifesto_id(df: pd.DataFrame) -> str:
-    return _resolver_coluna_existente(
-        df,
-        ["manifesto_id"],
-        "manifesto_id",
-        obrigatoria=True,
-    )
+    return _resolver_coluna_existente(df, ["manifesto_id"], "manifesto_id", True)
 
 
 def _col_veiculo_tipo(df: pd.DataFrame) -> str:
-    return _resolver_coluna_existente(
-        df,
-        ["veiculo_tipo", "tipo"],
-        "veiculo_tipo",
-        obrigatoria=True,
-    )
+    return _resolver_coluna_existente(df, ["veiculo_tipo", "tipo"], "veiculo_tipo", True)
 
 
 def _col_veiculo_perfil(df: pd.DataFrame) -> str:
-    return _resolver_coluna_existente(
-        df,
-        ["veiculo_perfil", "perfil"],
-        "veiculo_perfil",
-        obrigatoria=False,
-    )
+    return _resolver_coluna_existente(df, ["veiculo_perfil", "perfil"], "veiculo_perfil", False)
 
 
 def _col_km_manifesto(df: pd.DataFrame) -> str:
@@ -149,7 +113,7 @@ def _col_km_manifesto(df: pd.DataFrame) -> str:
         df,
         ["km_referencia", "km_total", "km_manifesto", "km_base_antes_m6"],
         "km_manifesto",
-        obrigatoria=True,
+        True,
     )
 
 
@@ -158,7 +122,7 @@ def _col_peso_manifesto(df: pd.DataFrame) -> str:
         df,
         ["base_carga_oficial", "peso_total_kg", "peso_total", "peso_base_antes_m6"],
         "peso_manifesto",
-        obrigatoria=True,
+        True,
     )
 
 
@@ -167,66 +131,36 @@ def _col_ocupacao_manifesto(df: pd.DataFrame) -> str:
         df,
         ["ocupacao_oficial_perc", "ocupacao_perc", "ocupacao_base_antes_m6"],
         "ocupacao_manifesto",
-        obrigatoria=True,
+        True,
     )
 
 
 def _col_capacidade_peso(df: pd.DataFrame) -> str:
-    return _resolver_coluna_existente(
-        df,
-        ["capacidade_peso_kg_veiculo"],
-        "capacidade_peso_kg_veiculo",
-        obrigatoria=True,
-    )
+    return _resolver_coluna_existente(df, ["capacidade_peso_kg_veiculo"], "capacidade_peso_kg_veiculo", True)
 
 
 def _col_max_km(df: pd.DataFrame) -> str:
-    return _resolver_coluna_existente(
-        df,
-        ["max_km_distancia_veiculo"],
-        "max_km_distancia_veiculo",
-        obrigatoria=True,
-    )
+    return _resolver_coluna_existente(df, ["max_km_distancia_veiculo"], "max_km_distancia_veiculo", True)
 
 
 def _col_qtd_itens(df: pd.DataFrame) -> str:
-    return _resolver_coluna_existente(
-        df,
-        ["qtd_itens"],
-        "qtd_itens",
-        obrigatoria=False,
-    )
+    return _resolver_coluna_existente(df, ["qtd_itens"], "qtd_itens", False)
 
 
 def _col_qtd_ctes(df: pd.DataFrame) -> str:
-    return _resolver_coluna_existente(
-        df,
-        ["qtd_ctes"],
-        "qtd_ctes",
-        obrigatoria=False,
-    )
+    return _resolver_coluna_existente(df, ["qtd_ctes"], "qtd_ctes", False)
 
 
 def _col_qtd_paradas(df: pd.DataFrame) -> str:
-    return _resolver_coluna_existente(
-        df,
-        ["qtd_paradas"],
-        "qtd_paradas",
-        obrigatoria=False,
-    )
+    return _resolver_coluna_existente(df, ["qtd_paradas"], "qtd_paradas", False)
 
 
 def _col_max_paradas_manifesto(df: pd.DataFrame) -> str:
     return _resolver_coluna_existente(
         df,
-        [
-            "max_paradas_veiculo",
-            "max_entregas_veiculo",
-            "max_entregas",
-            "limite_entregas",
-        ],
+        ["max_paradas_veiculo", "max_entregas_veiculo", "max_entregas", "limite_entregas"],
         "max_paradas_veiculo",
-        obrigatoria=True,
+        True,
     )
 
 
@@ -275,7 +209,6 @@ def _serie_veiculo_exclusivo(df: pd.DataFrame) -> pd.Series:
         out = out | df[col].apply(_to_bool)
 
     textos = _coletar_textos_exclusividade(df).str.lower()
-
     palavras_chave = [
         "exclusivo",
         "veiculo exclusivo",
@@ -294,9 +227,6 @@ def _serie_veiculo_exclusivo(df: pd.DataFrame) -> pd.Series:
     return out.astype(bool)
 
 
-# =========================================================================================
-# PADRONIZAÇÃO DE MANIFESTOS
-# =========================================================================================
 def _padronizar_manifestos(
     df_manifestos: Optional[pd.DataFrame],
     origem_modulo: str,
@@ -364,12 +294,7 @@ def _padronizar_manifestos(
     out["manifesto_id"] = out["manifesto_id"].fillna("").astype(str).str.strip()
     out["veiculo_tipo"] = out["veiculo_tipo"].fillna("").astype(str).str.strip()
     out["veiculo_perfil"] = (
-        out["veiculo_perfil"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .replace("", pd.NA)
-        .fillna(out["veiculo_tipo"])
+        out["veiculo_perfil"].fillna("").astype(str).str.strip().replace("", pd.NA).fillna(out["veiculo_tipo"])
     )
     out["veiculo_exclusivo_flag"] = out["veiculo_exclusivo_flag"].fillna(False).astype(bool)
     out["texto_exclusivo_detectado_m6"] = out["texto_exclusivo_detectado_m6"].fillna("").astype(str)
@@ -378,35 +303,20 @@ def _padronizar_manifestos(
     out = out.drop_duplicates(subset=["manifesto_id"], keep="first").reset_index(drop=True)
 
     if (out["capacidade_peso_kg_veiculo"] <= 0).any():
-        manifestos_invalidos = out.loc[
-            out["capacidade_peso_kg_veiculo"] <= 0, "manifesto_id"
-        ].astype(str).tolist()[:20]
-        raise Exception(
-            f"M6.1 encontrou manifestos sem capacidade_peso_kg_veiculo válida: {manifestos_invalidos}"
-        )
+        ruins = out.loc[out["capacidade_peso_kg_veiculo"] <= 0, "manifesto_id"].astype(str).tolist()[:20]
+        raise Exception(f"M6.1 encontrou manifestos sem capacidade_peso_kg_veiculo válida: {ruins}")
 
     if (out["max_km_distancia_veiculo"] <= 0).any():
-        manifestos_invalidos = out.loc[
-            out["max_km_distancia_veiculo"] <= 0, "manifesto_id"
-        ].astype(str).tolist()[:20]
-        raise Exception(
-            f"M6.1 encontrou manifestos sem max_km_distancia_veiculo válido: {manifestos_invalidos}"
-        )
+        ruins = out.loc[out["max_km_distancia_veiculo"] <= 0, "manifesto_id"].astype(str).tolist()[:20]
+        raise Exception(f"M6.1 encontrou manifestos sem max_km_distancia_veiculo válido: {ruins}")
 
     if (out["max_paradas_veiculo"] <= 0).any():
-        manifestos_invalidos = out.loc[
-            out["max_paradas_veiculo"] <= 0, "manifesto_id"
-        ].astype(str).tolist()[:20]
-        raise Exception(
-            f"M6.1 encontrou manifestos sem max_paradas_veiculo válido: {manifestos_invalidos}"
-        )
+        ruins = out.loc[out["max_paradas_veiculo"] <= 0, "manifesto_id"].astype(str).tolist()[:20]
+        raise Exception(f"M6.1 encontrou manifestos sem max_paradas_veiculo válido: {ruins}")
 
     return out
 
 
-# =========================================================================================
-# PADRONIZAÇÃO DE ITENS
-# =========================================================================================
 def _padronizar_itens_manifestados(
     df_itens: Optional[pd.DataFrame],
     origem_modulo: str,
@@ -478,9 +388,6 @@ def _padronizar_itens_manifestados(
     return out
 
 
-# =========================================================================================
-# RECOMPOSIÇÃO DE EXCLUSIVIDADE DO M4 A PARTIR DOS ITENS
-# =========================================================================================
 def _recompor_exclusividade_manifestos_m4(
     df_manifestos_base_m6: pd.DataFrame,
     df_itens_manifestos_base_m6: pd.DataFrame,
@@ -501,23 +408,24 @@ def _recompor_exclusividade_manifestos_m4(
         return out
 
     itens_m4["veiculo_exclusivo_flag"] = itens_m4["veiculo_exclusivo_flag"].fillna(False).astype(bool)
-    itens_m4["origem_etapa"] = itens_m4["origem_etapa"].fillna("").astype(str).str.strip().str.lower()
+    itens_m4["origem_etapa"] = itens_m4["origem_etapa"].fillna("").astype(str).str.strip()
 
     agreg = (
         itens_m4.groupby("manifesto_id", dropna=False)
         .agg(
             veiculo_exclusivo_flag_itens_m4=("veiculo_exclusivo_flag", "any"),
-            origem_etapa_4b1_exclusivo_m4=("origem_etapa", lambda s: s.astype(str).str.contains("4b1_exclusivo", regex=False).any()),
-            origem_etapa_exclusivo_m4=("origem_etapa", lambda s: s.astype(str).str.contains("exclusivo", regex=False).any()),
+            origem_etapa_4b1_exclusivo_m4=("origem_etapa", lambda s: (s.astype(str) == "4B1_exclusivo").any()),
         )
         .reset_index()
     )
 
-    agreg["veiculo_exclusivo_recomposto_m4"] = (
-        agreg["veiculo_exclusivo_flag_itens_m4"].fillna(False).astype(bool)
-        | agreg["origem_etapa_4b1_exclusivo_m4"].fillna(False).astype(bool)
-        | agreg["origem_etapa_exclusivo_m4"].fillna(False).astype(bool)
-    )
+    agreg["veiculo_exclusivo_recomposto_m4"] = agreg["veiculo_exclusivo_flag_itens_m4"].fillna(False).astype(bool)
+
+    # fallback estrito: só usa origem_etapa exata se a flag dos itens vier totalmente falsa
+    mask_sem_flag_item = agreg["veiculo_exclusivo_flag_itens_m4"].fillna(False) == False
+    agreg.loc[mask_sem_flag_item, "veiculo_exclusivo_recomposto_m4"] = agreg.loc[
+        mask_sem_flag_item, "origem_etapa_4b1_exclusivo_m4"
+    ].fillna(False).astype(bool)
 
     out = out.merge(
         agreg[
@@ -526,7 +434,6 @@ def _recompor_exclusividade_manifestos_m4(
                 "veiculo_exclusivo_recomposto_m4",
                 "veiculo_exclusivo_flag_itens_m4",
                 "origem_etapa_4b1_exclusivo_m4",
-                "origem_etapa_exclusivo_m4",
             ]
         ],
         on="manifesto_id",
@@ -541,13 +448,9 @@ def _recompor_exclusividade_manifestos_m4(
     )
 
     out["veiculo_exclusivo_flag"] = out["veiculo_exclusivo_flag"].fillna(False).astype(bool)
-
     return out
 
 
-# =========================================================================================
-# ESTATÍSTICAS ANTES DA OTIMIZAÇÃO
-# =========================================================================================
 def _estatisticas_manifestos_antes(
     df_manifestos_base: pd.DataFrame,
     df_itens_base: pd.DataFrame,
@@ -611,25 +514,15 @@ def _estatisticas_manifestos_antes(
     out["ocupacao_recalculada_antes_m6"] = 0.0
     mask_cap = pd.to_numeric(out["capacidade_peso_kg_veiculo"], errors="coerce").fillna(0.0) > 0
     out.loc[mask_cap, "ocupacao_recalculada_antes_m6"] = (
-        out.loc[mask_cap, "peso_itens_antes_m6"]
-        / out.loc[mask_cap, "capacidade_peso_kg_veiculo"]
-        * 100.0
+        out.loc[mask_cap, "peso_itens_antes_m6"] / out.loc[mask_cap, "capacidade_peso_kg_veiculo"] * 100.0
     )
 
-    out["delta_peso_base_vs_itens_antes_m6"] = (
-        out["peso_base_antes_m6"] - out["peso_itens_antes_m6"]
-    ).round(3)
-
-    out["delta_km_base_vs_itens_antes_m6"] = (
-        out["km_base_antes_m6"] - out["km_itens_antes_m6"]
-    ).round(3)
+    out["delta_peso_base_vs_itens_antes_m6"] = (out["peso_base_antes_m6"] - out["peso_itens_antes_m6"]).round(3)
+    out["delta_km_base_vs_itens_antes_m6"] = (out["km_base_antes_m6"] - out["km_itens_antes_m6"]).round(3)
 
     return out.reset_index(drop=True)
 
 
-# =========================================================================================
-# SCORE DE CRITICIDADE
-# =========================================================================================
 def _aplicar_score_criticidade_por_mesorregiao(
     df_estatisticas_manifestos_antes_m6: pd.DataFrame,
 ) -> pd.DataFrame:
@@ -638,13 +531,8 @@ def _aplicar_score_criticidade_por_mesorregiao(
 
     df = df_estatisticas_manifestos_antes_m6.copy()
 
-    df["ocupacao_recalculada_antes_m6"] = pd.to_numeric(
-        df["ocupacao_recalculada_antes_m6"], errors="coerce"
-    ).fillna(0.0)
-
-    df["km_itens_antes_m6"] = pd.to_numeric(
-        df["km_itens_antes_m6"], errors="coerce"
-    ).fillna(0.0)
+    df["ocupacao_recalculada_antes_m6"] = pd.to_numeric(df["ocupacao_recalculada_antes_m6"], errors="coerce").fillna(0.0)
+    df["km_itens_antes_m6"] = pd.to_numeric(df["km_itens_antes_m6"], errors="coerce").fillna(0.0)
 
     df["score_ocupacao_ruim_m6"] = 0.0
     df["score_km_ruim_m6"] = 0.0
@@ -674,10 +562,7 @@ def _aplicar_score_criticidade_por_mesorregiao(
         g["score_ocupacao_ruim_m6"] = (1.0 - ocup_norm).clip(lower=0.0, upper=1.0)
         g["score_km_ruim_m6"] = km_norm.clip(lower=0.0, upper=1.0)
 
-        g["score_criticidade_m6"] = (
-            0.75 * g["score_ocupacao_ruim_m6"]
-            + 0.25 * g["score_km_ruim_m6"]
-        ).round(6)
+        g["score_criticidade_m6"] = (0.75 * g["score_ocupacao_ruim_m6"] + 0.25 * g["score_km_ruim_m6"]).round(6)
 
         g = g.sort_values(
             by=[
@@ -699,16 +584,12 @@ def _aplicar_score_criticidade_por_mesorregiao(
     return out.reset_index(drop=True)
 
 
-# =========================================================================================
-# GERAÇÃO DE PARES ELEGÍVEIS
-# =========================================================================================
 def _par_elegivel_por_faixa(r1: pd.Series, r2: pd.Series) -> Tuple[bool, str]:
     meso_1 = _safe_text(r1.get("mesorregiao_manifesto_m6"))
     meso_2 = _safe_text(r2.get("mesorregiao_manifesto_m6"))
 
     if meso_1 == "" or meso_2 == "":
         return False, "mesorregiao_ausente"
-
     if meso_1 != meso_2:
         return False, "mesorregiao_diferente"
 
@@ -719,7 +600,6 @@ def _par_elegivel_por_faixa(r1: pd.Series, r2: pd.Series) -> Tuple[bool, str]:
 
     if peso_1 <= 0 or peso_2 <= 0:
         return False, "peso_invalido"
-
     if km_1 <= 0 or km_2 <= 0:
         return False, "km_invalido"
 
@@ -730,7 +610,6 @@ def _par_elegivel_por_faixa(r1: pd.Series, r2: pd.Series) -> Tuple[bool, str]:
 
     if menor_peso <= 0:
         return False, "peso_invalido"
-
     if menor_km <= 0:
         return False, "km_invalido"
 
@@ -739,16 +618,13 @@ def _par_elegivel_por_faixa(r1: pd.Series, r2: pd.Series) -> Tuple[bool, str]:
 
     if razao_peso > 3.5:
         return False, "faixa_peso_muito_distante"
-
     if razao_km > 2.5:
         return False, "faixa_km_muito_distante"
 
     return True, "par_elegivel"
 
 
-def _gerar_pares_elegiveis_otimizacao(
-    df_manifestos_scored_m6: pd.DataFrame,
-) -> pd.DataFrame:
+def _gerar_pares_elegiveis_otimizacao(df_manifestos_scored_m6: pd.DataFrame) -> pd.DataFrame:
     if df_manifestos_scored_m6 is None or df_manifestos_scored_m6.empty:
         return pd.DataFrame()
 
@@ -756,11 +632,7 @@ def _gerar_pares_elegiveis_otimizacao(
 
     for meso, grupo in df_manifestos_scored_m6.groupby("mesorregiao_manifesto_m6", dropna=False, sort=False):
         g = grupo.copy().sort_values(
-            by=[
-                "ranking_criticidade_m6",
-                "score_criticidade_m6",
-                "ocupacao_recalculada_antes_m6",
-            ],
+            by=["ranking_criticidade_m6", "score_criticidade_m6", "ocupacao_recalculada_antes_m6"],
             ascending=[True, False, True],
             kind="mergesort",
         ).reset_index(drop=True)
@@ -773,19 +645,12 @@ def _gerar_pares_elegiveis_otimizacao(
 
         for i in range(top_criticos):
             row_i = g.iloc[i]
-
             candidatos_j = g.drop(index=i).reset_index(drop=True)
             candidatos_j = candidatos_j.sort_values(
-                by=[
-                    "score_criticidade_m6",
-                    "ocupacao_recalculada_antes_m6",
-                    "km_itens_antes_m6",
-                ],
+                by=["score_criticidade_m6", "ocupacao_recalculada_antes_m6", "km_itens_antes_m6"],
                 ascending=[False, True, False],
                 kind="mergesort",
-            ).reset_index(drop=True)
-
-            candidatos_j = candidatos_j.head(5)
+            ).reset_index(drop=True).head(5)
 
             for _, row_j in candidatos_j.iterrows():
                 id_a = _safe_text(row_i.get("manifesto_id"))
@@ -795,7 +660,6 @@ def _gerar_pares_elegiveis_otimizacao(
                     continue
 
                 manifesto_id_a, manifesto_id_b = sorted([id_a, id_b])
-
                 elegivel, motivo = _par_elegivel_por_faixa(row_i, row_j)
                 if not elegivel:
                     continue
@@ -836,30 +700,16 @@ def _gerar_pares_elegiveis_otimizacao(
     if out.empty:
         return out
 
-    out = out.drop_duplicates(
-        subset=["mesorregiao_manifesto_m6", "manifesto_id_a", "manifesto_id_b"],
-        keep="first",
-    ).copy()
-
+    out = out.drop_duplicates(subset=["mesorregiao_manifesto_m6", "manifesto_id_a", "manifesto_id_b"], keep="first").copy()
     out = out.sort_values(
-        by=[
-            "score_par_prioridade_m6",
-            "ocupacao_antes_a",
-            "ocupacao_antes_b",
-            "km_antes_a",
-            "km_antes_b",
-        ],
+        by=["score_par_prioridade_m6", "ocupacao_antes_a", "ocupacao_antes_b", "km_antes_a", "km_antes_b"],
         ascending=[False, True, True, False, False],
         kind="mergesort",
     ).reset_index(drop=True)
-
     out["ordem_prioridade_par_m6"] = range(1, len(out) + 1)
     return out
 
 
-# =========================================================================================
-# FUNÇÃO PRINCIPAL
-# =========================================================================================
 def executar_m6_1_consolidacao_manifestos(
     df_manifestos_m4: Optional[pd.DataFrame] = None,
     df_itens_manifestados_m4: Optional[pd.DataFrame] = None,
@@ -903,18 +753,12 @@ def executar_m6_1_consolidacao_manifestos(
     )
 
     if not df_manifestos_base_m6.empty:
-        df_manifestos_base_m6 = (
-            df_manifestos_base_m6
-            .drop_duplicates(subset=["manifesto_id"], keep="first")
-            .reset_index(drop=True)
-        )
+        df_manifestos_base_m6 = df_manifestos_base_m6.drop_duplicates(subset=["manifesto_id"], keep="first").reset_index(drop=True)
 
     if not df_itens_manifestos_base_m6.empty:
-        df_itens_manifestos_base_m6 = (
-            df_itens_manifestos_base_m6
-            .drop_duplicates(subset=["manifesto_id", "id_linha_pipeline"], keep="first")
-            .reset_index(drop=True)
-        )
+        df_itens_manifestos_base_m6 = df_itens_manifestos_base_m6.drop_duplicates(
+            subset=["manifesto_id", "id_linha_pipeline"], keep="first"
+        ).reset_index(drop=True)
 
     df_manifestos_base_m6 = _recompor_exclusividade_manifestos_m4(
         df_manifestos_base_m6=df_manifestos_base_m6,
@@ -926,13 +770,8 @@ def executar_m6_1_consolidacao_manifestos(
         df_itens_base=df_itens_manifestos_base_m6,
     )
 
-    df_manifestos_scored_m6 = _aplicar_score_criticidade_por_mesorregiao(
-        df_estatisticas_manifestos_antes_m6=df_estatisticas_manifestos_antes_m6,
-    )
-
-    df_pares_elegiveis_otimizacao_m6 = _gerar_pares_elegiveis_otimizacao(
-        df_manifestos_scored_m6=df_manifestos_scored_m6,
-    )
+    df_manifestos_scored_m6 = _aplicar_score_criticidade_por_mesorregiao(df_estatisticas_manifestos_antes_m6)
+    df_pares_elegiveis_otimizacao_m6 = _gerar_pares_elegiveis_otimizacao(df_manifestos_scored_m6)
 
     resumo_m6_1 = {
         "modulo": "M6.1",
@@ -941,17 +780,9 @@ def executar_m6_1_consolidacao_manifestos(
         "manifestos_base_total_m6": int(len(df_manifestos_base_m6)),
         "itens_manifestos_base_total_m6": int(len(df_itens_manifestos_base_m6)),
         "pares_elegiveis_otimizacao_m6": int(len(df_pares_elegiveis_otimizacao_m6)),
-        "manifestos_exclusivos_base_m6": int(
-            df_manifestos_base_m6["veiculo_exclusivo_flag"].fillna(False).astype(bool).sum()
-        ) if not df_manifestos_base_m6.empty else 0,
+        "manifestos_exclusivos_base_m6": int(df_manifestos_base_m6["veiculo_exclusivo_flag"].fillna(False).astype(bool).sum()) if not df_manifestos_base_m6.empty else 0,
         "mesorregioes_manifestos_base_m6": int(
-            df_manifestos_scored_m6["mesorregiao_manifesto_m6"]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .replace("", pd.NA)
-            .dropna()
-            .nunique()
+            df_manifestos_scored_m6["mesorregiao_manifesto_m6"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().nunique()
         ) if not df_manifestos_scored_m6.empty else 0,
         "fontes_consolidadas_m6": {
             "manifestos_m4": int(len(df_manifestos_m4)) if isinstance(df_manifestos_m4, pd.DataFrame) else 0,
@@ -981,47 +812,32 @@ def executar_m6_1_consolidacao_manifestos(
     auditoria_m6_1 = {
         "manifestos_por_origem": (
             df_manifestos_base_m6.groupby("origem_manifesto_modulo")["manifesto_id"].nunique().to_dict()
-            if not df_manifestos_base_m6.empty
-            else {}
+            if not df_manifestos_base_m6.empty else {}
         ),
         "itens_por_origem": (
             df_itens_manifestos_base_m6.groupby("origem_manifesto_modulo")["id_linha_pipeline"].count().to_dict()
-            if not df_itens_manifestos_base_m6.empty
-            else {}
+            if not df_itens_manifestos_base_m6.empty else {}
         ),
         "mesorregioes_base_m6": (
             sorted(
-                df_manifestos_scored_m6["mesorregiao_manifesto_m6"]
-                .fillna("")
-                .astype(str)
-                .str.strip()
-                .replace("", pd.NA)
-                .dropna()
-                .unique()
-                .tolist()
+                df_manifestos_scored_m6["mesorregiao_manifesto_m6"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().unique().tolist()
             )
-            if not df_manifestos_scored_m6.empty
-            else []
+            if not df_manifestos_scored_m6.empty else []
         ),
         "veiculos_tipos_base_m6": (
             sorted(df_manifestos_base_m6["veiculo_tipo"].fillna("").astype(str).str.strip().unique().tolist())
-            if not df_manifestos_base_m6.empty
-            else []
+            if not df_manifestos_base_m6.empty else []
         ),
         "manifestos_exclusivos_m6": (
-            df_manifestos_base_m6.loc[
-                df_manifestos_base_m6["veiculo_exclusivo_flag"] == True, "manifesto_id"
-            ].astype(str).tolist()
-            if not df_manifestos_base_m6.empty
-            else []
+            df_manifestos_base_m6.loc[df_manifestos_base_m6["veiculo_exclusivo_flag"] == True, "manifesto_id"].astype(str).tolist()
+            if not df_manifestos_base_m6.empty else []
         ),
         "textos_exclusivo_detectados_m6": (
             df_manifestos_base_m6.loc[
                 df_manifestos_base_m6["veiculo_exclusivo_flag"] == True,
                 ["manifesto_id", "texto_exclusivo_detectado_m6"],
             ].to_dict(orient="records")
-            if not df_manifestos_base_m6.empty
-            else []
+            if not df_manifestos_base_m6.empty else []
         ),
         "recomposicao_exclusivo_m4": (
             df_manifestos_base_m6.loc[
@@ -1032,19 +848,14 @@ def executar_m6_1_consolidacao_manifestos(
                     "veiculo_exclusivo_recomposto_m4",
                     "veiculo_exclusivo_flag_itens_m4",
                     "origem_etapa_4b1_exclusivo_m4",
-                    "origem_etapa_exclusivo_m4",
                 ],
-            ]
-            .fillna(False)
-            .to_dict(orient="records")
-            if not df_manifestos_base_m6.empty
-            and "veiculo_exclusivo_recomposto_m4" in df_manifestos_base_m6.columns
+            ].fillna(False).to_dict(orient="records")
+            if not df_manifestos_base_m6.empty and "veiculo_exclusivo_recomposto_m4" in df_manifestos_base_m6.columns
             else []
         ),
         "max_paradas_veiculo_por_manifesto": (
             df_manifestos_base_m6.set_index("manifesto_id")["max_paradas_veiculo"].to_dict()
-            if not df_manifestos_base_m6.empty
-            else {}
+            if not df_manifestos_base_m6.empty else {}
         ),
     }
 
@@ -1063,9 +874,6 @@ def executar_m6_1_consolidacao_manifestos(
     return outputs, meta
 
 
-# =========================================================================================
-# ALIASES DEFENSIVOS
-# =========================================================================================
 def executar_m6_consolidacao_manifestos(*args: Any, **kwargs: Any):
     return executar_m6_1_consolidacao_manifestos(*args, **kwargs)
 
