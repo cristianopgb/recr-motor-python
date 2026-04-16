@@ -19,6 +19,21 @@ except Exception as e:
 
 TIME_LIMIT_SECONDS_PADRAO = 5
 
+# =========================================================================================
+# AJUSTE FINO DO ORTOOLS
+# -----------------------------------------------------------------------------------------
+# REGRA VALIDADA:
+# - manter bucket / folga / peso como orientação
+# - distância deve mandar na rota
+#
+# ESCALA:
+# - distância entra em metros (km * 1000)
+# - penalidades abaixo são leves, só para desempate / ajuste fino
+# =========================================================================================
+PESO_BUCKET_ORTO = 120
+PESO_FOLGA_ORTO = 8
+PESO_PESO_PARADA_ORTO = 0.02
+
 
 # =========================================================================================
 # HELPERS BÁSICOS
@@ -274,7 +289,6 @@ def _normalizar_itens(df_itens_m6_2: pd.DataFrame) -> pd.DataFrame:
         "df_itens_manifestos_m6_2",
     )
 
-    # origem/filial: primeiro tenta o contrato explícito do M2, depois o payload/filial herdado
     col_lat_filial = _resolver_coluna_existente(
         out,
         ["latitude_filial", "origem_latitude"],
@@ -295,7 +309,6 @@ def _normalizar_itens(df_itens_m6_2: pd.DataFrame) -> pd.DataFrame:
         out["longitude_filial"] = np.nan
         col_lon_filial = "longitude_filial"
 
-    # destino: primeiro usa contrato do M2, depois fallback direto da carteira
     col_lat_dest = _resolver_coluna_existente(
         out,
         ["latitude_destinatario", "latitude_destino", "latitude"],
@@ -460,18 +473,29 @@ def _ordenar_paradas_por_regra_e_orto(
 
         prioridade_por_no = {0: 0}
         for idx, row in df_paradas.reset_index(drop=True).iterrows():
-            prioridade_por_no[idx + 1] = (
-                int(row["bucket_prioridade_m7"]) * 10000
-                + int(float(row["folga_min_m7"]) * 100)
-                - int(float(row["peso_total_m7"]) / 10.0)
-            )
+            bucket_pen = int(row["bucket_prioridade_m7"]) * PESO_BUCKET_ORTO
+
+            folga_val = float(row["folga_min_m7"])
+            if pd.isna(folga_val) or folga_val >= 9999:
+                folga_pen = 0
+            else:
+                # mais atraso = um pouco mais prioritário, mas com peso leve
+                folga_pen = int(max(0.0, 30.0 - folga_val) * PESO_FOLGA_ORTO)
+
+            peso_bonus = int(float(row["peso_total_m7"]) * PESO_PESO_PARADA_ORTO)
+
+            # penalidade leve: bucket e folga influenciam pouco; peso ajuda pouco
+            prioridade_por_no[idx + 1] = bucket_pen + folga_pen - peso_bonus
 
         def distance_callback(from_index: int, to_index: int) -> int:
             from_node = manager.IndexToNode(from_index)
             to_node = manager.IndexToNode(to_index)
+
             distancia_base = matriz[from_node][to_node]
             penalidade = prioridade_por_no.get(to_node, 0)
-            custo = int(distancia_base * 1000) + penalidade
+
+            # distância domina; penalidade só ajusta
+            custo = int(distancia_base * 1000) + int(penalidade)
             return max(custo, 0)
 
         transit_callback_index = routing.RegisterTransitCallback(distance_callback)
@@ -755,6 +779,12 @@ def executar_m7_sequenciamento_entregas(
         "tipo_roteirizacao": tipo_roteirizacao,
         "fonte_geo_m7": "contrato_itens_e_filial",
         "time_limit_seconds_m7": int(time_limit_seconds),
+        "pesos_ortools_m7": {
+            "peso_bucket": PESO_BUCKET_ORTO,
+            "peso_folga": PESO_FOLGA_ORTO,
+            "peso_peso_parada": PESO_PESO_PARADA_ORTO,
+            "distancia_dominante": True,
+        },
         "manifestos_entrada_m7": int(df_manifestos["manifesto_id"].nunique()),
         "itens_entrada_m7": int(len(df_itens)),
         "manifestos_saida_m7": int(df_itens_manifestos_sequenciados_m7["manifesto_id"].nunique())
