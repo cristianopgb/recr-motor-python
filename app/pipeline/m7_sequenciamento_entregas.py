@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import math
+import re
 import unicodedata
 
 import numpy as np
@@ -19,45 +20,9 @@ except Exception as e:
     )
 
 
-# =========================================================================================
-# M7 - SEQUENCIAMENTO DE ENTREGAS COM OR-TOOLS
-# -----------------------------------------------------------------------------------------
-# OBJETIVO
-# - sequenciar as entregas dentro de cada manifesto fechado do M6.2
-# - preservar a composição do manifesto
-# - reduzir deslocamento entre paradas sem quebrar prioridade operacional
-# - gerar ordem de entrega e ordem reversa de carregamento
-#
-# PRINCÍPIOS
-# - não altera composição do manifesto
-# - não puxa remanescente
-# - não cria novo manifesto
-# - mesma parada permanece agrupada
-# - prioridade operacional entra antes do solver
-# - OR-Tools organiza o caminho entre as paradas
-#
-# ENTRADAS ESPERADAS
-# - df_manifestos_m6_2
-# - df_itens_manifestos_m6_2
-# - df_geo_tratado ou df_geo_raw
-# - data_base_roteirizacao
-# - tipo_roteirizacao
-# - caminhos_pipeline
-#
-# SAÍDAS
-# - df_itens_manifestos_sequenciados_m7
-# - df_manifestos_sequenciamento_resumo_m7
-# - df_tentativas_sequenciamento_m7
-# - df_diagnostico_recuperacao_coordenadas_m7
-# =========================================================================================
-
-
 TIME_LIMIT_SECONDS_PADRAO = 5
 
 
-# =========================================================================================
-# HELPERS BÁSICOS
-# =========================================================================================
 def _safe_text(value: Any) -> str:
     if value is None:
         return ""
@@ -129,6 +94,26 @@ def _chave_texto(valor: Any) -> str:
     return _remover_acentos(_normalizar_texto(valor)).upper()
 
 
+def _padronizar_nome_coluna_m1_like(col: Any) -> str:
+    if col is None:
+        return ""
+    texto = str(col).replace("\u00a0", " ")
+    texto = texto.strip()
+    texto = re.sub(r"\s+", " ", texto)
+    texto = _remover_acentos(texto)
+    texto = str(texto).lower()
+    texto = texto.replace("/", "_")
+    texto = texto.replace(".", "")
+    texto = texto.replace("-", "_")
+    texto = texto.replace("(", "_")
+    texto = texto.replace(")", "_")
+    texto = texto.replace("%", "perc")
+    texto = re.sub(r"[^a-z0-9_]+", "_", texto)
+    texto = re.sub(r"_+", "_", texto)
+    texto = texto.strip("_")
+    return texto
+
+
 def _resolver_coluna_existente(
     df: pd.DataFrame,
     candidatos: List[str],
@@ -144,6 +129,27 @@ def _resolver_coluna_existente(
             f"M7 não encontrou a coluna obrigatória '{nome_logico}'. "
             f"Esperado um destes nomes: {candidatos}. "
             f"Corrija o contrato do módulo anterior."
+        )
+
+    return ""
+
+
+def _resolver_coluna_por_prefixo(
+    df: pd.DataFrame,
+    prefixos: List[str],
+    nome_logico: str,
+    obrigatoria: bool = True,
+) -> str:
+    for p in prefixos:
+        for c in df.columns:
+            if str(c).startswith(p):
+                return c
+
+    if obrigatoria:
+        raise Exception(
+            f"M7 não encontrou a coluna obrigatória '{nome_logico}' por prefixo. "
+            f"Esperado prefixos: {prefixos}. "
+            f"Corrija o contrato oficial da base geo."
         )
 
     return ""
@@ -165,9 +171,6 @@ def _validar_colunas(df: pd.DataFrame, obrigatorias: List[str], nome_df: str) ->
         )
 
 
-# =========================================================================================
-# HELPERS GEO
-# =========================================================================================
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     if any(pd.isna(x) for x in [lat1, lon1, lat2, lon2]):
         return 999999.0
@@ -203,20 +206,7 @@ def _construir_matriz_distancias(coords: List[Tuple[float, float]]) -> np.ndarra
     return matriz
 
 
-# =========================================================================================
-# PRIORIDADE OPERACIONAL
-# =========================================================================================
 def _classificar_prioridade_negocio(row: pd.Series) -> Tuple[int, float, float]:
-    """
-    Bucket menor = maior prioridade operacional.
-
-    Regras:
-    1) agendadas
-    2) dentro das agendadas: menor folga primeiro
-    3) depois não agendadas urgentes
-    4) por fim não agendadas normais
-    5) maior peso ajuda no desempate
-    """
     agendada = bool(row.get("agendada_norm", False))
     folga = row.get("folga_dias_norm", np.nan)
     peso = row.get("peso_kg_norm", 0.0)
@@ -316,15 +306,10 @@ def _ordenar_docs_dentro_parada(df_parada: pd.DataFrame, col_doc: str) -> pd.Dat
     )
 
 
-# =========================================================================================
-# NORMALIZAÇÃO DAS BASES
-# =========================================================================================
 def _normalizar_manifestos(df_manifestos_m6_2: pd.DataFrame) -> pd.DataFrame:
     out = df_manifestos_m6_2.copy()
 
-    obrigatorias = [
-        "manifesto_id",
-    ]
+    obrigatorias = ["manifesto_id"]
     _validar_colunas(out, obrigatorias, "df_manifestos_m6_2")
 
     out["manifesto_id"] = out["manifesto_id"].astype(str).str.strip()
@@ -418,11 +403,31 @@ def _normalizar_itens(df_itens_m6_2: pd.DataFrame) -> pd.DataFrame:
 
 def _normalizar_geo(df_geo: pd.DataFrame) -> pd.DataFrame:
     geo = df_geo.copy()
-    geo.columns = [str(c).strip().lower() for c in geo.columns]
+
+    # replica a padronização de nomes do M1
+    geo.columns = [_padronizar_nome_coluna_m1_like(c) for c in geo.columns]
+
+    # replica o mapa geo do M1
+    mapa_geo = {
+        "cidade": "cidade",
+        "nome": "nome",
+        "uf": "uf",
+        "mesorregiao": "mesorregiao",
+        "microrregiao": "microrregiao",
+        "latitude": "latitude",
+        "longitude": "longitude",
+    }
+    geo = geo.rename(columns={k: v for k, v in mapa_geo.items() if k in geo.columns})
+
+    if "nome" not in geo.columns and "cidade" in geo.columns:
+        geo["nome"] = geo["cidade"]
+
+    if "cidade" not in geo.columns and "nome" in geo.columns:
+        geo["cidade"] = geo["nome"]
 
     col_cidade = _resolver_coluna_existente(
         geo,
-        ["nome", "cidade", "mun_uf"],
+        ["cidade", "nome"],
         "cidade na base geo",
         obrigatoria=True,
     )
@@ -432,27 +437,39 @@ def _normalizar_geo(df_geo: pd.DataFrame) -> pd.DataFrame:
         "uf na base geo",
         obrigatoria=True,
     )
+
     col_lat = _resolver_coluna_existente(
         geo,
         ["latitude", "lat"],
         "latitude na base geo",
-        obrigatoria=True,
+        obrigatoria=False,
     )
+    if col_lat == "":
+        col_lat = _resolver_coluna_por_prefixo(
+            geo,
+            ["latitude", "lat_"],
+            "latitude na base geo",
+            obrigatoria=True,
+        )
+
     col_lon = _resolver_coluna_existente(
         geo,
-        ["longitude", "lon"],
+        ["longitude", "lon", "lng"],
         "longitude na base geo",
-        obrigatoria=True,
+        obrigatoria=False,
     )
+    if col_lon == "":
+        col_lon = _resolver_coluna_por_prefixo(
+            geo,
+            ["longitude", "lon_", "lng_"],
+            "longitude na base geo",
+            obrigatoria=True,
+        )
 
     geo[col_lat] = pd.to_numeric(geo[col_lat], errors="coerce")
     geo[col_lon] = pd.to_numeric(geo[col_lon], errors="coerce")
 
-    if col_cidade == "mun_uf":
-        geo["cidade_geo_base_m7"] = geo["mun_uf"].astype(str).str.split("-").str[0].str.strip()
-    else:
-        geo["cidade_geo_base_m7"] = geo[col_cidade].astype(str).str.strip()
-
+    geo["cidade_geo_base_m7"] = geo[col_cidade].astype(str).str.strip()
     geo["cidade_geo_chave_m7"] = geo["cidade_geo_base_m7"].apply(_chave_texto)
     geo["uf_geo_chave_m7"] = geo[col_uf].apply(_chave_texto)
 
@@ -476,12 +493,15 @@ def _normalizar_geo(df_geo: pd.DataFrame) -> pd.DataFrame:
         .reset_index(drop=True)
     )
 
+    if geo_lookup.empty:
+        raise Exception(
+            "M7 normalizou a base geo, mas não encontrou nenhuma linha válida com latitude/longitude. "
+            "Revise o contrato oficial da regionalidade após o M1."
+        )
+
     return geo_lookup
 
 
-# =========================================================================================
-# RECUPERAÇÃO DE COORDENADAS
-# =========================================================================================
 def _recuperar_coordenadas_destino(
     df_itens: pd.DataFrame,
     geo_lookup: pd.DataFrame,
@@ -535,9 +555,6 @@ def _recuperar_coordenadas_destino(
     return out.reset_index(drop=True), diagnostico.reset_index(drop=True)
 
 
-# =========================================================================================
-# ORDENAÇÃO DE PARADAS POR REGRA + ORTOOLS
-# =========================================================================================
 def _ordenar_paradas_por_regra_e_orto(
     df_manifesto: pd.DataFrame,
     col_manifesto: str,
@@ -714,9 +731,6 @@ def _ordenar_paradas_por_regra_e_orto(
     return grupo.reset_index(drop=True), df_paradas.reset_index(drop=True)
 
 
-# =========================================================================================
-# FUNÇÃO PRINCIPAL
-# =========================================================================================
 def executar_m7_sequenciamento_entregas(
     df_manifestos_m6_2: pd.DataFrame,
     df_itens_manifestos_m6_2: pd.DataFrame,
@@ -961,9 +975,6 @@ def executar_m7_sequenciamento_entregas(
     return outputs, meta
 
 
-# =========================================================================================
-# ALIASES DEFENSIVOS
-# =========================================================================================
 def executar_m7(*args: Any, **kwargs: Any):
     return executar_m7_sequenciamento_entregas(*args, **kwargs)
 
