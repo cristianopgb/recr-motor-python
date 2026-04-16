@@ -430,6 +430,8 @@ def _padronizar_itens_manifestados(
         "peso_kg",
         "vol_m3",
         "restricao_veiculo",
+        "veiculo_exclusivo_flag",
+        "origem_etapa",
     ]
     df = _garantir_colunas(df, colunas_minimas)
 
@@ -459,15 +461,86 @@ def _padronizar_itens_manifestados(
             "peso_kg": pd.to_numeric(df["peso_kg"], errors="coerce").fillna(0.0),
             "vol_m3": pd.to_numeric(df["vol_m3"], errors="coerce").fillna(0.0),
             "restricao_veiculo": df["restricao_veiculo"],
+            "veiculo_exclusivo_flag": df["veiculo_exclusivo_flag"].apply(_to_bool),
+            "origem_etapa": df["origem_etapa"].fillna("").astype(str),
         }
     )
 
     out["manifesto_id"] = out["manifesto_id"].fillna("").astype(str).str.strip()
     out["id_linha_pipeline"] = out["id_linha_pipeline"].fillna("").astype(str).str.strip()
     out["mesorregiao"] = out["mesorregiao"].fillna("").astype(str).str.strip()
+    out["veiculo_exclusivo_flag"] = out["veiculo_exclusivo_flag"].fillna(False).astype(bool)
+    out["origem_etapa"] = out["origem_etapa"].fillna("").astype(str).str.strip()
 
     out = out[(out["manifesto_id"] != "") & (out["id_linha_pipeline"] != "")].copy()
     out = out.drop_duplicates(subset=["manifesto_id", "id_linha_pipeline"], keep="first").reset_index(drop=True)
+
+    return out
+
+
+# =========================================================================================
+# RECOMPOSIÇÃO DE EXCLUSIVIDADE DO M4 A PARTIR DOS ITENS
+# =========================================================================================
+def _recompor_exclusividade_manifestos_m4(
+    df_manifestos_base_m6: pd.DataFrame,
+    df_itens_manifestos_base_m6: pd.DataFrame,
+) -> pd.DataFrame:
+    if df_manifestos_base_m6 is None or df_manifestos_base_m6.empty:
+        return df_manifestos_base_m6.copy()
+
+    out = df_manifestos_base_m6.copy()
+
+    if df_itens_manifestos_base_m6 is None or df_itens_manifestos_base_m6.empty:
+        return out
+
+    itens_m4 = df_itens_manifestos_base_m6.loc[
+        df_itens_manifestos_base_m6["origem_manifesto_modulo"].astype(str) == "M4"
+    ].copy()
+
+    if itens_m4.empty:
+        return out
+
+    itens_m4["veiculo_exclusivo_flag"] = itens_m4["veiculo_exclusivo_flag"].fillna(False).astype(bool)
+    itens_m4["origem_etapa"] = itens_m4["origem_etapa"].fillna("").astype(str).str.strip().str.lower()
+
+    agreg = (
+        itens_m4.groupby("manifesto_id", dropna=False)
+        .agg(
+            veiculo_exclusivo_flag_itens_m4=("veiculo_exclusivo_flag", "any"),
+            origem_etapa_4b1_exclusivo_m4=("origem_etapa", lambda s: s.astype(str).str.contains("4b1_exclusivo", regex=False).any()),
+            origem_etapa_exclusivo_m4=("origem_etapa", lambda s: s.astype(str).str.contains("exclusivo", regex=False).any()),
+        )
+        .reset_index()
+    )
+
+    agreg["veiculo_exclusivo_recomposto_m4"] = (
+        agreg["veiculo_exclusivo_flag_itens_m4"].fillna(False).astype(bool)
+        | agreg["origem_etapa_4b1_exclusivo_m4"].fillna(False).astype(bool)
+        | agreg["origem_etapa_exclusivo_m4"].fillna(False).astype(bool)
+    )
+
+    out = out.merge(
+        agreg[
+            [
+                "manifesto_id",
+                "veiculo_exclusivo_recomposto_m4",
+                "veiculo_exclusivo_flag_itens_m4",
+                "origem_etapa_4b1_exclusivo_m4",
+                "origem_etapa_exclusivo_m4",
+            ]
+        ],
+        on="manifesto_id",
+        how="left",
+    )
+
+    mask_m4 = out["origem_manifesto_modulo"].astype(str) == "M4"
+
+    out.loc[mask_m4, "veiculo_exclusivo_flag"] = (
+        out.loc[mask_m4, "veiculo_exclusivo_flag"].fillna(False).astype(bool)
+        | out.loc[mask_m4, "veiculo_exclusivo_recomposto_m4"].fillna(False).astype(bool)
+    )
+
+    out["veiculo_exclusivo_flag"] = out["veiculo_exclusivo_flag"].fillna(False).astype(bool)
 
     return out
 
@@ -843,6 +916,11 @@ def executar_m6_1_consolidacao_manifestos(
             .reset_index(drop=True)
         )
 
+    df_manifestos_base_m6 = _recompor_exclusividade_manifestos_m4(
+        df_manifestos_base_m6=df_manifestos_base_m6,
+        df_itens_manifestos_base_m6=df_itens_manifestos_base_m6,
+    )
+
     df_estatisticas_manifestos_antes_m6 = _estatisticas_manifestos_antes(
         df_manifestos_base=df_manifestos_base_m6,
         df_itens_base=df_itens_manifestos_base_m6,
@@ -888,6 +966,7 @@ def executar_m6_1_consolidacao_manifestos(
         "estrategia_m6_1": [
             "consolidacao_multiorigem_manifestos",
             "padronizacao_itens_e_manifestos",
+            "recomposicao_exclusividade_m4_a_partir_dos_itens",
             "contrato_com_max_paradas_veiculo",
             "contrato_com_veiculo_exclusivo_flag",
             "fallback_veiculo_perfil_para_veiculo_tipo",
@@ -942,6 +1021,24 @@ def executar_m6_1_consolidacao_manifestos(
                 ["manifesto_id", "texto_exclusivo_detectado_m6"],
             ].to_dict(orient="records")
             if not df_manifestos_base_m6.empty
+            else []
+        ),
+        "recomposicao_exclusivo_m4": (
+            df_manifestos_base_m6.loc[
+                df_manifestos_base_m6["origem_manifesto_modulo"] == "M4",
+                [
+                    "manifesto_id",
+                    "veiculo_exclusivo_flag",
+                    "veiculo_exclusivo_recomposto_m4",
+                    "veiculo_exclusivo_flag_itens_m4",
+                    "origem_etapa_4b1_exclusivo_m4",
+                    "origem_etapa_exclusivo_m4",
+                ],
+            ]
+            .fillna(False)
+            .to_dict(orient="records")
+            if not df_manifestos_base_m6.empty
+            and "veiculo_exclusivo_recomposto_m4" in df_manifestos_base_m6.columns
             else []
         ),
         "max_paradas_veiculo_por_manifesto": (
