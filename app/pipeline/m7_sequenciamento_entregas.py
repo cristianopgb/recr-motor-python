@@ -4,9 +4,6 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import math
-import re
-import unicodedata
-
 import numpy as np
 import pandas as pd
 
@@ -73,46 +70,6 @@ def _to_bool(value: Any) -> bool:
     return txt in {"1", "true", "sim", "s", "yes", "y", "verdadeiro"}
 
 
-def _normalizar_texto(valor: Any) -> str:
-    if pd.isna(valor):
-        return ""
-    return str(valor).strip()
-
-
-def _remover_acentos(texto: Any) -> str:
-    if pd.isna(texto):
-        return ""
-    texto = str(texto)
-    return "".join(
-        c for c in unicodedata.normalize("NFKD", texto)
-        if not unicodedata.combining(c)
-    )
-
-
-def _chave_texto(valor: Any) -> str:
-    return _remover_acentos(_normalizar_texto(valor)).upper()
-
-
-def _padronizar_nome_coluna_m1_like(col: Any) -> str:
-    if col is None:
-        return ""
-    texto = str(col).replace("\u00a0", " ")
-    texto = texto.strip()
-    texto = re.sub(r"\s+", " ", texto)
-    texto = _remover_acentos(texto)
-    texto = str(texto).lower()
-    texto = texto.replace("/", "_")
-    texto = texto.replace(".", "")
-    texto = texto.replace("-", "_")
-    texto = texto.replace("(", "_")
-    texto = texto.replace(")", "_")
-    texto = texto.replace("%", "perc")
-    texto = re.sub(r"[^a-z0-9_]+", "_", texto)
-    texto = re.sub(r"_+", "_", texto)
-    texto = texto.strip("_")
-    return texto
-
-
 def _resolver_coluna_existente(
     df: pd.DataFrame,
     candidatos: List[str],
@@ -122,14 +79,11 @@ def _resolver_coluna_existente(
     for c in candidatos:
         if c in df.columns:
             return c
-
     if obrigatoria:
         raise Exception(
             f"M7 não encontrou a coluna obrigatória '{nome_logico}'. "
-            f"Esperado um destes nomes: {candidatos}. "
-            f"Corrija o contrato do módulo anterior."
+            f"Esperado um destes nomes: {candidatos}."
         )
-
     return ""
 
 
@@ -144,9 +98,7 @@ def _garantir_colunas(df: pd.DataFrame, colunas: List[str]) -> pd.DataFrame:
 def _validar_colunas(df: pd.DataFrame, obrigatorias: List[str], nome_df: str) -> None:
     faltando = [c for c in obrigatorias if c not in df.columns]
     if faltando:
-        raise Exception(
-            f"M7 encontrou colunas obrigatórias ausentes em {nome_df}: {faltando}"
-        )
+        raise Exception(f"M7 encontrou colunas obrigatórias ausentes em {nome_df}: {faltando}")
 
 
 # =========================================================================================
@@ -173,7 +125,6 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 def _construir_matriz_distancias(coords: List[Tuple[float, float]]) -> np.ndarray:
     n = len(coords)
     matriz = np.zeros((n, n), dtype=float)
-
     for i in range(n):
         for j in range(n):
             if i == j:
@@ -181,7 +132,7 @@ def _construir_matriz_distancias(coords: List[Tuple[float, float]]) -> np.ndarra
             else:
                 matriz[i, j] = _haversine_km(
                     coords[i][0], coords[i][1],
-                    coords[j][0], coords[j][1]
+                    coords[j][0], coords[j][1],
                 )
     return matriz
 
@@ -314,8 +265,6 @@ def _normalizar_itens(df_itens_m6_2: pd.DataFrame) -> pd.DataFrame:
         "peso_calculado",
         "agendada",
         "folga_dias",
-        "latitude_filial",
-        "longitude_filial",
     ]
     out = _garantir_colunas(out, colunas_minimas)
 
@@ -325,9 +274,31 @@ def _normalizar_itens(df_itens_m6_2: pd.DataFrame) -> pd.DataFrame:
         "df_itens_manifestos_m6_2",
     )
 
+    # origem/filial: primeiro tenta o contrato explícito do M2, depois o payload/filial herdado
+    col_lat_filial = _resolver_coluna_existente(
+        out,
+        ["latitude_filial", "origem_latitude"],
+        "latitude_filial",
+        obrigatoria=False,
+    )
+    if col_lat_filial == "":
+        out["latitude_filial"] = np.nan
+        col_lat_filial = "latitude_filial"
+
+    col_lon_filial = _resolver_coluna_existente(
+        out,
+        ["longitude_filial", "origem_longitude"],
+        "longitude_filial",
+        obrigatoria=False,
+    )
+    if col_lon_filial == "":
+        out["longitude_filial"] = np.nan
+        col_lon_filial = "longitude_filial"
+
+    # destino: primeiro usa contrato do M2, depois fallback direto da carteira
     col_lat_dest = _resolver_coluna_existente(
         out,
-        ["latitude_destinatario", "latitude_destino"],
+        ["latitude_destinatario", "latitude_destino", "latitude"],
         "latitude_destinatario",
         obrigatoria=False,
     )
@@ -337,7 +308,7 @@ def _normalizar_itens(df_itens_m6_2: pd.DataFrame) -> pd.DataFrame:
 
     col_lon_dest = _resolver_coluna_existente(
         out,
-        ["longitude_destinatario", "longitude_destino"],
+        ["longitude_destinatario", "longitude_destino", "longitude"],
         "longitude_destinatario",
         obrigatoria=False,
     )
@@ -356,8 +327,8 @@ def _normalizar_itens(df_itens_m6_2: pd.DataFrame) -> pd.DataFrame:
         "peso_kg",
         "peso_calculado",
         "folga_dias",
-        "latitude_filial",
-        "longitude_filial",
+        col_lat_filial,
+        col_lon_filial,
         col_lat_dest,
         col_lon_dest,
     ]:
@@ -369,8 +340,10 @@ def _normalizar_itens(df_itens_m6_2: pd.DataFrame) -> pd.DataFrame:
         pd.to_numeric(out["peso_calculado"], errors="coerce")
     )
 
-    out["latitude_dest_norm_m7"] = out[col_lat_dest]
-    out["longitude_dest_norm_m7"] = out[col_lon_dest]
+    out["latitude_filial_m7"] = out[col_lat_filial]
+    out["longitude_filial_m7"] = out[col_lon_filial]
+    out["latitude_dest_m7"] = out[col_lat_dest]
+    out["longitude_dest_m7"] = out[col_lon_dest]
 
     out = out[(out["manifesto_id"] != "") & (out["id_linha_pipeline"] != "")].copy()
 
@@ -383,159 +356,36 @@ def _normalizar_itens(df_itens_m6_2: pd.DataFrame) -> pd.DataFrame:
     return out.reset_index(drop=True)
 
 
-def _normalizar_geo_opcional(df_geo: pd.DataFrame) -> pd.DataFrame:
-    """
-    No contrato real do Sistema 2, a base geo NÃO é garantida como fonte de latitude/longitude.
-    Então aqui ela vira apenas fallback opcional.
-    """
-    geo = df_geo.copy()
-    geo.columns = [_padronizar_nome_coluna_m1_like(c) for c in geo.columns]
-
-    mapa_geo = {
-        "cidade": "cidade",
-        "nome": "nome",
-        "uf": "uf",
-        "mesorregiao": "mesorregiao",
-        "microrregiao": "microrregiao",
-        "latitude": "latitude",
-        "longitude": "longitude",
-    }
-    geo = geo.rename(columns={k: v for k, v in mapa_geo.items() if k in geo.columns})
-
-    if "nome" not in geo.columns and "cidade" in geo.columns:
-        geo["nome"] = geo["cidade"]
-    if "cidade" not in geo.columns and "nome" in geo.columns:
-        geo["cidade"] = geo["nome"]
-
-    col_cidade = _resolver_coluna_existente(
-        geo,
-        ["cidade", "nome"],
-        "cidade na base geo",
-        obrigatoria=False,
-    )
-    col_uf = _resolver_coluna_existente(
-        geo,
-        ["uf"],
-        "uf na base geo",
-        obrigatoria=False,
-    )
-    col_lat = _resolver_coluna_existente(
-        geo,
-        ["latitude", "lat"],
-        "latitude na base geo",
-        obrigatoria=False,
-    )
-    col_lon = _resolver_coluna_existente(
-        geo,
-        ["longitude", "lon", "lng"],
-        "longitude na base geo",
-        obrigatoria=False,
-    )
-
-    # se a base geo não tiver coordenadas, retorna lookup vazio e o M7 segue com as coords da carteira
-    if (
-        col_cidade == ""
-        or col_uf == ""
-        or col_lat == ""
-        or col_lon == ""
-    ):
-        return pd.DataFrame(
-            columns=[
-                "cidade_geo_chave_m7",
-                "uf_geo_chave_m7",
-                "latitude_rec_geo_m7",
-                "longitude_rec_geo_m7",
-            ]
-        )
-
-    geo[col_lat] = pd.to_numeric(geo[col_lat], errors="coerce")
-    geo[col_lon] = pd.to_numeric(geo[col_lon], errors="coerce")
-
-    geo["cidade_geo_base_m7"] = geo[col_cidade].astype(str).str.strip()
-    geo["cidade_geo_chave_m7"] = geo["cidade_geo_base_m7"].apply(_chave_texto)
-    geo["uf_geo_chave_m7"] = geo[col_uf].apply(_chave_texto)
-
-    geo_lookup = (
-        geo[
-            [
-                "cidade_geo_chave_m7",
-                "uf_geo_chave_m7",
-                col_lat,
-                col_lon,
-            ]
-        ]
-        .dropna(subset=[col_lat, col_lon])
-        .drop_duplicates(subset=["cidade_geo_chave_m7", "uf_geo_chave_m7"])
-        .rename(
-            columns={
-                col_lat: "latitude_rec_geo_m7",
-                col_lon: "longitude_rec_geo_m7",
-            }
-        )
-        .reset_index(drop=True)
-    )
-
-    return geo_lookup
-
-
 # =========================================================================================
-# RECUPERAÇÃO DE COORDENADAS
+# PREPARAÇÃO GEO DIRETA DO CONTRATO
 # =========================================================================================
-def _recuperar_coordenadas_destino(
-    df_itens: pd.DataFrame,
-    geo_lookup: pd.DataFrame,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def _preparar_coordenadas_contrato(df_itens: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     out = df_itens.copy()
 
-    out["cidade_chave_seq7"] = out["cidade"].apply(_chave_texto)
-    out["uf_chave_seq7"] = out["uf"].apply(_chave_texto)
-
-    lat_nulos_antes = int(out["latitude_dest_norm_m7"].isna().sum())
-    lon_nulos_antes = int(out["longitude_dest_norm_m7"].isna().sum())
-
-    if isinstance(geo_lookup, pd.DataFrame) and not geo_lookup.empty:
-        out = out.merge(
-            geo_lookup,
-            left_on=["cidade_chave_seq7", "uf_chave_seq7"],
-            right_on=["cidade_geo_chave_m7", "uf_geo_chave_m7"],
-            how="left",
-        )
-    else:
-        out["latitude_rec_geo_m7"] = np.nan
-        out["longitude_rec_geo_m7"] = np.nan
-
-    mask_lat = out["latitude_dest_norm_m7"].isna() & out["latitude_rec_geo_m7"].notna()
-    mask_lon = out["longitude_dest_norm_m7"].isna() & out["longitude_rec_geo_m7"].notna()
-
-    out.loc[mask_lat, "latitude_dest_norm_m7"] = out.loc[mask_lat, "latitude_rec_geo_m7"]
-    out.loc[mask_lon, "longitude_dest_norm_m7"] = out.loc[mask_lon, "longitude_rec_geo_m7"]
-
-    lat_nulos_depois = int(out["latitude_dest_norm_m7"].isna().sum())
-    lon_nulos_depois = int(out["longitude_dest_norm_m7"].isna().sum())
-
-    out["coord_dest_origem_m7"] = "original"
-    out.loc[mask_lat | mask_lon, "coord_dest_origem_m7"] = "recuperada_via_geo"
+    out["status_coord_filial_m7"] = np.where(
+        out["latitude_filial_m7"].notna() & out["longitude_filial_m7"].notna(),
+        "ok",
+        "sem_coordenada_filial",
+    )
 
     out["status_coord_dest_m7"] = np.where(
-        out["latitude_dest_norm_m7"].notna() & out["longitude_dest_norm_m7"].notna(),
+        out["latitude_dest_m7"].notna() & out["longitude_dest_m7"].notna(),
         "ok",
-        "sem_coordenada",
+        "sem_coordenada_destino",
+    )
+
+    out["coord_dest_origem_m7"] = np.where(
+        out["latitude_dest_m7"].notna() & out["longitude_dest_m7"].notna(),
+        "contrato_carteira",
+        "ausente_no_contrato_recebido",
     )
 
     diagnostico = pd.DataFrame(
         [
-            {"indicador": "lat_nulos_antes", "valor": lat_nulos_antes},
-            {"indicador": "lon_nulos_antes", "valor": lon_nulos_antes},
-            {"indicador": "lat_nulos_depois", "valor": lat_nulos_depois},
-            {"indicador": "lon_nulos_depois", "valor": lon_nulos_depois},
-            {
-                "indicador": "linhas_recuperadas_via_geo",
-                "valor": int((out["coord_dest_origem_m7"] == "recuperada_via_geo").sum()),
-            },
-            {
-                "indicador": "linhas_sem_coordenada_final",
-                "valor": int((out["status_coord_dest_m7"] == "sem_coordenada").sum()),
-            },
+            {"indicador": "linhas_filial_ok", "valor": int((out["status_coord_filial_m7"] == "ok").sum())},
+            {"indicador": "linhas_filial_nula", "valor": int((out["status_coord_filial_m7"] != "ok").sum())},
+            {"indicador": "linhas_destino_ok", "valor": int((out["status_coord_dest_m7"] == "ok").sum())},
+            {"indicador": "linhas_destino_nula", "valor": int((out["status_coord_dest_m7"] != "ok").sum())},
         ]
     )
 
@@ -543,7 +393,7 @@ def _recuperar_coordenadas_destino(
 
 
 # =========================================================================================
-# ORDENAÇÃO DE PARADAS
+# ORDEM DAS PARADAS
 # =========================================================================================
 def _ordenar_paradas_por_regra_e_orto(
     df_manifesto: pd.DataFrame,
@@ -565,8 +415,8 @@ def _ordenar_paradas_por_regra_e_orto(
 
     for chave_parada, gpar in grupo.groupby("chave_parada_seq_m7", dropna=False):
         score = _calcular_score_parada(gpar)
-        lat_ref = pd.to_numeric(gpar["latitude_dest_norm_m7"], errors="coerce").mean()
-        lon_ref = pd.to_numeric(gpar["longitude_dest_norm_m7"], errors="coerce").mean()
+        lat_ref = pd.to_numeric(gpar["latitude_dest_m7"], errors="coerce").mean()
+        lon_ref = pd.to_numeric(gpar["longitude_dest_m7"], errors="coerce").mean()
 
         registros_paradas.append(
             {
@@ -584,19 +434,19 @@ def _ordenar_paradas_por_regra_e_orto(
 
     if df_paradas["lat_ref_m7"].isna().any() or df_paradas["lon_ref_m7"].isna().any():
         raise Exception(
-            f"Manifesto {grupo[col_manifesto].iloc[0]} possui parada sem coordenada após recuperação."
+            f"Manifesto {grupo[col_manifesto].iloc[0]} possui parada sem coordenada de destino no contrato."
         )
 
     if len(df_paradas) == 1:
         df_paradas["ordem_entrega_parada_m7"] = 1
         df_paradas["metodo_sequenciamento_parada_m7"] = "parada_unica"
     else:
-        lat_origem = pd.to_numeric(grupo["latitude_filial"], errors="coerce").dropna()
-        lon_origem = pd.to_numeric(grupo["longitude_filial"], errors="coerce").dropna()
+        lat_origem = pd.to_numeric(grupo["latitude_filial_m7"], errors="coerce").dropna()
+        lon_origem = pd.to_numeric(grupo["longitude_filial_m7"], errors="coerce").dropna()
 
         if len(lat_origem) == 0 or len(lon_origem) == 0:
             raise Exception(
-                f"Manifesto {grupo[col_manifesto].iloc[0]} sem coordenada de filial válida."
+                f"Manifesto {grupo[col_manifesto].iloc[0]} sem coordenada de filial no contrato."
             )
 
         origem = (float(lat_origem.iloc[0]), float(lon_origem.iloc[0]))
@@ -619,10 +469,8 @@ def _ordenar_paradas_por_regra_e_orto(
         def distance_callback(from_index: int, to_index: int) -> int:
             from_node = manager.IndexToNode(from_index)
             to_node = manager.IndexToNode(to_index)
-
             distancia_base = matriz[from_node][to_node]
             penalidade = prioridade_por_no.get(to_node, 0)
-
             custo = int(distancia_base * 1000) + penalidade
             return max(custo, 0)
 
@@ -734,41 +582,22 @@ def executar_m7_sequenciamento_entregas(
     caminhos_pipeline: Optional[Dict[str, Any]] = None,
     time_limit_seconds: int = TIME_LIMIT_SECONDS_PADRAO,
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, Any]]:
+    del df_geo_tratado
+    del df_geo_raw
+
     if not isinstance(df_manifestos_m6_2, pd.DataFrame) or df_manifestos_m6_2.empty:
         raise Exception("M7 recebeu df_manifestos_m6_2 vazio.")
 
     if not isinstance(df_itens_manifestos_m6_2, pd.DataFrame) or df_itens_manifestos_m6_2.empty:
         raise Exception("M7 recebeu df_itens_manifestos_m6_2 vazio.")
 
-    if isinstance(df_geo_tratado, pd.DataFrame) and not df_geo_tratado.empty:
-        df_geo_base = df_geo_tratado.copy()
-        nome_base_geo = "df_geo_tratado"
-    elif isinstance(df_geo_raw, pd.DataFrame) and not df_geo_raw.empty:
-        df_geo_base = df_geo_raw.copy()
-        nome_base_geo = "df_geo_raw"
-    else:
-        df_geo_base = pd.DataFrame()
-        nome_base_geo = "geo_ausente"
-
     df_manifestos = _normalizar_manifestos(df_manifestos_m6_2)
     df_itens = _normalizar_itens(df_itens_manifestos_m6_2)
-
-    geo_lookup = _normalizar_geo_opcional(df_geo_base) if not df_geo_base.empty else pd.DataFrame(
-        columns=[
-            "cidade_geo_chave_m7",
-            "uf_geo_chave_m7",
-            "latitude_rec_geo_m7",
-            "longitude_rec_geo_m7",
-        ]
-    )
 
     manifestos_validos = set(df_manifestos["manifesto_id"].astype(str))
     df_itens = df_itens.loc[df_itens["manifesto_id"].astype(str).isin(manifestos_validos)].copy()
 
-    df_itens, df_diagnostico_recuperacao_coordenadas_m7 = _recuperar_coordenadas_destino(
-        df_itens=df_itens,
-        geo_lookup=geo_lookup,
-    )
+    df_itens, df_diagnostico_recuperacao_coordenadas_m7 = _preparar_coordenadas_contrato(df_itens)
 
     resultados: List[pd.DataFrame] = []
     resumos_manifestos: List[Dict[str, Any]] = []
@@ -778,9 +607,14 @@ def executar_m7_sequenciamento_entregas(
         grupo = grupo.copy().reset_index(drop=True)
 
         try:
-            if grupo["latitude_dest_norm_m7"].isna().any() or grupo["longitude_dest_norm_m7"].isna().any():
+            if grupo["latitude_dest_m7"].isna().any() or grupo["longitude_dest_m7"].isna().any():
                 raise Exception(
-                    f"Manifesto {manifesto_id} ainda possui coordenada de destino nula após recuperação."
+                    f"Manifesto {manifesto_id} ainda possui coordenada de destino nula no contrato recebido."
+                )
+
+            if grupo["latitude_filial_m7"].isna().any() or grupo["longitude_filial_m7"].isna().any():
+                raise Exception(
+                    f"Manifesto {manifesto_id} ainda possui coordenada de filial nula no contrato recebido."
                 )
 
             grupo_seq, df_paradas_seq = _ordenar_paradas_por_regra_e_orto(
@@ -919,8 +753,7 @@ def executar_m7_sequenciamento_entregas(
             else None
         ),
         "tipo_roteirizacao": tipo_roteirizacao,
-        "base_geo_utilizada_m7": nome_base_geo,
-        "geo_tem_lookup_coordenadas_m7": bool(not geo_lookup.empty),
+        "fonte_geo_m7": "contrato_itens_e_filial",
         "time_limit_seconds_m7": int(time_limit_seconds),
         "manifestos_entrada_m7": int(df_manifestos["manifesto_id"].nunique()),
         "itens_entrada_m7": int(len(df_itens)),
@@ -931,11 +764,11 @@ def executar_m7_sequenciamento_entregas(
         "fallbacks_m7": int(
             (df_tentativas_sequenciamento_m7["resultado"] == "fallback").sum()
         ) if not df_tentativas_sequenciamento_m7.empty else 0,
-        "linhas_recuperadas_via_geo_m7": int(
-            (df_itens_manifestos_sequenciados_m7["coord_dest_origem_m7"] == "recuperada_via_geo").sum()
+        "linhas_filial_nula_m7": int(
+            (df_itens_manifestos_sequenciados_m7["status_coord_filial_m7"] != "ok").sum()
         ) if not df_itens_manifestos_sequenciados_m7.empty else 0,
-        "linhas_sem_coordenada_final_m7": int(
-            (df_itens_manifestos_sequenciados_m7["status_coord_dest_m7"] == "sem_coordenada").sum()
+        "linhas_destino_nula_m7": int(
+            (df_itens_manifestos_sequenciados_m7["status_coord_dest_m7"] != "ok").sum()
         ) if not df_itens_manifestos_sequenciados_m7.empty else 0,
         "caminhos_pipeline": caminhos_pipeline or {},
     }
