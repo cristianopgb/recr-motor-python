@@ -342,6 +342,15 @@ def _padronizar_itens_manifestados(
         "restricao_veiculo",
         "veiculo_exclusivo_flag",
         "origem_etapa",
+        # contrato geo/origem preservado do M2 em diante
+        "latitude_filial",
+        "longitude_filial",
+        "origem_latitude",
+        "origem_longitude",
+        "latitude_destinatario",
+        "longitude_destinatario",
+        "latitude",
+        "longitude",
     ]
     df = _garantir_colunas(df, colunas_minimas)
 
@@ -373,6 +382,15 @@ def _padronizar_itens_manifestados(
             "restricao_veiculo": df["restricao_veiculo"],
             "veiculo_exclusivo_flag": df["veiculo_exclusivo_flag"].apply(_to_bool),
             "origem_etapa": df["origem_etapa"].fillna("").astype(str),
+            # preservação de contrato geo/origem sem alterar lógica do M6
+            "latitude_filial": pd.to_numeric(df["latitude_filial"], errors="coerce"),
+            "longitude_filial": pd.to_numeric(df["longitude_filial"], errors="coerce"),
+            "origem_latitude": pd.to_numeric(df["origem_latitude"], errors="coerce"),
+            "origem_longitude": pd.to_numeric(df["origem_longitude"], errors="coerce"),
+            "latitude_destinatario": pd.to_numeric(df["latitude_destinatario"], errors="coerce"),
+            "longitude_destinatario": pd.to_numeric(df["longitude_destinatario"], errors="coerce"),
+            "latitude": pd.to_numeric(df["latitude"], errors="coerce"),
+            "longitude": pd.to_numeric(df["longitude"], errors="coerce"),
         }
     )
 
@@ -421,7 +439,6 @@ def _recompor_exclusividade_manifestos_m4(
 
     agreg["veiculo_exclusivo_recomposto_m4"] = agreg["veiculo_exclusivo_flag_itens_m4"].fillna(False).astype(bool)
 
-    # fallback estrito: só usa origem_etapa exata se a flag dos itens vier totalmente falsa
     mask_sem_flag_item = agreg["veiculo_exclusivo_flag_itens_m4"].fillna(False) == False
     agreg.loc[mask_sem_flag_item, "veiculo_exclusivo_recomposto_m4"] = agreg.loc[
         mask_sem_flag_item, "origem_etapa_4b1_exclusivo_m4"
