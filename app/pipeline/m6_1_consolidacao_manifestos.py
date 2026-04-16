@@ -230,35 +230,67 @@ def _col_max_paradas_manifesto(df: pd.DataFrame) -> str:
     )
 
 
+def _coletar_textos_exclusividade(df: pd.DataFrame) -> pd.Series:
+    colunas_texto = [
+        "obs",
+        "observacao",
+        "observacoes",
+        "observacao_manifesto",
+        "observacoes_manifesto",
+        "obs_manifesto",
+        "justificativa",
+        "justificativa_fechamento",
+        "motivo_fechamento",
+        "motivo",
+        "regra_aplicada",
+        "observacao_regra",
+        "descricao_regra",
+        "status_regra",
+    ]
+
+    existentes = [c for c in colunas_texto if c in df.columns]
+    if not existentes:
+        return pd.Series([""] * len(df), index=df.index)
+
+    serie = pd.Series([""] * len(df), index=df.index, dtype="object")
+    for col in existentes:
+        texto = df[col].fillna("").astype(str).str.strip()
+        serie = (serie.fillna("") + " | " + texto).str.strip(" |")
+    return serie.fillna("").astype(str)
+
+
 def _serie_veiculo_exclusivo(df: pd.DataFrame) -> pd.Series:
     out = pd.Series([False] * len(df), index=df.index)
 
-    col_exclusivo = _resolver_coluna_existente(
-        df,
-        ["veiculo_exclusivo_flag", "veiculo_exclusivo", "exclusivo"],
+    colunas_flag = [
         "veiculo_exclusivo_flag",
-        obrigatoria=False,
-    )
-    if col_exclusivo != "":
-        out = out | df[col_exclusivo].apply(_to_bool)
+        "veiculo_exclusivo",
+        "exclusivo",
+        "carga_exclusiva",
+        "manifesto_exclusivo",
+        "exclusivo_m4",
+    ]
+    existentes_flag = [c for c in colunas_flag if c in df.columns]
+    for col in existentes_flag:
+        out = out | df[col].apply(_to_bool)
 
-    col_obs = _resolver_coluna_existente(
-        df,
-        ["obs", "observacao", "observacoes"],
-        "obs",
-        obrigatoria=False,
-    )
-    if col_obs != "":
-        obs_flag = (
-            df[col_obs]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .str.lower()
-            .str.contains("exclusivo", regex=False)
-        )
-        out = out | obs_flag
+    textos = _coletar_textos_exclusividade(df).str.lower()
 
+    palavras_chave = [
+        "exclusivo",
+        "veiculo exclusivo",
+        "veículo exclusivo",
+        "carga exclusiva",
+        "manifesto exclusivo",
+        "dedicado",
+        "dedicada",
+    ]
+
+    texto_flag = pd.Series([False] * len(df), index=df.index)
+    for termo in palavras_chave:
+        texto_flag = texto_flag | textos.str.contains(termo, regex=False)
+
+    out = out | texto_flag
     return out.astype(bool)
 
 
@@ -306,6 +338,7 @@ def _padronizar_manifestos(
         serie_perfil = df[col_perfil].replace("", pd.NA).fillna(df[col_tipo])
 
     serie_exclusivo = _serie_veiculo_exclusivo(df)
+    texto_exclusivo = _coletar_textos_exclusividade(df)
 
     out = pd.DataFrame(
         {
@@ -315,6 +348,7 @@ def _padronizar_manifestos(
             "veiculo_tipo": df[col_tipo].astype(str),
             "veiculo_perfil": serie_perfil.astype(str),
             "veiculo_exclusivo_flag": serie_exclusivo.astype(bool),
+            "texto_exclusivo_detectado_m6": texto_exclusivo.astype(str),
             "peso_base_antes_m6": pd.to_numeric(df[col_peso], errors="coerce").fillna(0.0),
             "km_base_antes_m6": pd.to_numeric(df[col_km], errors="coerce").fillna(0.0),
             "ocupacao_base_antes_m6": pd.to_numeric(df[col_ocup], errors="coerce").fillna(0.0),
@@ -338,6 +372,7 @@ def _padronizar_manifestos(
         .fillna(out["veiculo_tipo"])
     )
     out["veiculo_exclusivo_flag"] = out["veiculo_exclusivo_flag"].fillna(False).astype(bool)
+    out["texto_exclusivo_detectado_m6"] = out["texto_exclusivo_detectado_m6"].fillna("").astype(str)
 
     out = out[out["manifesto_id"] != ""].copy()
     out = out.drop_duplicates(subset=["manifesto_id"], keep="first").reset_index(drop=True)
@@ -898,6 +933,14 @@ def executar_m6_1_consolidacao_manifestos(
             df_manifestos_base_m6.loc[
                 df_manifestos_base_m6["veiculo_exclusivo_flag"] == True, "manifesto_id"
             ].astype(str).tolist()
+            if not df_manifestos_base_m6.empty
+            else []
+        ),
+        "textos_exclusivo_detectados_m6": (
+            df_manifestos_base_m6.loc[
+                df_manifestos_base_m6["veiculo_exclusivo_flag"] == True,
+                ["manifesto_id", "texto_exclusivo_detectado_m6"],
+            ].to_dict(orient="records")
             if not df_manifestos_base_m6.empty
             else []
         ),
