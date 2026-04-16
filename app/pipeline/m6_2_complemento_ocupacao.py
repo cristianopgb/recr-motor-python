@@ -12,6 +12,7 @@ import pandas as pd
 # -----------------------------------------------------------------------------------------
 # REGRA
 # - selecionar manifestos com ocupação < 85
+# - excluir manifestos com veiculo_exclusivo_flag = true
 # - ordenar da menor ocupação para a maior
 # - calcular espaço disponível em peso e paradas
 # - buscar remanescente nesta ordem:
@@ -37,6 +38,7 @@ COLS_MANIFESTOS_OBRIGATORIAS = [
     "origem_manifesto_tipo",
     "veiculo_tipo",
     "veiculo_perfil",
+    "veiculo_exclusivo_flag",
     "peso_base_antes_m6",
     "km_base_antes_m6",
     "ocupacao_base_antes_m6",
@@ -111,7 +113,6 @@ def executar_m6_2_complemento_ocupacao(
     if "origem_item_m6_2" not in df_itens.columns:
         df_itens["origem_item_m6_2"] = "original_m6_1"
 
-    # estado inicial de saída no cabeçalho
     df_manifestos["perfil_final_m6_2"] = (
         df_manifestos["veiculo_perfil"].replace("", np.nan).fillna(df_manifestos["veiculo_tipo"])
     )
@@ -150,6 +151,16 @@ def executar_m6_2_complemento_ocupacao(
                 "nivel_hierarquia": None,
                 "aceito": False,
                 "motivo": "Manifesto elegível sem itens associados.",
+            })
+            continue
+
+        if bool(manifesto.get("veiculo_exclusivo_flag", False)) is True:
+            tentativas.append({
+                "manifesto_id": manifesto_id,
+                "tipo_tentativa": "manifesto_exclusivo_bloqueado",
+                "nivel_hierarquia": None,
+                "aceito": False,
+                "motivo": "Manifesto com veículo exclusivo não pode receber complemento no M6.2.",
             })
             continue
 
@@ -284,7 +295,6 @@ def executar_m6_2_complemento_ocupacao(
                     if not valido:
                         continue
 
-                    # aceita item
                     houve_movimento_neste_manifesto = True
                     aceitou_algum_item_neste_ciclo = True
 
@@ -295,7 +305,6 @@ def executar_m6_2_complemento_ocupacao(
 
                     df_itens = pd.concat([df_itens, item_aplicar], ignore_index=True)
 
-                    # remove imediatamente do remanescente
                     df_remanescente = df_remanescente.loc[
                         df_remanescente["id_linha_pipeline"].astype(str) != str(item_row["id_linha_pipeline"])
                     ].copy()
@@ -315,7 +324,6 @@ def executar_m6_2_complemento_ocupacao(
                         **comparativo,
                     })
 
-                    # segue tentando encaixar mais, sem parar cedo
                     break
 
                 if aceitou_algum_item_neste_ciclo:
@@ -358,6 +366,9 @@ def executar_m6_2_complemento_ocupacao(
         "tipo_roteirizacao": tipo_roteirizacao,
         "ocupacao_alvo_perc": float(ocupacao_alvo_perc),
         "manifestos_base_total_m6_1": int(len(df_manifestos_base_m6)),
+        "manifestos_exclusivos_bloqueados_m6_2": int(
+            df_manifestos_base_m6["veiculo_exclusivo_flag"].fillna(False).astype(bool).sum()
+        ) if "veiculo_exclusivo_flag" in df_manifestos_base_m6.columns else 0,
         "itens_manifestos_base_total_m6_1": int(len(df_itens_manifestos_base_m6)),
         "remanescente_m5_original_total": int(len(df_remanescente_original)),
         "manifestos_alvo_abaixo_ocupacao_alvo": int(len(manifestos_alvo)),
@@ -384,9 +395,6 @@ def executar_m6_2_complemento_ocupacao(
     }
 
 
-# =========================================================================================
-# NORMALIZAÇÃO
-# =========================================================================================
 def _normalizar_manifestos(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     _validar_colunas_minimas(out, COLS_MANIFESTOS_OBRIGATORIAS, "df_manifestos_base_m6")
@@ -410,6 +418,7 @@ def _normalizar_manifestos(df: pd.DataFrame) -> pd.DataFrame:
     out["origem_manifesto_tipo"] = out["origem_manifesto_tipo"].astype(str)
     out["veiculo_tipo"] = out["veiculo_tipo"].astype(str)
     out["veiculo_perfil"] = out["veiculo_perfil"].astype(str)
+    out["veiculo_exclusivo_flag"] = out["veiculo_exclusivo_flag"].fillna(False).astype(bool)
 
     return out.reset_index(drop=True)
 
@@ -520,14 +529,12 @@ def _enriquecer_manifestos_com_estatisticas(
     return out
 
 
-# =========================================================================================
-# LÓGICA DE NEGÓCIO
-# =========================================================================================
 def _selecionar_manifestos_alvo(df_manifestos: pd.DataFrame, ocupacao_alvo_perc: float) -> List[str]:
     base = df_manifestos.copy()
     base["ocupacao_base_antes_m6"] = pd.to_numeric(base["ocupacao_base_antes_m6"], errors="coerce")
     base = base.loc[base["ocupacao_base_antes_m6"].notna()].copy()
     base = base.loc[base["ocupacao_base_antes_m6"] < ocupacao_alvo_perc].copy()
+    base = base.loc[base["veiculo_exclusivo_flag"].fillna(False) == False].copy()
     base = base.sort_values(by=["ocupacao_base_antes_m6", "peso_base_antes_m6"], ascending=[True, False])
     return base["manifesto_id"].astype(str).tolist()
 
@@ -669,13 +676,15 @@ def _simular_adicao_item_por_folga(
         "espaco_disponivel_depois_kg": round(float(estado_depois["espaco_disponivel_peso_kg"]), 4),
     }
 
+    if bool(manifesto.get("veiculo_exclusivo_flag", False)) is True:
+        return False, "Manifesto com veículo exclusivo não pode receber complemento.", comparativo
+
     if peso_item <= 0:
         return False, "Item com peso_calculado inválido.", comparativo
 
     if peso_item > float(estado_atual["espaco_disponivel_peso_kg"]):
         return False, "Item não cabe no espaço disponível em peso.", comparativo
 
-    # raio seco por item versus restrição do perfil
     if max_km_veiculo > 0 and km_item > max_km_veiculo:
         return False, "Item excede o raio máximo do perfil do veículo.", comparativo
 
@@ -735,9 +744,6 @@ def _recalcular_todos_manifestos(df_manifestos: pd.DataFrame, df_itens: pd.DataF
     return out.reset_index(drop=True)
 
 
-# =========================================================================================
-# INTEGRIDADE
-# =========================================================================================
 def _validar_integridade_final(
     df_itens_manifestos_final: pd.DataFrame,
     df_remanescente_final: pd.DataFrame,
@@ -772,16 +778,13 @@ def _validar_integridade_final(
         )
 
 
-# =========================================================================================
-# HELPERS
-# =========================================================================================
 def _to_bool(valor: Any) -> bool:
     if isinstance(valor, bool):
         return valor
     if pd.isna(valor):
         return False
     txt = str(valor).strip().lower()
-    return txt in {"1", "true", "sim", "s", "yes", "y", "agendada"}
+    return txt in {"1", "true", "sim", "s", "yes", "y", "agendada", "verdadeiro"}
 
 
 def _txt_norm(valor: Any) -> str:
