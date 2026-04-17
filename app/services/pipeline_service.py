@@ -1,859 +1,1081 @@
 from __future__ import annotations
 
-import time
-from typing import Any, Dict, List
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
+import math
+import numpy as np
 import pandas as pd
 
-from app.pipeline.m1_padronizacao import executar_m1_padronizacao
-from app.pipeline.m2_enriquecimento import executar_m2_enriquecimento
-from app.pipeline.m3_triagem import executar_m3_triagem
-from app.pipeline.m3_1_validacao_fronteira import executar_m3_1_validacao_fronteira
-from app.pipeline.m4_manifestos_fechados import executar_m4_manifestos_fechados
-from app.pipeline.m5_1_triagem_cidades import executar_m5_1_triagem_cidades
-from app.pipeline.m5_2_composicao_cidades import executar_m5_2_composicao_cidades
-from app.pipeline.m5_3_triagem_subregioes import executar_m5_3_triagem_subregioes
-from app.pipeline.m5_3_composicao_subregioes import executar_m5_3_composicao_subregioes
-from app.pipeline.m5_4a_triagem_mesorregioes import executar_m5_4a_triagem_mesorregioes
-from app.pipeline.m5_4b_composicao_mesorregioes import executar_m5_4b_composicao_mesorregioes
-from app.pipeline.m6_1_consolidacao_manifestos import executar_m6_1_consolidacao_manifestos
-from app.pipeline.m6_2_complemento_ocupacao import executar_m6_2_complemento_ocupacao
-from app.pipeline.m7_sequenciamento_entregas import executar_m7_sequenciamento_entregas
-from app.schemas import RoteirizacaoRequest
-from app.services.payload_service import PipelineContext, normalizar_payload_para_pipeline
+
+TIME_LIMIT_SECONDS_PADRAO = 5
+FATOR_KM_RODOVIARIO_M7_PADRAO = 1.20
 
 
-def _agora() -> float:
-    return time.perf_counter()
-
-
-def _duracao_ms(inicio: float) -> float:
-    return round((time.perf_counter() - inicio) * 1000, 2)
-
-
-def _safe_len(obj: Any) -> int:
+# =========================================================================================
+# HELPERS
+# =========================================================================================
+def _safe_text(value: Any) -> str:
+    if value is None:
+        return ""
     try:
-        return int(len(obj))
+        if pd.isna(value):
+            return ""
     except Exception:
-        return 0
+        pass
+    return str(value).strip()
 
 
-def _is_debug(payload: RoteirizacaoRequest) -> bool:
-    for attr in ("modo_debug", "debug", "retornar_debug", "incluir_debug"):
-        try:
-            valor = getattr(payload, attr, False)
-            if isinstance(valor, bool):
-                return valor
-            if isinstance(valor, str):
-                return valor.strip().lower() in {"1", "true", "sim", "yes"}
-        except Exception:
-            continue
-    return False
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        if pd.isna(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
 
 
-def _log(
-    modulo: str,
-    status: str,
-    mensagem: str,
-    quantidade_entrada: int | None = None,
-    quantidade_saida: int | None = None,
-    tempo_ms: float | None = None,
-    extra: Dict[str, Any] | None = None,
-) -> Dict[str, Any]:
-    registro = {
-        "modulo": modulo,
-        "status": status,
-        "mensagem": mensagem,
-        "quantidade_entrada": quantidade_entrada,
-        "quantidade_saida": quantidade_saida,
-    }
-    if tempo_ms is not None:
-        registro["tempo_ms"] = tempo_ms
-    if extra:
-        registro["extra"] = extra
-    return registro
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+        if pd.isna(value):
+            return default
+        return int(float(value))
+    except Exception:
+        return default
 
 
-def _snapshot_dataframe(df: pd.DataFrame, nome: str, max_colunas: int = 30) -> Dict[str, Any]:
-    if df is None:
-        return {
-            "nome": nome,
-            "linhas": 0,
-            "colunas": [],
-            "qtd_colunas_total": 0,
-        }
-
-    return {
-        "nome": nome,
-        "linhas": int(len(df)),
-        "colunas": list(df.columns[:max_colunas]),
-        "qtd_colunas_total": int(len(df.columns)),
-    }
+def _to_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except Exception:
+        pass
+    txt = str(value).strip().lower()
+    return txt in {"1", "true", "sim", "s", "yes", "y", "verdadeiro"}
 
 
-def _serializar_dataframe_para_records(
+def _resolver_coluna_existente(
     df: pd.DataFrame,
-    limit: int | None = None,
-) -> List[Dict[str, Any]]:
-    if df is None or df.empty:
-        return []
-
-    df2 = df.copy()
-
-    if limit is not None:
-        df2 = df2.head(limit)
-
-    for col in df2.columns:
-        if pd.api.types.is_datetime64_any_dtype(df2[col]):
-            df2[col] = df2[col].astype(str)
-
-    df2 = df2.where(pd.notnull(df2), None)
-    return df2.to_dict(orient="records")
+    candidatos: List[str],
+    nome_logico: str,
+    obrigatoria: bool = True,
+) -> str:
+    for c in candidatos:
+        if c in df.columns:
+            return c
+    if obrigatoria:
+        raise Exception(
+            f"M7 não encontrou a coluna obrigatória '{nome_logico}'. "
+            f"Esperado um destes nomes: {candidatos}."
+        )
+    return ""
 
 
-def _montar_resumo_dataframe(df: pd.DataFrame, nome: str) -> Dict[str, Any]:
+def _garantir_colunas(df: pd.DataFrame, colunas: List[str]) -> pd.DataFrame:
+    out = df.copy()
+    for col in colunas:
+        if col not in out.columns:
+            out[col] = None
+    return out
+
+
+def _validar_colunas(df: pd.DataFrame, obrigatorias: List[str], nome_df: str) -> None:
+    faltando = [c for c in obrigatorias if c not in df.columns]
+    if faltando:
+        raise Exception(f"M7 encontrou colunas obrigatórias ausentes em {nome_df}: {faltando}")
+
+
+# =========================================================================================
+# DISTÂNCIA
+# =========================================================================================
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    if any(pd.isna(x) for x in [lat1, lon1, lat2, lon2]):
+        return 999999.0
+
+    r = 6371.0
+    phi1 = math.radians(float(lat1))
+    phi2 = math.radians(float(lat2))
+    dphi = math.radians(float(lat2) - float(lat1))
+    dlambda = math.radians(float(lon2) - float(lon1))
+
+    a = (
+        math.sin(dphi / 2.0) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2.0) ** 2
+    )
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+    return r * c
+
+
+def _distancia_operacional_km(
+    lat1: float,
+    lon1: float,
+    lat2: float,
+    lon2: float,
+    fator_km_rodoviario: float,
+) -> float:
+    dist_hav = _haversine_km(lat1, lon1, lat2, lon2)
+    if pd.isna(dist_hav):
+        return 999999.0
+
+    fator = _safe_float(fator_km_rodoviario, FATOR_KM_RODOVIARIO_M7_PADRAO)
+    if fator <= 0:
+        fator = FATOR_KM_RODOVIARIO_M7_PADRAO
+
+    return float(dist_hav) * fator
+
+
+def _inferir_fator_rodoviario_real_manifesto(
+    df_manifesto: pd.DataFrame,
+    fallback: float,
+) -> float:
+    if "distancia_rodoviaria_est_km" not in df_manifesto.columns:
+        return float(fallback)
+
+    ratios: List[float] = []
+
+    for _, row in df_manifesto.iterrows():
+        lat_o = pd.to_numeric(row.get("latitude_filial_m7"), errors="coerce")
+        lon_o = pd.to_numeric(row.get("longitude_filial_m7"), errors="coerce")
+        lat_d = pd.to_numeric(row.get("latitude_dest_m7"), errors="coerce")
+        lon_d = pd.to_numeric(row.get("longitude_dest_m7"), errors="coerce")
+        dist_est = pd.to_numeric(row.get("distancia_rodoviaria_est_km"), errors="coerce")
+
+        dist_hav = _haversine_km(lat_o, lon_o, lat_d, lon_d)
+        if pd.isna(dist_est) or pd.isna(dist_hav) or dist_est <= 0 or dist_hav <= 0:
+            continue
+
+        ratio = float(dist_est) / float(dist_hav)
+        if 0.8 <= ratio <= 3.0:
+            ratios.append(ratio)
+
+    if not ratios:
+        return float(fallback)
+
+    return float(np.median(ratios))
+
+
+# =========================================================================================
+# PRIORIDADE
+# =========================================================================================
+def _classificar_prioridade_negocio(row: pd.Series) -> Tuple[int, float, float]:
+    agendada = bool(row.get("agendada_norm", False))
+    folga = row.get("folga_dias_norm", np.nan)
+    peso = row.get("peso_seq_m7", 0.0)
+
+    if pd.isna(folga):
+        folga = 9999.0
+    if pd.isna(peso):
+        peso = 0.0
+
+    if agendada:
+        if folga <= 0:
+            bucket = 0
+        elif folga <= 1:
+            bucket = 1
+        else:
+            bucket = 2
+    else:
+        if folga <= 0:
+            bucket = 3
+        elif folga <= 1:
+            bucket = 4
+        else:
+            bucket = 5
+
+    return (bucket, float(folga), -float(peso))
+
+
+def _calcular_score_parada(df_parada: pd.DataFrame) -> Dict[str, Any]:
+    buckets: List[int] = []
+    folgas: List[float] = []
+    pesos: List[float] = []
+
+    for _, row in df_parada.iterrows():
+        b, f, pneg = _classificar_prioridade_negocio(row)
+        buckets.append(b)
+        folgas.append(f)
+        pesos.append(-pneg)
+
     return {
-        "nome": nome,
-        "total_linhas": _safe_len(df),
-        "qtd_colunas": int(len(df.columns)) if isinstance(df, pd.DataFrame) else 0,
+        "bucket_prioridade": min(buckets) if buckets else 9,
+        "folga_min": min(folgas) if folgas else 9999.0,
+        "peso_total": sum(pesos) if pesos else 0.0,
     }
 
 
-def _executar_m0_adapter(contexto: PipelineContext) -> Dict[str, Any]:
-    inventario = {
-        "rodada_id": contexto.rodada_id,
-        "upload_id": contexto.upload_id,
-        "usuario_id": contexto.usuario_id,
-        "filial_id": contexto.filial_id,
-        "tipo_roteirizacao": contexto.tipo_roteirizacao,
-        "data_execucao": contexto.data_execucao.isoformat(),
-        "data_base_roteirizacao": contexto.data_base.isoformat(),
-        "filial": contexto.filial,
-        "inputs": {
-            "carteira": _snapshot_dataframe(contexto.df_carteira_raw, "df_carteira_raw"),
-            "regionalidades": _snapshot_dataframe(contexto.df_geo_raw, "df_geo_raw"),
-            "parametros": _snapshot_dataframe(contexto.df_parametros_raw, "df_parametros_raw"),
-            "veiculos": _snapshot_dataframe(contexto.df_veiculos_raw, "df_veiculos_raw"),
-        },
-        "caminhos_pipeline": contexto.caminhos_pipeline,
+def _montar_justificativa_doc(row: pd.Series) -> str:
+    bucket, folga, _ = _classificar_prioridade_negocio(row)
+
+    if bucket == 0:
+        prioridade_txt = "Agendada com folga vencida/zero"
+    elif bucket == 1:
+        prioridade_txt = "Agendada com folga de 1 dia"
+    elif bucket == 2:
+        prioridade_txt = "Agendada com folga acima de 1 dia"
+    elif bucket == 3:
+        prioridade_txt = "Não agendada urgente"
+    elif bucket == 4:
+        prioridade_txt = "Não agendada com folga de 1 dia"
+    else:
+        prioridade_txt = "Não agendada normal"
+
+    return (
+        f"{prioridade_txt}; "
+        f"folga={folga if not pd.isna(folga) else 'NA'}; "
+        f"peso={_safe_float(row.get('peso_seq_m7', 0.0), 0.0):.2f}kg"
+    )
+
+
+def _ordenar_docs_dentro_parada(df_parada: pd.DataFrame, col_doc: str) -> pd.DataFrame:
+    dfp = df_parada.copy()
+
+    prioridades = dfp.apply(_classificar_prioridade_negocio, axis=1)
+    dfp["bucket_prioridade_doc_m7"] = [x[0] for x in prioridades]
+    dfp["folga_prioridade_doc_m7"] = [x[1] for x in prioridades]
+    dfp["peso_prioridade_doc_m7"] = [(-x[2]) for x in prioridades]
+
+    dfp = dfp.sort_values(
+        by=[
+            "bucket_prioridade_doc_m7",
+            "folga_prioridade_doc_m7",
+            "peso_prioridade_doc_m7",
+            col_doc,
+        ],
+        ascending=[True, True, False, True],
+        kind="mergesort",
+    ).reset_index(drop=True)
+
+    dfp["justificativa_ordem_entrega_m7"] = dfp.apply(_montar_justificativa_doc, axis=1)
+
+    return dfp.drop(
+        columns=[
+            "bucket_prioridade_doc_m7",
+            "folga_prioridade_doc_m7",
+            "peso_prioridade_doc_m7",
+        ],
+        errors="ignore",
+    )
+
+
+# =========================================================================================
+# NORMALIZAÇÃO
+# =========================================================================================
+def _normalizar_manifestos(df_manifestos_m6_2: pd.DataFrame) -> pd.DataFrame:
+    out = df_manifestos_m6_2.copy()
+    _validar_colunas(out, ["manifesto_id"], "df_manifestos_m6_2")
+    out["manifesto_id"] = out["manifesto_id"].astype(str).str.strip()
+    out = out[out["manifesto_id"] != ""].copy()
+    return out.reset_index(drop=True)
+
+
+def _normalizar_itens(df_itens_m6_2: pd.DataFrame) -> pd.DataFrame:
+    out = df_itens_m6_2.copy()
+
+    colunas_minimas = [
+        "manifesto_id",
+        "id_linha_pipeline",
+        "nro_documento",
+        "destinatario",
+        "cidade",
+        "uf",
+        "peso_kg",
+        "peso_calculado",
+        "agendada",
+        "folga_dias",
+        "distancia_rodoviaria_est_km",
+    ]
+    out = _garantir_colunas(out, colunas_minimas)
+
+    _validar_colunas(
+        out,
+        ["manifesto_id", "id_linha_pipeline", "destinatario", "cidade", "uf"],
+        "df_itens_manifestos_m6_2",
+    )
+
+    col_lat_filial = _resolver_coluna_existente(
+        out,
+        ["latitude_filial", "origem_latitude"],
+        "latitude_filial",
+        obrigatoria=False,
+    )
+    if col_lat_filial == "":
+        out["latitude_filial"] = np.nan
+        col_lat_filial = "latitude_filial"
+
+    col_lon_filial = _resolver_coluna_existente(
+        out,
+        ["longitude_filial", "origem_longitude"],
+        "longitude_filial",
+        obrigatoria=False,
+    )
+    if col_lon_filial == "":
+        out["longitude_filial"] = np.nan
+        col_lon_filial = "longitude_filial"
+
+    col_lat_dest = _resolver_coluna_existente(
+        out,
+        ["latitude_destinatario", "latitude_destino", "latitude"],
+        "latitude_destinatario",
+        obrigatoria=False,
+    )
+    if col_lat_dest == "":
+        out["latitude_destinatario"] = np.nan
+        col_lat_dest = "latitude_destinatario"
+
+    col_lon_dest = _resolver_coluna_existente(
+        out,
+        ["longitude_destinatario", "longitude_destino", "longitude"],
+        "longitude_destinatario",
+        obrigatoria=False,
+    )
+    if col_lon_dest == "":
+        out["longitude_destinatario"] = np.nan
+        col_lon_dest = "longitude_destinatario"
+
+    out["manifesto_id"] = out["manifesto_id"].fillna("").astype(str).str.strip()
+    out["id_linha_pipeline"] = out["id_linha_pipeline"].fillna("").astype(str).str.strip()
+    out["nro_documento"] = out["nro_documento"].fillna("").astype(str).str.strip()
+    out["destinatario"] = out["destinatario"].fillna("").astype(str).str.strip()
+    out["cidade"] = out["cidade"].fillna("").astype(str).str.strip()
+    out["uf"] = out["uf"].fillna("").astype(str).str.strip()
+
+    for c in [
+        "peso_kg",
+        "peso_calculado",
+        "folga_dias",
+        "distancia_rodoviaria_est_km",
+        col_lat_filial,
+        col_lon_filial,
+        col_lat_dest,
+        col_lon_dest,
+    ]:
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+
+    out["agendada_norm"] = out["agendada"].apply(_to_bool)
+    out["folga_dias_norm"] = pd.to_numeric(out["folga_dias"], errors="coerce")
+
+    out["peso_seq_m7"] = pd.to_numeric(out["peso_calculado"], errors="coerce").fillna(
+        pd.to_numeric(out["peso_kg"], errors="coerce")
+    )
+
+    out["latitude_filial_m7"] = out[col_lat_filial]
+    out["longitude_filial_m7"] = out[col_lon_filial]
+    out["latitude_dest_m7"] = out[col_lat_dest]
+    out["longitude_dest_m7"] = out[col_lon_dest]
+
+    out = out[(out["manifesto_id"] != "") & (out["id_linha_pipeline"] != "")].copy()
+
+    if out["id_linha_pipeline"].duplicated().any():
+        duplicados = out.loc[out["id_linha_pipeline"].duplicated(), "id_linha_pipeline"].astype(str).tolist()[:20]
+        raise Exception(
+            f"M7 recebeu id_linha_pipeline duplicado em df_itens_manifestos_m6_2: {duplicados}"
+        )
+
+    return out.reset_index(drop=True)
+
+
+# =========================================================================================
+# PREPARAÇÃO GEO
+# =========================================================================================
+def _preparar_coordenadas_contrato(df_itens: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    out = df_itens.copy()
+
+    out["status_coord_filial_m7"] = np.where(
+        out["latitude_filial_m7"].notna() & out["longitude_filial_m7"].notna(),
+        "ok",
+        "sem_coordenada_filial",
+    )
+
+    out["status_coord_dest_m7"] = np.where(
+        out["latitude_dest_m7"].notna() & out["longitude_dest_m7"].notna(),
+        "ok",
+        "sem_coordenada_destino",
+    )
+
+    out["coord_dest_origem_m7"] = np.where(
+        out["latitude_dest_m7"].notna() & out["longitude_dest_m7"].notna(),
+        "contrato_carteira",
+        "ausente_no_contrato_recebido",
+    )
+
+    diagnostico = pd.DataFrame(
+        [
+            {"indicador": "linhas_filial_ok", "valor": int((out["status_coord_filial_m7"] == "ok").sum())},
+            {"indicador": "linhas_filial_nula", "valor": int((out["status_coord_filial_m7"] != "ok").sum())},
+            {"indicador": "linhas_destino_ok", "valor": int((out["status_coord_dest_m7"] == "ok").sum())},
+            {"indicador": "linhas_destino_nula", "valor": int((out["status_coord_dest_m7"] != "ok").sum())},
+        ]
+    )
+
+    return out.reset_index(drop=True), diagnostico.reset_index(drop=True)
+
+
+# =========================================================================================
+# AGREGAÇÃO DE PARADAS
+# =========================================================================================
+def _agrupar_paradas(
+    grupo: pd.DataFrame,
+    fator_km_rodoviario_m7: float,
+) -> pd.DataFrame:
+    registros: List[Dict[str, Any]] = []
+
+    lat_o = pd.to_numeric(grupo["latitude_filial_m7"], errors="coerce").dropna()
+    lon_o = pd.to_numeric(grupo["longitude_filial_m7"], errors="coerce").dropna()
+    if len(lat_o) == 0 or len(lon_o) == 0:
+        raise Exception(
+            f"Manifesto {grupo['manifesto_id'].iloc[0]} sem coordenada de filial no contrato."
+        )
+
+    origem = (float(lat_o.iloc[0]), float(lon_o.iloc[0]))
+
+    grupo["chave_parada_seq_m7"] = (
+        grupo["destinatario"].fillna("").astype(str).str.strip()
+        + "|"
+        + grupo["cidade"].fillna("").astype(str).str.strip()
+        + "|"
+        + grupo["uf"].fillna("").astype(str).str.strip()
+    )
+
+    for chave_parada, gpar in grupo.groupby("chave_parada_seq_m7", dropna=False):
+        score = _calcular_score_parada(gpar)
+        lat_ref = pd.to_numeric(gpar["latitude_dest_m7"], errors="coerce").mean()
+        lon_ref = pd.to_numeric(gpar["longitude_dest_m7"], errors="coerce").mean()
+
+        if pd.isna(lat_ref) or pd.isna(lon_ref):
+            raise Exception(
+                f"Manifesto {grupo['manifesto_id'].iloc[0]} possui parada sem coordenada de destino."
+            )
+
+        dist_origem = _distancia_operacional_km(
+            origem[0], origem[1], float(lat_ref), float(lon_ref), fator_km_rodoviario_m7
+        )
+
+        registros.append(
+            {
+                "chave_parada_seq_m7": chave_parada,
+                "destinatario_ref_m7": _safe_text(gpar["destinatario"].iloc[0]),
+                "cidade_ref_m7": _safe_text(gpar["cidade"].iloc[0]),
+                "uf_ref_m7": _safe_text(gpar["uf"].iloc[0]),
+                "lat_ref_m7": float(lat_ref),
+                "lon_ref_m7": float(lon_ref),
+                "bucket_prioridade_m7": score["bucket_prioridade"],
+                "folga_min_m7": score["folga_min"],
+                "peso_total_m7": score["peso_total"],
+                "qtd_docs_parada_m7": int(len(gpar)),
+                "distancia_origem_parada_km_m7": float(dist_origem),
+            }
+        )
+
+    return pd.DataFrame(registros).reset_index(drop=True)
+
+
+# =========================================================================================
+# LOOKAHEAD DE 1 PASSO
+# =========================================================================================
+def _dist_entre_paradas(
+    row_a: pd.Series,
+    row_b: pd.Series,
+    fator_km_rodoviario_m7: float,
+) -> float:
+    return _distancia_operacional_km(
+        float(row_a["lat_ref_m7"]),
+        float(row_a["lon_ref_m7"]),
+        float(row_b["lat_ref_m7"]),
+        float(row_b["lon_ref_m7"]),
+        fator_km_rodoviario_m7,
+    )
+
+
+def _melhor_saida_possivel(
+    row_candidato: pd.Series,
+    df_restantes: pd.DataFrame,
+    fator_km_rodoviario_m7: float,
+) -> float:
+    if df_restantes.empty:
+        return 0.0
+
+    menores: List[float] = []
+    for _, row_rest in df_restantes.iterrows():
+        dist = _dist_entre_paradas(row_candidato, row_rest, fator_km_rodoviario_m7)
+        menores.append(float(dist))
+
+    if not menores:
+        return 0.0
+
+    return float(min(menores))
+
+
+def _ordenar_paradas_origem_mais_proxima_lookahead(
+    df_paradas: pd.DataFrame,
+    origem: Tuple[float, float],
+    fator_km_rodoviario_m7: float,
+) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
+    if df_paradas.empty:
+        return df_paradas.copy(), []
+
+    work = df_paradas.copy().reset_index(drop=True)
+    mapa = {
+        str(row["chave_parada_seq_m7"]): row
+        for _, row in work.iterrows()
     }
 
-    return {
-        "inventario": inventario,
-        "df_carteira_raw": contexto.df_carteira_raw,
-        "df_geo_raw": contexto.df_geo_raw,
-        "df_parametros_raw": contexto.df_parametros_raw,
-        "df_veiculos_raw": contexto.df_veiculos_raw,
-    }
+    restantes = set(work["chave_parada_seq_m7"].astype(str).tolist())
+    ordem: List[str] = []
+    trilha_auditoria: List[Dict[str, Any]] = []
 
-
-def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
-    inicio_total = _agora()
-    logs: List[Dict[str, Any]] = []
-    metricas_tempo: Dict[str, float] = {}
-    debug = _is_debug(payload)
-
-    # =========================================================================================
-    # PAYLOAD -> CONTEXTO
-    # =========================================================================================
-    t0 = _agora()
-    contexto = normalizar_payload_para_pipeline(payload)
-    tempo_payload = _duracao_ms(t0)
-    metricas_tempo["payload_service_ms"] = tempo_payload
-
-    logs.append(
-        _log(
-            modulo="payload_service",
-            status="ok",
-            mensagem="Payload normalizado para o contexto interno do pipeline",
-            quantidade_entrada=_safe_len(contexto.df_carteira_raw),
-            quantidade_saida=_safe_len(contexto.df_carteira_raw),
-            tempo_ms=tempo_payload,
-            extra={
-                "rodada_id": contexto.rodada_id,
-                "filial_id": contexto.filial_id,
-                "data_base_roteirizacao": contexto.data_base.isoformat(),
-                "tipo_roteirizacao": contexto.tipo_roteirizacao,
-            },
+    # 1ª parada = menor distância da origem
+    candidatos_primeira: List[Tuple[Any, str]] = []
+    for chave in restantes:
+        row = mapa[chave]
+        chave_ord = (
+            round(_safe_float(row["distancia_origem_parada_km_m7"], 999999.0), 6),
+            -round(_safe_float(row["peso_total_m7"], 0.0), 6),
+            _safe_int(row["bucket_prioridade_m7"], 9),
+            round(_safe_float(row["folga_min_m7"], 9999.0), 6),
+            str(chave),
         )
-    )
+        candidatos_primeira.append((chave_ord, chave))
 
-    # =========================================================================================
-    # M0
-    # =========================================================================================
-    t0 = _agora()
-    resultado_m0 = _executar_m0_adapter(contexto)
-    tempo_m0 = _duracao_ms(t0)
-    metricas_tempo["m0_adapter_ms"] = tempo_m0
+    _, primeira = sorted(candidatos_primeira, key=lambda x: x[0])[0]
+    ordem.append(primeira)
+    restantes.remove(primeira)
 
-    logs.append(
-        _log(
-            modulo="m0_adapter",
-            status="ok",
-            mensagem="M0 adaptado executado com sucesso",
-            quantidade_entrada=_safe_len(contexto.df_carteira_raw),
-            quantidade_saida=_safe_len(contexto.df_carteira_raw),
-            tempo_ms=tempo_m0,
-            extra={
-                "filial": contexto.filial,
-                "data_base_roteirizacao": contexto.data_base.isoformat(),
-                "tipo_roteirizacao": contexto.tipo_roteirizacao,
-            },
-        )
-    )
-
-    # =========================================================================================
-    # M1
-    # =========================================================================================
-    t0 = _agora()
-    resultado_m1 = executar_m1_padronizacao(
-        df_carteira_raw=resultado_m0["df_carteira_raw"],
-        df_geo_raw=resultado_m0["df_geo_raw"],
-        df_parametros_raw=resultado_m0["df_parametros_raw"],
-        df_veiculos_raw=resultado_m0["df_veiculos_raw"],
-    )
-    tempo_m1 = _duracao_ms(t0)
-    metricas_tempo["m1_padronizacao_ms"] = tempo_m1
-
-    df_carteira_tratada = resultado_m1["df_carteira_tratada"]
-    df_geo_tratado = resultado_m1["df_geo_tratado"]
-    df_parametros_tratados = resultado_m1["df_parametros_tratados"]
-    df_veiculos_tratados = resultado_m1["df_veiculos_tratados"]
-
-    resumo_m1 = {
-        "carteira_colunas": int(len(df_carteira_tratada.columns)),
-        "geo_colunas": int(len(df_geo_tratado.columns)),
-        "parametros_colunas": int(len(df_parametros_tratados.columns)),
-        "veiculos_colunas": int(len(df_veiculos_tratados.columns)),
-    }
-
-    logs.append(
-        _log(
-            modulo="m1_padronizacao",
-            status="ok",
-            mensagem="M1 executado com sucesso",
-            quantidade_entrada=_safe_len(contexto.df_carteira_raw),
-            quantidade_saida=_safe_len(df_carteira_tratada),
-            tempo_ms=tempo_m1,
-            extra=resumo_m1,
-        )
-    )
-
-    # =========================================================================================
-    # M2
-    # =========================================================================================
-    t0 = _agora()
-    df_carteira_enriquecida, resumo_m2 = executar_m2_enriquecimento(
-        df_carteira_tratada=df_carteira_tratada,
-        df_geo_tratado=df_geo_tratado,
-        df_parametros_tratados=df_parametros_tratados,
-        data_base_roteirizacao=contexto.data_base,
-        caminhos_pipeline=contexto.caminhos_pipeline,
-    )
-    tempo_m2 = _duracao_ms(t0)
-    metricas_tempo["m2_enriquecimento_ms"] = tempo_m2
-
-    logs.append(
-        _log(
-            modulo="m2_enriquecimento",
-            status="ok",
-            mensagem="M2 executado com sucesso",
-            quantidade_entrada=_safe_len(df_carteira_tratada),
-            quantidade_saida=_safe_len(df_carteira_enriquecida),
-            tempo_ms=tempo_m2,
-            extra=resumo_m2,
-        )
-    )
-
-    # =========================================================================================
-    # M3
-    # =========================================================================================
-    t0 = _agora()
-    df_carteira_triagem, meta_m3 = executar_m3_triagem(
-        df_carteira_enriquecida=df_carteira_enriquecida,
-        data_base_roteirizacao=contexto.data_base,
-        caminhos_pipeline=contexto.caminhos_pipeline,
-    )
-    tempo_m3 = _duracao_ms(t0)
-    metricas_tempo["m3_triagem_ms"] = tempo_m3
-
-    outputs_m3 = meta_m3["outputs_m3"]
-    resumo_m3 = meta_m3["resumo_m3"]
-
-    df_carteira_roteirizavel = outputs_m3["df_carteira_roteirizavel"]
-    df_carteira_agendamento_futuro = outputs_m3["df_carteira_agendamento_futuro"]
-    df_carteira_agendas_vencidas = outputs_m3["df_carteira_agendas_vencidas"]
-
-    logs.append(
-        _log(
-            modulo="m3_triagem",
-            status="ok",
-            mensagem="M3 executado com sucesso",
-            quantidade_entrada=_safe_len(df_carteira_enriquecida),
-            quantidade_saida=_safe_len(df_carteira_triagem),
-            tempo_ms=tempo_m3,
-            extra=resumo_m3,
-        )
-    )
-
-    # =========================================================================================
-    # M3.1
-    # =========================================================================================
-    t0 = _agora()
-    df_input_oficial_bloco_4, meta_m31 = executar_m3_1_validacao_fronteira(
-        df_carteira_roteirizavel=df_carteira_roteirizavel,
-        data_base_roteirizacao=contexto.data_base,
-        caminhos_pipeline=contexto.caminhos_pipeline,
-    )
-    tempo_m31 = _duracao_ms(t0)
-    metricas_tempo["m3_1_validacao_fronteira_ms"] = tempo_m31
-
-    resumo_m31 = meta_m31["resumo_m31"]
-
-    logs.append(
-        _log(
-            modulo="m3_1_validacao_fronteira",
-            status="ok",
-            mensagem="M3.1 executado com sucesso e input oficial do bloco 4 foi consolidado",
-            quantidade_entrada=_safe_len(df_carteira_roteirizavel),
-            quantidade_saida=_safe_len(df_input_oficial_bloco_4),
-            tempo_ms=tempo_m31,
-            extra=resumo_m31,
-        )
-    )
-
-    # =========================================================================================
-    # M4
-    # =========================================================================================
-    t0 = _agora()
-    outputs_m4, meta_m4 = executar_m4_manifestos_fechados(
-        df_input_oficial_bloco_4=df_input_oficial_bloco_4,
-        df_veiculos_tratados=df_veiculos_tratados,
-        rodada_id=contexto.rodada_id,
-        data_base_roteirizacao=contexto.data_base,
-        tipo_roteirizacao=contexto.tipo_roteirizacao,
-        configuracao_frota=payload.configuracao_frota,
-        caminhos_pipeline=contexto.caminhos_pipeline,
-    )
-    tempo_m4 = _duracao_ms(t0)
-    metricas_tempo["m4_manifestos_fechados_ms"] = tempo_m4
-
-    resumo_m4 = meta_m4["resumo_m4"]
-    df_remanescente_roteirizavel_bloco_4 = outputs_m4["df_remanescente_roteirizavel_bloco_4"]
-
-    df_manifestos_m4 = outputs_m4.get("df_manifestos_fechados_bloco_4")
-    if df_manifestos_m4 is None or not isinstance(df_manifestos_m4, pd.DataFrame):
-        df_manifestos_m4 = outputs_m4.get("df_manifestos_m4")
-    if df_manifestos_m4 is None or not isinstance(df_manifestos_m4, pd.DataFrame):
-        df_manifestos_m4 = pd.DataFrame()
-
-    df_itens_manifestados_m4 = outputs_m4.get("df_itens_manifestos_fechados_bloco_4")
-    if df_itens_manifestados_m4 is None or not isinstance(df_itens_manifestados_m4, pd.DataFrame):
-        df_itens_manifestados_m4 = outputs_m4.get("df_itens_manifestados_bloco_4")
-    if df_itens_manifestados_m4 is None or not isinstance(df_itens_manifestados_m4, pd.DataFrame):
-        df_itens_manifestados_m4 = outputs_m4.get("df_itens_manifestados_m4")
-    if df_itens_manifestados_m4 is None or not isinstance(df_itens_manifestados_m4, pd.DataFrame):
-        df_itens_manifestados_m4 = pd.DataFrame()
-
-    logs.append(
-        _log(
-            modulo="m4_manifestos_fechados",
-            status="ok",
-            mensagem="M4 executado com sucesso",
-            quantidade_entrada=_safe_len(df_input_oficial_bloco_4),
-            quantidade_saida=_safe_len(df_remanescente_roteirizavel_bloco_4),
-            tempo_ms=tempo_m4,
-            extra={
-                **resumo_m4,
-                "total_remanescente_global_m4": _safe_len(df_remanescente_roteirizavel_bloco_4),
-            },
-        )
-    )
-
-    # =========================================================================================
-    # M5.1
-    # =========================================================================================
-    t0 = _agora()
-    outputs_m5_1, meta_m5_1 = executar_m5_1_triagem_cidades(
-        df_remanescente_roteirizavel_bloco_4=df_remanescente_roteirizavel_bloco_4,
-        df_veiculos_tratados=df_veiculos_tratados,
-    )
-    tempo_m5_1 = _duracao_ms(t0)
-    metricas_tempo["m5_1_triagem_cidades_ms"] = tempo_m5_1
-
-    resumo_m5_1 = meta_m5_1["resumo_m5_1"]
-    df_saldo_elegivel_composicao_m5_1 = outputs_m5_1["df_saldo_elegivel_composicao_m5_1"]
-    df_perfis_elegiveis_por_cidade_m5_1 = outputs_m5_1["df_perfis_elegiveis_por_cidade_m5_1"]
-
-    logs.append(
-        _log(
-            modulo="m5_1_triagem_cidades",
-            status="ok",
-            mensagem="M5.1 executado com sucesso",
-            quantidade_entrada=_safe_len(df_remanescente_roteirizavel_bloco_4),
-            quantidade_saida=_safe_len(df_saldo_elegivel_composicao_m5_1),
-            tempo_ms=tempo_m5_1,
-            extra=resumo_m5_1,
-        )
-    )
-
-    # =========================================================================================
-    # M5.2
-    # =========================================================================================
-    t0 = _agora()
-    outputs_m5_2, meta_m5_2 = executar_m5_2_composicao_cidades(
-        df_saldo_elegivel_composicao_m5_1=df_saldo_elegivel_composicao_m5_1,
-        df_perfis_elegiveis_por_cidade_m5_1=df_perfis_elegiveis_por_cidade_m5_1,
-        rodada_id=contexto.rodada_id,
-        data_base_roteirizacao=contexto.data_base,
-        tipo_roteirizacao=contexto.tipo_roteirizacao,
-        caminhos_pipeline=contexto.caminhos_pipeline,
-    )
-    tempo_m5_2 = _duracao_ms(t0)
-    metricas_tempo["m5_2_composicao_cidades_ms"] = tempo_m5_2
-
-    resumo_m5_2 = meta_m5_2["resumo_m5_2"]
-    df_premanifestos_m5_2 = outputs_m5_2["df_premanifestos_m5_2"]
-    df_itens_premanifestos_m5_2 = outputs_m5_2["df_itens_premanifestos_m5_2"]
-    df_remanescente_m5_2 = outputs_m5_2["df_remanescente_m5_2"]
-    df_tentativas_m5_2 = outputs_m5_2["df_tentativas_m5_2"]
-
-    logs.append(
-        _log(
-            modulo="m5_2_composicao_cidades",
-            status="ok",
-            mensagem="M5.2 executado com sucesso",
-            quantidade_entrada=_safe_len(df_saldo_elegivel_composicao_m5_1),
-            quantidade_saida=_safe_len(df_itens_premanifestos_m5_2),
-            tempo_ms=tempo_m5_2,
-            extra={
-                **resumo_m5_2,
-                "total_premanifestos_m5_2": _safe_len(df_premanifestos_m5_2),
-                "total_tentativas_m5_2": _safe_len(df_tentativas_m5_2),
-            },
-        )
-    )
-
-    # =========================================================================================
-    # M5.3A
-    # =========================================================================================
-    t0 = _agora()
-    outputs_m5_3a, meta_m5_3a = executar_m5_3_triagem_subregioes(
-        df_remanescente_m5_2=df_remanescente_m5_2,
-        df_veiculos_tratados=df_veiculos_tratados,
-    )
-    tempo_m5_3a = _duracao_ms(t0)
-    metricas_tempo["m5_3_triagem_subregioes_ms"] = tempo_m5_3a
-
-    resumo_m5_3a = meta_m5_3a["resumo_m5_3"]
-
-    df_subregioes_consolidadas_m5_3 = outputs_m5_3a["df_subregioes_consolidadas_m5_3"]
-    df_perfis_elegiveis_por_subregiao_m5_3 = outputs_m5_3a["df_perfis_elegiveis_por_subregiao_m5_3"]
-    df_saldo_elegivel_composicao_m5_3 = outputs_m5_3a["df_saldo_elegivel_composicao_m5_3"]
-    df_tentativas_triagem_subregioes_m5_3 = outputs_m5_3a["df_tentativas_triagem_subregioes_m5_3"]
-
-    logs.append(
-        _log(
-            modulo="m5_3_triagem_subregioes",
-            status="ok",
-            mensagem="M5.3A executado com sucesso",
-            quantidade_entrada=_safe_len(df_remanescente_m5_2),
-            quantidade_saida=_safe_len(df_saldo_elegivel_composicao_m5_3),
-            tempo_ms=tempo_m5_3a,
-            extra={
-                **resumo_m5_3a,
-                "total_subregioes_consolidadas_m5_3": _safe_len(df_subregioes_consolidadas_m5_3),
-                "total_tentativas_triagem_subregioes_m5_3": _safe_len(df_tentativas_triagem_subregioes_m5_3),
-            },
-        )
-    )
-
-    # =========================================================================================
-    # M5.3B
-    # =========================================================================================
-    t0 = _agora()
-    outputs_m5_3b, meta_m5_3b = executar_m5_3_composicao_subregioes(
-        df_saldo_elegivel_composicao_m5_3=df_saldo_elegivel_composicao_m5_3,
-        df_perfis_elegiveis_por_subregiao_m5_3=df_perfis_elegiveis_por_subregiao_m5_3,
-        rodada_id=contexto.rodada_id,
-        data_base_roteirizacao=contexto.data_base,
-        tipo_roteirizacao=contexto.tipo_roteirizacao,
-        caminhos_pipeline=contexto.caminhos_pipeline,
-    )
-    tempo_m5_3b = _duracao_ms(t0)
-    metricas_tempo["m5_3b_composicao_subregioes_ms"] = tempo_m5_3b
-
-    resumo_m5_3b = meta_m5_3b["resumo_m5_3b"]
-    df_premanifestos_m5_3 = outputs_m5_3b["df_premanifestos_m5_3"]
-    df_itens_premanifestos_m5_3 = outputs_m5_3b["df_itens_premanifestos_m5_3"]
-    df_tentativas_m5_3 = outputs_m5_3b["df_tentativas_m5_3"]
-    df_remanescente_m5_3 = outputs_m5_3b["df_remanescente_m5_3"]
-
-    logs.append(
-        _log(
-            modulo="m5_3b_composicao_subregioes",
-            status="ok",
-            mensagem="M5.3B executado com sucesso",
-            quantidade_entrada=_safe_len(df_saldo_elegivel_composicao_m5_3),
-            quantidade_saida=_safe_len(df_itens_premanifestos_m5_3),
-            tempo_ms=tempo_m5_3b,
-            extra={
-                **resumo_m5_3b,
-                "total_premanifestos_m5_3": _safe_len(df_premanifestos_m5_3),
-                "total_tentativas_m5_3": _safe_len(df_tentativas_m5_3),
-            },
-        )
-    )
-
-    # =========================================================================================
-    # M5.4A
-    # =========================================================================================
-    t0 = _agora()
-    outputs_m5_4a, meta_m5_4a = executar_m5_4a_triagem_mesorregioes(
-        df_remanescente_m5_3=df_remanescente_m5_3,
-        df_veiculos_tratados=df_veiculos_tratados,
-    )
-    tempo_m5_4a = _duracao_ms(t0)
-    metricas_tempo["m5_4a_triagem_mesorregioes_ms"] = tempo_m5_4a
-
-    resumo_m5_4a = meta_m5_4a["resumo_m5_4a"]
-
-    df_mesorregioes_consolidadas_m5_4 = outputs_m5_4a["df_mesorregioes_consolidadas_m5_4"]
-    df_perfis_elegiveis_por_mesorregiao_m5_4 = outputs_m5_4a["df_perfis_elegiveis_por_mesorregiao_m5_4"]
-    df_saldo_elegivel_composicao_m5_4 = outputs_m5_4a["df_saldo_elegivel_composicao_m5_4"]
-    df_tentativas_triagem_mesorregioes_m5_4 = outputs_m5_4a["df_tentativas_triagem_mesorregioes_m5_4"]
-
-    logs.append(
-        _log(
-            modulo="m5_4a_triagem_mesorregioes",
-            status="ok",
-            mensagem="M5.4A executado com sucesso",
-            quantidade_entrada=_safe_len(df_remanescente_m5_3),
-            quantidade_saida=_safe_len(df_saldo_elegivel_composicao_m5_4),
-            tempo_ms=tempo_m5_4a,
-            extra={
-                **resumo_m5_4a,
-                "total_mesorregioes_consolidadas_m5_4": _safe_len(df_mesorregioes_consolidadas_m5_4),
-                "total_tentativas_triagem_mesorregioes_m5_4": _safe_len(df_tentativas_triagem_mesorregioes_m5_4),
-            },
-        )
-    )
-
-    # =========================================================================================
-    # M5.4B
-    # =========================================================================================
-    t0 = _agora()
-    outputs_m5_4b, meta_m5_4b = executar_m5_4b_composicao_mesorregioes(
-        df_saldo_elegivel_composicao_m5_4=df_saldo_elegivel_composicao_m5_4,
-        df_perfis_elegiveis_por_mesorregiao_m5_4=df_perfis_elegiveis_por_mesorregiao_m5_4,
-        rodada_id=contexto.rodada_id,
-        data_base_roteirizacao=contexto.data_base,
-        tipo_roteirizacao=contexto.tipo_roteirizacao,
-        caminhos_pipeline=contexto.caminhos_pipeline,
-    )
-    tempo_m5_4b = _duracao_ms(t0)
-    metricas_tempo["m5_4b_composicao_mesorregioes_ms"] = tempo_m5_4b
-
-    resumo_m5_4b = meta_m5_4b["resumo_m5_4b"]
-    df_premanifestos_m5_4 = outputs_m5_4b["df_premanifestos_m5_4"]
-    df_itens_premanifestos_m5_4 = outputs_m5_4b["df_itens_premanifestos_m5_4"]
-    df_tentativas_m5_4 = outputs_m5_4b["df_tentativas_m5_4"]
-    df_remanescente_m5_4 = outputs_m5_4b["df_remanescente_m5_4"]
-
-    logs.append(
-        _log(
-            modulo="m5_4b_composicao_mesorregioes",
-            status="ok",
-            mensagem="M5.4B executado com sucesso",
-            quantidade_entrada=_safe_len(df_saldo_elegivel_composicao_m5_4),
-            quantidade_saida=_safe_len(df_itens_premanifestos_m5_4),
-            tempo_ms=tempo_m5_4b,
-            extra={
-                **resumo_m5_4b,
-                "total_premanifestos_m5_4": _safe_len(df_premanifestos_m5_4),
-                "total_tentativas_m5_4": _safe_len(df_tentativas_m5_4),
-            },
-        )
-    )
-
-    # =========================================================================================
-    # M6.1
-    # =========================================================================================
-    t0 = _agora()
-    outputs_m6_1, meta_m6_1 = executar_m6_1_consolidacao_manifestos(
-        df_manifestos_m4=df_manifestos_m4,
-        df_itens_manifestados_m4=df_itens_manifestados_m4,
-        df_premanifestos_m5_2=df_premanifestos_m5_2,
-        df_itens_premanifestos_m5_2=df_itens_premanifestos_m5_2,
-        df_premanifestos_m5_3=df_premanifestos_m5_3,
-        df_itens_premanifestos_m5_3=df_itens_premanifestos_m5_3,
-        df_premanifestos_m5_4=df_premanifestos_m5_4,
-        df_itens_premanifestos_m5_4=df_itens_premanifestos_m5_4,
-        data_base_roteirizacao=contexto.data_base,
-        tipo_roteirizacao=contexto.tipo_roteirizacao,
-        caminhos_pipeline=contexto.caminhos_pipeline,
-    )
-    tempo_m6_1 = _duracao_ms(t0)
-    metricas_tempo["m6_1_consolidacao_manifestos_ms"] = tempo_m6_1
-
-    resumo_m6_1 = meta_m6_1["resumo_m6_1"]
-    df_manifestos_base_m6 = outputs_m6_1["df_manifestos_base_m6"]
-    df_itens_manifestos_base_m6 = outputs_m6_1["df_itens_manifestos_base_m6"]
-    df_estatisticas_manifestos_antes_m6 = outputs_m6_1["df_estatisticas_manifestos_antes_m6"]
-    df_pares_elegiveis_otimizacao_m6 = outputs_m6_1["df_pares_elegiveis_otimizacao_m6"]
-
-    logs.append(
-        _log(
-            modulo="m6_1_consolidacao_manifestos",
-            status="ok",
-            mensagem="M6.1 executado com sucesso",
-            quantidade_entrada=(
-                _safe_len(df_manifestos_m4)
-                + _safe_len(df_premanifestos_m5_2)
-                + _safe_len(df_premanifestos_m5_3)
-                + _safe_len(df_premanifestos_m5_4)
+    row_primeira = mapa[primeira]
+    trilha_auditoria.append(
+        {
+            "ordem_entrega_parada_m7": 1,
+            "chave_parada_seq_m7": primeira,
+            "chave_no_anterior_m7": "ORIGEM",
+            "distancia_no_anterior_km_m7": _safe_float(row_primeira["distancia_origem_parada_km_m7"], 999999.0),
+            "distancia_melhor_proximo_possivel_km_m7": (
+                _melhor_saida_possivel(
+                    row_primeira,
+                    work.loc[work["chave_parada_seq_m7"].isin(list(restantes))].copy(),
+                    fator_km_rodoviario_m7,
+                ) if restantes else 0.0
             ),
-            quantidade_saida=_safe_len(df_manifestos_base_m6),
-            tempo_ms=tempo_m6_1,
-            extra={
-                **resumo_m6_1,
-                "total_itens_manifestos_base_m6": _safe_len(df_itens_manifestos_base_m6),
-                "total_estatisticas_manifestos_antes_m6": _safe_len(df_estatisticas_manifestos_antes_m6),
-                "total_pares_elegiveis_otimizacao_m6": _safe_len(df_pares_elegiveis_otimizacao_m6),
-            },
+            "score_escolha_parada_m7": _safe_float(row_primeira["distancia_origem_parada_km_m7"], 999999.0),
+            "criterio_escolha_m7": "menor_distancia_da_origem",
+        }
+    )
+
+    # Demais paradas = distância atual + menor próxima possível
+    while restantes:
+        chave_atual = ordem[-1]
+        row_atual = mapa[chave_atual]
+
+        candidatos_scores: List[Tuple[Any, str, float, float, float]] = []
+
+        for chave in restantes:
+            row_cand = mapa[chave]
+            dist_atual_cand = _dist_entre_paradas(row_atual, row_cand, fator_km_rodoviario_m7)
+
+            restantes_sem_cand = [x for x in restantes if x != chave]
+            df_restantes_sem_cand = work.loc[
+                work["chave_parada_seq_m7"].isin(restantes_sem_cand)
+            ].copy()
+
+            melhor_saida = _melhor_saida_possivel(
+                row_candidato=row_cand,
+                df_restantes=df_restantes_sem_cand,
+                fator_km_rodoviario_m7=fator_km_rodoviario_m7,
+            )
+
+            score_total = float(dist_atual_cand) + float(melhor_saida)
+
+            chave_ord = (
+                round(float(score_total), 6),
+                round(float(dist_atual_cand), 6),
+                -round(_safe_float(row_cand["peso_total_m7"], 0.0), 6),
+                _safe_int(row_cand["bucket_prioridade_m7"], 9),
+                round(_safe_float(row_cand["folga_min_m7"], 9999.0), 6),
+                str(chave),
+            )
+            candidatos_scores.append(
+                (chave_ord, chave, float(dist_atual_cand), float(melhor_saida), float(score_total))
+            )
+
+        _, escolhido, dist_escolhido, melhor_saida_escolhido, score_escolhido = sorted(
+            candidatos_scores, key=lambda x: x[0]
+        )[0]
+
+        ordem.append(escolhido)
+        restantes.remove(escolhido)
+
+        trilha_auditoria.append(
+            {
+                "ordem_entrega_parada_m7": len(ordem),
+                "chave_parada_seq_m7": escolhido,
+                "chave_no_anterior_m7": chave_atual,
+                "distancia_no_anterior_km_m7": float(dist_escolhido),
+                "distancia_melhor_proximo_possivel_km_m7": float(melhor_saida_escolhido),
+                "score_escolha_parada_m7": float(score_escolhido),
+                "criterio_escolha_m7": "distancia_atual_mais_melhor_saida",
+            }
         )
+
+    df_aud = pd.DataFrame(trilha_auditoria)
+    work = work.merge(df_aud, on="chave_parada_seq_m7", how="left")
+    work["ordem_entrega_parada_m7"] = pd.to_numeric(
+        work["ordem_entrega_parada_m7"], errors="coerce"
+    ).astype(int)
+
+    work["metodo_sequenciamento_parada_m7"] = np.where(
+        work["ordem_entrega_parada_m7"] == 1,
+        "origem_mais_proxima",
+        "lookahead_1_passo",
     )
 
-    # =========================================================================================
-    # M6.2
-    # =========================================================================================
-    t0 = _agora()
-    resultado_m6_2 = executar_m6_2_complemento_ocupacao(
-        df_manifestos_base_m6=df_manifestos_base_m6,
-        df_estatisticas_manifestos_antes_m6=df_estatisticas_manifestos_antes_m6,
-        df_itens_manifestos_base_m6=df_itens_manifestos_base_m6,
-        df_remanescente_m5_4=df_remanescente_m5_4,
-        data_base_roteirizacao=contexto.data_base,
-        tipo_roteirizacao=contexto.tipo_roteirizacao,
-        caminhos_pipeline=contexto.caminhos_pipeline,
-        ocupacao_alvo_perc=85.0,
-    )
-    tempo_m6_2 = _duracao_ms(t0)
-    metricas_tempo["m6_2_complemento_ocupacao_ms"] = tempo_m6_2
+    # Próximo nó e distância para o próximo
+    proximo_map: Dict[str, str] = {}
+    dist_proximo_map: Dict[str, float] = {}
 
-    outputs_m6_2 = resultado_m6_2["outputs_m6_2"]
-    resumo_m6_2 = resultado_m6_2["resumo_m6_2"]
+    for i, chave in enumerate(ordem):
+        if i == len(ordem) - 1:
+            proximo_map[chave] = ""
+            dist_proximo_map[chave] = np.nan
+            continue
 
-    df_manifestos_m6_2 = outputs_m6_2["df_manifestos_m6_2"]
-    df_itens_manifestos_m6_2 = outputs_m6_2["df_itens_manifestos_m6_2"]
-    df_remanescente_m6_2 = outputs_m6_2["df_remanescente_m6_2"]
-    df_remanescente_m5_original_m6_2 = outputs_m6_2["df_remanescente_m5_original_m6_2"]
-    df_tentativas_m6_2 = outputs_m6_2["df_tentativas_m6_2"]
-    df_movimentos_aceitos_m6_2 = outputs_m6_2["df_movimentos_aceitos_m6_2"]
+        prox = ordem[i + 1]
+        row_a = mapa[chave]
+        row_b = mapa[prox]
+        dist_ab = _dist_entre_paradas(row_a, row_b, fator_km_rodoviario_m7)
+        proximo_map[chave] = prox
+        dist_proximo_map[chave] = float(dist_ab)
 
-    logs.append(
-        _log(
-            modulo="m6_2_complemento_ocupacao",
-            status="ok",
-            mensagem="M6.2 executado com sucesso",
-            quantidade_entrada=_safe_len(df_manifestos_base_m6),
-            quantidade_saida=_safe_len(df_manifestos_m6_2),
-            tempo_ms=tempo_m6_2,
-            extra={
-                **resumo_m6_2,
-                "total_itens_manifestos_m6_2": _safe_len(df_itens_manifestos_m6_2),
-                "total_remanescente_m6_2": _safe_len(df_remanescente_m6_2),
-                "total_remanescente_m5_original_m6_2": _safe_len(df_remanescente_m5_original_m6_2),
-                "total_tentativas_m6_2": _safe_len(df_tentativas_m6_2),
-                "total_movimentos_aceitos_m6_2": _safe_len(df_movimentos_aceitos_m6_2),
-            },
+    work["chave_proximo_no_m7"] = work["chave_parada_seq_m7"].map(proximo_map)
+    work["distancia_proximo_no_km_m7"] = work["chave_parada_seq_m7"].map(dist_proximo_map)
+
+    work = work.sort_values(
+        by=["ordem_entrega_parada_m7", "chave_parada_seq_m7"],
+        ascending=[True, True],
+        kind="mergesort",
+    ).reset_index(drop=True)
+
+    return work, trilha_auditoria
+
+
+# =========================================================================================
+# SEQUENCIAMENTO DE UM MANIFESTO
+# =========================================================================================
+def _sequenciar_manifesto(
+    df_manifesto: pd.DataFrame,
+    col_doc: str,
+    fator_km_rodoviario_m7: float,
+) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
+    grupo = df_manifesto.copy().reset_index(drop=True)
+
+    lat_origem = pd.to_numeric(grupo["latitude_filial_m7"], errors="coerce").dropna()
+    lon_origem = pd.to_numeric(grupo["longitude_filial_m7"], errors="coerce").dropna()
+
+    if len(lat_origem) == 0 or len(lon_origem) == 0:
+        raise Exception(
+            f"Manifesto {grupo['manifesto_id'].iloc[0]} sem coordenada de filial no contrato."
         )
+
+    origem = (float(lat_origem.iloc[0]), float(lon_origem.iloc[0]))
+
+    df_paradas = _agrupar_paradas(
+        grupo=grupo,
+        fator_km_rodoviario_m7=fator_km_rodoviario_m7,
     )
 
-    # =========================================================================================
-    # M7
-    # =========================================================================================
-    t0 = _agora()
-    outputs_m7, meta_m7 = executar_m7_sequenciamento_entregas(
-        df_manifestos_m6_2=df_manifestos_m6_2,
-        df_itens_manifestos_m6_2=df_itens_manifestos_m6_2,
-        df_geo_tratado=df_geo_tratado,
-        df_geo_raw=contexto.df_geo_raw,
-        data_base_roteirizacao=contexto.data_base,
-        tipo_roteirizacao=contexto.tipo_roteirizacao,
-        caminhos_pipeline=contexto.caminhos_pipeline,
-    )
-    tempo_m7 = _duracao_ms(t0)
-    metricas_tempo["m7_sequenciamento_entregas_ms"] = tempo_m7
+    if len(df_paradas) == 1:
+        df_paradas["ordem_entrega_parada_m7"] = 1
+        df_paradas["chave_no_anterior_m7"] = "ORIGEM"
+        df_paradas["distancia_no_anterior_km_m7"] = df_paradas["distancia_origem_parada_km_m7"]
+        df_paradas["distancia_melhor_proximo_possivel_km_m7"] = 0.0
+        df_paradas["score_escolha_parada_m7"] = df_paradas["distancia_origem_parada_km_m7"]
+        df_paradas["chave_proximo_no_m7"] = ""
+        df_paradas["distancia_proximo_no_km_m7"] = np.nan
+        df_paradas["criterio_escolha_m7"] = "parada_unica"
+        df_paradas["metodo_sequenciamento_parada_m7"] = "parada_unica"
 
-    resumo_m7 = meta_m7["resumo_m7"]
-    auditoria_m7 = meta_m7["auditoria_m7"]
-
-    df_manifestos_m7 = outputs_m7["df_manifestos_m7"]
-    df_itens_manifestos_sequenciados_m7 = outputs_m7["df_itens_manifestos_sequenciados_m7"]
-    df_manifestos_sequenciamento_resumo_m7 = outputs_m7["df_manifestos_sequenciamento_resumo_m7"]
-    df_tentativas_sequenciamento_m7 = outputs_m7["df_tentativas_sequenciamento_m7"]
-    df_diagnostico_recuperacao_coordenadas_m7 = outputs_m7["df_diagnostico_recuperacao_coordenadas_m7"]
-
-    logs.append(
-        _log(
-            modulo="m7_sequenciamento_entregas",
-            status="ok",
-            mensagem="M7 executado com sucesso",
-            quantidade_entrada=_safe_len(df_itens_manifestos_m6_2),
-            quantidade_saida=_safe_len(df_itens_manifestos_sequenciados_m7),
-            tempo_ms=tempo_m7,
-            extra={
-                **resumo_m7,
-                "total_manifestos_m7": _safe_len(df_manifestos_m7),
-                "total_itens_manifestos_sequenciados_m7": _safe_len(df_itens_manifestos_sequenciados_m7),
-                "total_manifestos_sequenciamento_resumo_m7": _safe_len(df_manifestos_sequenciamento_resumo_m7),
-                "total_tentativas_sequenciamento_m7": _safe_len(df_tentativas_sequenciamento_m7),
-                "total_diagnostico_recuperacao_coordenadas_m7": _safe_len(df_diagnostico_recuperacao_coordenadas_m7),
-            },
+        trilha_auditoria = [
+            {
+                "ordem_entrega_parada_m7": 1,
+                "chave_parada_seq_m7": str(df_paradas.iloc[0]["chave_parada_seq_m7"]),
+                "chave_no_anterior_m7": "ORIGEM",
+                "distancia_no_anterior_km_m7": float(df_paradas.iloc[0]["distancia_origem_parada_km_m7"]),
+                "distancia_melhor_proximo_possivel_km_m7": 0.0,
+                "score_escolha_parada_m7": float(df_paradas.iloc[0]["distancia_origem_parada_km_m7"]),
+                "criterio_escolha_m7": "parada_unica",
+            }
+        ]
+    else:
+        df_paradas, trilha_auditoria = _ordenar_paradas_origem_mais_proxima_lookahead(
+            df_paradas=df_paradas,
+            origem=origem,
+            fator_km_rodoviario_m7=fator_km_rodoviario_m7,
         )
+
+    grupo["chave_parada_seq_m7"] = (
+        grupo["destinatario"].fillna("").astype(str).str.strip()
+        + "|"
+        + grupo["cidade"].fillna("").astype(str).str.strip()
+        + "|"
+        + grupo["uf"].fillna("").astype(str).str.strip()
     )
 
-    # =========================================================================================
-    # SERIALIZAÇÃO FINAL - SOMENTE M7
-    # =========================================================================================
-    t0 = _agora()
+    grupo = grupo.merge(
+        df_paradas[
+            [
+                "chave_parada_seq_m7",
+                "ordem_entrega_parada_m7",
+                "bucket_prioridade_m7",
+                "folga_min_m7",
+                "peso_total_m7",
+                "distancia_origem_parada_km_m7",
+                "chave_no_anterior_m7",
+                "distancia_no_anterior_km_m7",
+                "distancia_melhor_proximo_possivel_km_m7",
+                "score_escolha_parada_m7",
+                "chave_proximo_no_m7",
+                "distancia_proximo_no_km_m7",
+                "criterio_escolha_m7",
+                "metodo_sequenciamento_parada_m7",
+                "lat_ref_m7",
+                "lon_ref_m7",
+            ]
+        ],
+        on="chave_parada_seq_m7",
+        how="left",
+    )
 
-    manifestos_m7 = _serializar_dataframe_para_records(df_manifestos_m7, limit=None)
-    itens_manifestos_sequenciados_m7 = _serializar_dataframe_para_records(df_itens_manifestos_sequenciados_m7, limit=None)
-    manifestos_sequenciamento_resumo_m7 = _serializar_dataframe_para_records(df_manifestos_sequenciamento_resumo_m7, limit=None)
-    tentativas_sequenciamento_m7 = _serializar_dataframe_para_records(df_tentativas_sequenciamento_m7, limit=None)
-    diagnostico_recuperacao_coordenadas_m7 = _serializar_dataframe_para_records(df_diagnostico_recuperacao_coordenadas_m7, limit=None)
+    partes_ordenadas: List[pd.DataFrame] = []
+    for _, df_parada in grupo.groupby("chave_parada_seq_m7", sort=False):
+        partes_ordenadas.append(_ordenar_docs_dentro_parada(df_parada, col_doc))
 
-    tempo_serializacao = _duracao_ms(t0)
-    metricas_tempo["serializacao_resposta_ms"] = tempo_serializacao
+    grupo = pd.concat(partes_ordenadas, ignore_index=True)
 
-    tempo_total = _duracao_ms(inicio_total)
-    metricas_tempo["tempo_total_pipeline_ms"] = tempo_total
+    grupo = grupo.sort_values(
+        by=[
+            "ordem_entrega_parada_m7",
+            "bucket_prioridade_m7",
+            "folga_min_m7",
+            "peso_total_m7",
+            col_doc,
+        ],
+        ascending=[True, True, True, False, True],
+        kind="mergesort",
+    ).reset_index(drop=True)
 
-    resposta: Dict[str, Any] = {
-        "status": "ok",
-        "mensagem": "Motor executou com sucesso até o M7 sequenciamento de entregas.",
-        "pipeline_real_ate": "M7",
-        "modo_resposta": "auditoria_m7_sequenciamento_entregas",
-        "resposta_truncada": False,
-        "resumo_execucao": {
-            "rodada_id": contexto.rodada_id,
-            "upload_id": contexto.upload_id,
-            "usuario_id": contexto.usuario_id,
-            "filial_id": contexto.filial_id,
-            "tipo_roteirizacao": contexto.tipo_roteirizacao,
-            "data_base_roteirizacao": contexto.data_base.isoformat(),
-            "tempos_ms": metricas_tempo,
-        },
-        "resumo_negocio": {
-            "total_carteira": _safe_len(contexto.df_carteira_raw),
-            "total_enriquecida_m2": _safe_len(df_carteira_enriquecida),
-            "total_triagem_m3": _safe_len(df_carteira_triagem),
-            "total_roteirizavel_m3": _safe_len(df_carteira_roteirizavel),
-            "total_agendamento_futuro_m3": _safe_len(df_carteira_agendamento_futuro),
-            "total_agendas_vencidas_m3": _safe_len(df_carteira_agendas_vencidas),
-            "total_input_bloco_4": _safe_len(df_input_oficial_bloco_4),
-            "total_remanescente_global_m4": _safe_len(df_remanescente_roteirizavel_bloco_4),
-            "total_manifestos_m4": _safe_len(df_manifestos_m4),
-            "total_itens_manifestados_m4": _safe_len(df_itens_manifestados_m4),
-            "total_premanifestos_m5_2": _safe_len(df_premanifestos_m5_2),
-            "total_itens_manifestados_m5_2": _safe_len(df_itens_premanifestos_m5_2),
-            "total_subregioes_consolidadas_m5_3": _safe_len(df_subregioes_consolidadas_m5_3),
-            "total_premanifestos_m5_3": _safe_len(df_premanifestos_m5_3),
-            "total_itens_roteirizados_m5_3": _safe_len(df_itens_premanifestos_m5_3),
-            "total_mesorregioes_consolidadas_m5_4": _safe_len(df_mesorregioes_consolidadas_m5_4),
-            "total_premanifestos_m5_4": _safe_len(df_premanifestos_m5_4),
-            "total_itens_roteirizados_m5_4": _safe_len(df_itens_premanifestos_m5_4),
-            "total_remanescente_m5_4": _safe_len(df_remanescente_m5_4),
-            "total_manifestos_base_m6": _safe_len(df_manifestos_base_m6),
-            "total_itens_manifestos_base_m6": _safe_len(df_itens_manifestos_base_m6),
-            "total_manifestos_m6_2": _safe_len(df_manifestos_m6_2),
-            "total_itens_manifestos_m6_2": _safe_len(df_itens_manifestos_m6_2),
-            "total_remanescente_m6_2": _safe_len(df_remanescente_m6_2),
-            "total_manifestos_m7": _safe_len(df_manifestos_m7),
-            "total_itens_manifestos_sequenciados_m7": _safe_len(df_itens_manifestos_sequenciados_m7),
-            "total_manifestos_sequenciamento_resumo_m7": _safe_len(df_manifestos_sequenciamento_resumo_m7),
-            "total_tentativas_sequenciamento_m7": _safe_len(df_tentativas_sequenciamento_m7),
-            "total_diagnostico_recuperacao_coordenadas_m7": _safe_len(df_diagnostico_recuperacao_coordenadas_m7),
-            "resumo_m3": resumo_m3,
-            "resumo_m31": resumo_m31,
-            "resumo_m4": resumo_m4,
-            "resumo_m5_1": resumo_m5_1,
-            "resumo_m5_2": resumo_m5_2,
-            "resumo_m5_3a": resumo_m5_3a,
-            "resumo_m5_3b": resumo_m5_3b,
-            "resumo_m5_4a": resumo_m5_4a,
-            "resumo_m5_4b": resumo_m5_4b,
-            "resumo_m6_1": resumo_m6_1,
-            "resumo_m6_2": resumo_m6_2,
-            "resumo_m7": resumo_m7,
-        },
-        "contexto_rodada": {
-            "filial": contexto.filial,
-            "parametros_rodada": contexto.parametros_rodada,
-        },
-        "manifestos_m7": manifestos_m7,
-        "itens_manifestos_sequenciados_m7": itens_manifestos_sequenciados_m7,
-        "manifestos_sequenciamento_resumo_m7": manifestos_sequenciamento_resumo_m7,
-        "tentativas_sequenciamento_m7": tentativas_sequenciamento_m7,
-        "diagnostico_recuperacao_coordenadas_m7": diagnostico_recuperacao_coordenadas_m7,
-        "auditoria_serializacao": {
-            "manifestos_m7_total": _safe_len(df_manifestos_m7),
-            "manifestos_m7_retornado": len(manifestos_m7),
-            "itens_manifestos_sequenciados_m7_total": _safe_len(df_itens_manifestos_sequenciados_m7),
-            "itens_manifestos_sequenciados_m7_retornado": len(itens_manifestos_sequenciados_m7),
-            "manifestos_sequenciamento_resumo_m7_total": _safe_len(df_manifestos_sequenciamento_resumo_m7),
-            "manifestos_sequenciamento_resumo_m7_retornado": len(manifestos_sequenciamento_resumo_m7),
-            "tentativas_sequenciamento_m7_total": _safe_len(df_tentativas_sequenciamento_m7),
-            "tentativas_sequenciamento_m7_retornado": len(tentativas_sequenciamento_m7),
-            "diagnostico_recuperacao_coordenadas_m7_total": _safe_len(df_diagnostico_recuperacao_coordenadas_m7),
-            "diagnostico_recuperacao_coordenadas_m7_retornado": len(diagnostico_recuperacao_coordenadas_m7),
-        },
-        "auditoria_m7": auditoria_m7,
-        "logs": logs,
+    grupo["ordem_entrega_doc_m7"] = np.arange(1, len(grupo) + 1)
+    grupo["ordem_carregamento_doc_m7"] = (
+        grupo["ordem_entrega_doc_m7"].max() - grupo["ordem_entrega_doc_m7"] + 1
+    )
+
+    grupo["justificativa_ordem_entrega_m7"] = grupo.apply(
+        lambda row: (
+            f"Parada={int(_safe_int(row.get('ordem_entrega_parada_m7'), 0))}; "
+            f"metodo_parada={_safe_text(row.get('metodo_sequenciamento_parada_m7'))}; "
+            f"criterio_escolha={_safe_text(row.get('criterio_escolha_m7'))}; "
+            f"dist_origem_parada_km={_safe_float(row.get('distancia_origem_parada_km_m7'), 999999.0):.2f}; "
+            f"dist_no_anterior_km={_safe_float(row.get('distancia_no_anterior_km_m7'), 999999.0):.2f}; "
+            f"dist_melhor_proximo_possivel_km={_safe_float(row.get('distancia_melhor_proximo_possivel_km_m7'), 0.0):.2f}; "
+            f"score_escolha={_safe_float(row.get('score_escolha_parada_m7'), 999999.0):.2f}; "
+            f"prioridade_parada_bucket={_safe_int(row.get('bucket_prioridade_m7'), 9)}; "
+            f"folga_min_parada={_safe_float(row.get('folga_min_m7'), 9999.0):.2f}; "
+            f"peso_total_parada={_safe_float(row.get('peso_total_m7'), 0.0):.2f}; "
+            f"criterio_doc={_montar_justificativa_doc(row)}"
+        ),
+        axis=1,
+    )
+
+    km_total_sequencia = float(
+        pd.to_numeric(df_paradas["distancia_no_anterior_km_m7"], errors="coerce").fillna(0).sum()
+    )
+
+    auditoria_local = {
+        "trilha_sequenciamento_paradas_m7": trilha_auditoria,
+        "km_total_sequencia_paradas_m7": km_total_sequencia,
     }
 
-    if debug:
-        resposta["debug"] = {
-            "snapshots": {
-                "df_manifestos_m7": _snapshot_dataframe(df_manifestos_m7, "df_manifestos_m7"),
-                "df_itens_manifestos_sequenciados_m7": _snapshot_dataframe(
-                    df_itens_manifestos_sequenciados_m7,
-                    "df_itens_manifestos_sequenciados_m7",
-                ),
-                "df_manifestos_sequenciamento_resumo_m7": _snapshot_dataframe(
-                    df_manifestos_sequenciamento_resumo_m7,
-                    "df_manifestos_sequenciamento_resumo_m7",
-                ),
-                "df_tentativas_sequenciamento_m7": _snapshot_dataframe(
-                    df_tentativas_sequenciamento_m7,
-                    "df_tentativas_sequenciamento_m7",
-                ),
-                "df_diagnostico_recuperacao_coordenadas_m7": _snapshot_dataframe(
-                    df_diagnostico_recuperacao_coordenadas_m7,
-                    "df_diagnostico_recuperacao_coordenadas_m7",
-                ),
-            },
-            "resumos_dataframes": {
-                "df_manifestos_m7": _montar_resumo_dataframe(df_manifestos_m7, "df_manifestos_m7"),
-                "df_itens_manifestos_sequenciados_m7": _montar_resumo_dataframe(
-                    df_itens_manifestos_sequenciados_m7,
-                    "df_itens_manifestos_sequenciados_m7",
-                ),
-                "df_manifestos_sequenciamento_resumo_m7": _montar_resumo_dataframe(
-                    df_manifestos_sequenciamento_resumo_m7,
-                    "df_manifestos_sequenciamento_resumo_m7",
-                ),
-                "df_tentativas_sequenciamento_m7": _montar_resumo_dataframe(
-                    df_tentativas_sequenciamento_m7,
-                    "df_tentativas_sequenciamento_m7",
-                ),
-                "df_diagnostico_recuperacao_coordenadas_m7": _montar_resumo_dataframe(
-                    df_diagnostico_recuperacao_coordenadas_m7,
-                    "df_diagnostico_recuperacao_coordenadas_m7",
-                ),
-            },
-        }
+    return grupo.reset_index(drop=True), df_paradas.reset_index(drop=True), auditoria_local
 
-    return resposta
+
+# =========================================================================================
+# FUNÇÃO PRINCIPAL
+# =========================================================================================
+def executar_m7_sequenciamento_entregas(
+    df_manifestos_m6_2: pd.DataFrame,
+    df_itens_manifestos_m6_2: pd.DataFrame,
+    df_geo_tratado: Optional[pd.DataFrame] = None,
+    df_geo_raw: Optional[pd.DataFrame] = None,
+    data_base_roteirizacao: Optional[datetime] = None,
+    tipo_roteirizacao: str = "carteira",
+    caminhos_pipeline: Optional[Dict[str, Any]] = None,
+    time_limit_seconds: int = TIME_LIMIT_SECONDS_PADRAO,
+    fator_km_rodoviario_m7: float = FATOR_KM_RODOVIARIO_M7_PADRAO,
+) -> Tuple[Dict[str, pd.DataFrame], Dict[str, Any]]:
+    del df_geo_tratado
+    del df_geo_raw
+    del time_limit_seconds
+
+    if not isinstance(df_manifestos_m6_2, pd.DataFrame) or df_manifestos_m6_2.empty:
+        raise Exception("M7 recebeu df_manifestos_m6_2 vazio.")
+
+    if not isinstance(df_itens_manifestos_m6_2, pd.DataFrame) or df_itens_manifestos_m6_2.empty:
+        raise Exception("M7 recebeu df_itens_manifestos_m6_2 vazio.")
+
+    df_manifestos = _normalizar_manifestos(df_manifestos_m6_2)
+    df_itens = _normalizar_itens(df_itens_manifestos_m6_2)
+
+    manifestos_validos = set(df_manifestos["manifesto_id"].astype(str))
+    df_itens = df_itens.loc[df_itens["manifesto_id"].astype(str).isin(manifestos_validos)].copy()
+
+    df_itens, df_diagnostico_recuperacao_coordenadas_m7 = _preparar_coordenadas_contrato(df_itens)
+
+    resultados: List[pd.DataFrame] = []
+    resumos_manifestos: List[Dict[str, Any]] = []
+    tentativas: List[Dict[str, Any]] = []
+    auditorias_manifestos: List[Dict[str, Any]] = []
+
+    for manifesto_id, grupo in df_itens.groupby("manifesto_id", dropna=False):
+        grupo = grupo.copy().reset_index(drop=True)
+
+        try:
+            if grupo["latitude_dest_m7"].isna().any() or grupo["longitude_dest_m7"].isna().any():
+                raise Exception(
+                    f"Manifesto {manifesto_id} ainda possui coordenada de destino nula no contrato recebido."
+                )
+
+            if grupo["latitude_filial_m7"].isna().any() or grupo["longitude_filial_m7"].isna().any():
+                raise Exception(
+                    f"Manifesto {manifesto_id} ainda possui coordenada de filial nula no contrato recebido."
+                )
+
+            fator_real_manifesto = _inferir_fator_rodoviario_real_manifesto(
+                df_manifesto=grupo,
+                fallback=fator_km_rodoviario_m7,
+            )
+
+            grupo_seq, df_paradas_seq, auditoria_local = _sequenciar_manifesto(
+                df_manifesto=grupo,
+                col_doc="id_linha_pipeline",
+                fator_km_rodoviario_m7=float(fator_real_manifesto),
+            )
+
+            grupo_seq["status_sequenciamento_m7"] = "ok"
+            grupo_seq["motivo_status_sequenciamento_m7"] = "sequenciamento_realizado"
+
+            resultados.append(grupo_seq)
+
+            resumos_manifestos.append(
+                {
+                    "manifesto_id": manifesto_id,
+                    "qtd_docs_manifesto_m7": int(len(grupo_seq)),
+                    "qtd_paradas_manifesto_m7": int(grupo_seq["chave_parada_seq_m7"].nunique()),
+                    "primeira_entrega_parada_m7": grupo_seq.sort_values("ordem_entrega_doc_m7")["chave_parada_seq_m7"].iloc[0],
+                    "ultima_entrega_parada_m7": grupo_seq.sort_values("ordem_entrega_doc_m7")["chave_parada_seq_m7"].iloc[-1],
+                    "status_sequenciamento_m7": "ok",
+                    "metodo_predominante_m7": (
+                        df_paradas_seq["metodo_sequenciamento_parada_m7"].mode().iloc[0]
+                        if not df_paradas_seq.empty
+                        else "na"
+                    ),
+                    "fator_km_rodoviario_real_m7": float(fator_real_manifesto),
+                    "km_total_sequencia_paradas_m7": float(auditoria_local["km_total_sequencia_paradas_m7"]),
+                }
+            )
+
+            tentativas.append(
+                {
+                    "manifesto_id": manifesto_id,
+                    "resultado": "ok",
+                    "motivo": "sequenciamento_realizado",
+                    "qtd_docs": int(len(grupo_seq)),
+                    "qtd_paradas": int(df_paradas_seq.shape[0]),
+                    "km_total_sequencia_paradas_m7": float(auditoria_local["km_total_sequencia_paradas_m7"]),
+                }
+            )
+
+            auditorias_manifestos.append(
+                {
+                    "manifesto_id": manifesto_id,
+                    **auditoria_local,
+                }
+            )
+
+        except Exception as e:
+            grupo_fallback = grupo.copy()
+
+            prioridades_fb = grupo_fallback.apply(_classificar_prioridade_negocio, axis=1)
+            grupo_fallback["bucket_prioridade_fb_m7"] = [x[0] for x in prioridades_fb]
+            grupo_fallback["folga_prioridade_fb_m7"] = [x[1] for x in prioridades_fb]
+            grupo_fallback["peso_prioridade_fb_m7"] = [(-x[2]) for x in prioridades_fb]
+
+            grupo_fallback["chave_parada_seq_m7"] = (
+                grupo_fallback["destinatario"].fillna("").astype(str).str.strip()
+                + "|"
+                + grupo_fallback["cidade"].fillna("").astype(str).str.strip()
+                + "|"
+                + grupo_fallback["uf"].fillna("").astype(str).str.strip()
+            )
+
+            grupo_fallback = grupo_fallback.sort_values(
+                by=[
+                    "bucket_prioridade_fb_m7",
+                    "folga_prioridade_fb_m7",
+                    "peso_prioridade_fb_m7",
+                    "id_linha_pipeline",
+                ],
+                ascending=[True, True, False, True],
+                kind="mergesort",
+            ).reset_index(drop=True)
+
+            grupo_fallback["ordem_entrega_parada_m7"] = np.nan
+            grupo_fallback["ordem_entrega_doc_m7"] = np.arange(1, len(grupo_fallback) + 1)
+            grupo_fallback["ordem_carregamento_doc_m7"] = (
+                grupo_fallback["ordem_entrega_doc_m7"].max() - grupo_fallback["ordem_entrega_doc_m7"] + 1
+            )
+            grupo_fallback["status_sequenciamento_m7"] = "fallback"
+            grupo_fallback["motivo_status_sequenciamento_m7"] = str(e)
+            grupo_fallback["metodo_sequenciamento_parada_m7"] = "fallback_regra"
+            grupo_fallback["justificativa_ordem_entrega_m7"] = grupo_fallback.apply(
+                lambda row: f"Fallback por exceção; criterio_doc={_montar_justificativa_doc(row)}; motivo={str(e)}",
+                axis=1,
+            )
+
+            grupo_fallback = grupo_fallback.drop(
+                columns=[
+                    "bucket_prioridade_fb_m7",
+                    "folga_prioridade_fb_m7",
+                    "peso_prioridade_fb_m7",
+                ],
+                errors="ignore",
+            )
+
+            resultados.append(grupo_fallback)
+
+            resumos_manifestos.append(
+                {
+                    "manifesto_id": manifesto_id,
+                    "qtd_docs_manifesto_m7": int(len(grupo_fallback)),
+                    "qtd_paradas_manifesto_m7": int(grupo_fallback["chave_parada_seq_m7"].nunique()),
+                    "primeira_entrega_parada_m7": "",
+                    "ultima_entrega_parada_m7": "",
+                    "status_sequenciamento_m7": "fallback",
+                    "metodo_predominante_m7": "fallback_regra",
+                    "fator_km_rodoviario_real_m7": None,
+                    "km_total_sequencia_paradas_m7": None,
+                }
+            )
+
+            tentativas.append(
+                {
+                    "manifesto_id": manifesto_id,
+                    "resultado": "fallback",
+                    "motivo": str(e),
+                    "qtd_docs": int(len(grupo_fallback)),
+                    "qtd_paradas": int(grupo_fallback["chave_parada_seq_m7"].nunique()),
+                    "km_total_sequencia_paradas_m7": None,
+                }
+            )
+
+    df_itens_manifestos_sequenciados_m7 = (
+        pd.concat(resultados, ignore_index=True) if resultados else pd.DataFrame()
+    )
+    df_manifestos_sequenciamento_resumo_m7 = pd.DataFrame(resumos_manifestos)
+    df_tentativas_sequenciamento_m7 = pd.DataFrame(tentativas)
+
+    if not df_itens_manifestos_sequenciados_m7.empty:
+        df_manifestos_m7 = df_manifestos.merge(
+            df_manifestos_sequenciamento_resumo_m7,
+            on="manifesto_id",
+            how="left",
+        )
+    else:
+        df_manifestos_m7 = df_manifestos.copy()
+
+    resumo_m7 = {
+        "modulo": "M7",
+        "data_base_roteirizacao": (
+            data_base_roteirizacao.isoformat()
+            if isinstance(data_base_roteirizacao, datetime)
+            else str(data_base_roteirizacao)
+            if data_base_roteirizacao is not None
+            else None
+        ),
+        "tipo_roteirizacao": tipo_roteirizacao,
+        "fonte_geo_m7": "contrato_itens_e_filial",
+        "metodo_m7": "origem_mais_proxima_e_lookahead_1_passo",
+        "fator_km_rodoviario_param_m7": float(fator_km_rodoviario_m7),
+        "manifestos_entrada_m7": int(df_manifestos["manifesto_id"].nunique()),
+        "itens_entrada_m7": int(len(df_itens)),
+        "manifestos_saida_m7": int(df_itens_manifestos_sequenciados_m7["manifesto_id"].nunique())
+        if not df_itens_manifestos_sequenciados_m7.empty
+        else 0,
+        "itens_saida_m7": int(len(df_itens_manifestos_sequenciados_m7)),
+        "fallbacks_m7": int(
+            (df_tentativas_sequenciamento_m7["resultado"] == "fallback").sum()
+        ) if not df_tentativas_sequenciamento_m7.empty else 0,
+        "linhas_filial_nula_m7": int(
+            (df_itens_manifestos_sequenciados_m7["status_coord_filial_m7"] != "ok").sum()
+        ) if not df_itens_manifestos_sequenciados_m7.empty else 0,
+        "linhas_destino_nula_m7": int(
+            (df_itens_manifestos_sequenciados_m7["status_coord_dest_m7"] != "ok").sum()
+        ) if not df_itens_manifestos_sequenciados_m7.empty else 0,
+        "caminhos_pipeline": caminhos_pipeline or {},
+    }
+
+    auditoria_m7 = {
+        "manifestos_fallback_m7": (
+            df_tentativas_sequenciamento_m7.loc[
+                df_tentativas_sequenciamento_m7["resultado"] == "fallback", "manifesto_id"
+            ].astype(str).tolist()
+            if not df_tentativas_sequenciamento_m7.empty
+            else []
+        ),
+        "auditoria_manifestos_m7": auditorias_manifestos,
+        "amostra_justificativas_ordem_m7": (
+            df_itens_manifestos_sequenciados_m7[
+                [
+                    "manifesto_id",
+                    "id_linha_pipeline",
+                    "ordem_entrega_doc_m7",
+                    "ordem_carregamento_doc_m7",
+                    "justificativa_ordem_entrega_m7",
+                ]
+            ]
+            .head(50)
+            .to_dict(orient="records")
+            if not df_itens_manifestos_sequenciados_m7.empty
+            else []
+        ),
+    }
+
+    outputs = {
+        "df_manifestos_m7": df_manifestos_m7.reset_index(drop=True),
+        "df_itens_manifestos_sequenciados_m7": df_itens_manifestos_sequenciados_m7.reset_index(drop=True),
+        "df_manifestos_sequenciamento_resumo_m7": df_manifestos_sequenciamento_resumo_m7.reset_index(drop=True),
+        "df_tentativas_sequenciamento_m7": df_tentativas_sequenciamento_m7.reset_index(drop=True),
+        "df_diagnostico_recuperacao_coordenadas_m7": df_diagnostico_recuperacao_coordenadas_m7.reset_index(drop=True),
+    }
+
+    meta = {
+        "resumo_m7": resumo_m7,
+        "auditoria_m7": auditoria_m7,
+    }
+
+    return outputs, meta
+
+
+def executar_m7(*args: Any, **kwargs: Any):
+    return executar_m7_sequenciamento_entregas(*args, **kwargs)
+
+
+def processar_m7_sequenciamento_entregas(*args: Any, **kwargs: Any):
+    return executar_m7_sequenciamento_entregas(*args, **kwargs)
+
+
+def rodar_m7_sequenciamento_entregas(*args: Any, **kwargs: Any):
+    return executar_m7_sequenciamento_entregas(*args, **kwargs)
