@@ -10,8 +10,7 @@ import pandas as pd
 
 TIME_LIMIT_SECONDS_PADRAO = 5
 FATOR_KM_RODOVIARIO_M7_PADRAO = 1.20
-FATOR_KM_RODOVIARIO_M7_MIN = 1.00
-FATOR_KM_RODOVIARIO_M7_MAX = 3.00
+
 
 # =========================================================================================
 # HELPERS BÁSICOS
@@ -94,16 +93,12 @@ def _validar_colunas(df: pd.DataFrame, obrigatorias: List[str], nome_df: str) ->
         raise Exception(f"M7 encontrou colunas obrigatórias ausentes em {nome_df}: {faltando}")
 
 
-def _txt_norm(value: Any) -> str:
-    return _safe_text(value).upper()
-
-
 # =========================================================================================
 # DISTÂNCIA
 # =========================================================================================
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     if any(pd.isna(x) for x in [lat1, lon1, lat2, lon2]):
-        return np.nan
+        return 999999.0
 
     r = 6371.0
     phi1 = math.radians(float(lat1))
@@ -130,37 +125,35 @@ def _distancia_operacional_km(
     if pd.isna(dist_hav):
         return 999999.0
 
-    fator = float(fator_km_rodoviario)
-    if pd.isna(fator) or fator <= 0:
+    fator = _safe_float(fator_km_rodoviario, FATOR_KM_RODOVIARIO_M7_PADRAO)
+    if fator <= 0:
         fator = FATOR_KM_RODOVIARIO_M7_PADRAO
 
     return float(dist_hav) * fator
 
 
-def _inferir_fator_rodoviario_do_manifesto(
+def _inferir_fator_rodoviario_real_manifesto(
     df_manifesto: pd.DataFrame,
     fallback: float,
 ) -> float:
-    amostra = df_manifesto.copy()
-
-    if "distancia_rodoviaria_est_km" not in amostra.columns:
+    if "distancia_rodoviaria_est_km" not in df_manifesto.columns:
         return float(fallback)
 
     ratios: List[float] = []
 
-    for _, row in amostra.iterrows():
-        dist_est = pd.to_numeric(row.get("distancia_rodoviaria_est_km"), errors="coerce")
+    for _, row in df_manifesto.iterrows():
         lat_o = pd.to_numeric(row.get("latitude_filial_m7"), errors="coerce")
         lon_o = pd.to_numeric(row.get("longitude_filial_m7"), errors="coerce")
         lat_d = pd.to_numeric(row.get("latitude_dest_m7"), errors="coerce")
         lon_d = pd.to_numeric(row.get("longitude_dest_m7"), errors="coerce")
+        dist_est = pd.to_numeric(row.get("distancia_rodoviaria_est_km"), errors="coerce")
 
         dist_hav = _haversine_km(lat_o, lon_o, lat_d, lon_d)
         if pd.isna(dist_est) or pd.isna(dist_hav) or dist_est <= 0 or dist_hav <= 0:
             continue
 
         ratio = float(dist_est) / float(dist_hav)
-        if FATOR_KM_RODOVIARIO_M7_MIN <= ratio <= FATOR_KM_RODOVIARIO_M7_MAX:
+        if 0.8 <= ratio <= 3.0:
             ratios.append(ratio)
 
     if not ratios:
@@ -369,7 +362,7 @@ def _normalizar_itens(df_itens_m6_2: pd.DataFrame) -> pd.DataFrame:
     out["agendada_norm"] = out["agendada"].apply(_to_bool)
     out["folga_dias_norm"] = pd.to_numeric(out["folga_dias"], errors="coerce")
 
-    # M7 sequencia com peso calculado como fonte principal, fallback para peso_kg
+    # Peso principal do sequenciamento: peso_calculado; fallback para peso_kg
     out["peso_seq_m7"] = pd.to_numeric(out["peso_calculado"], errors="coerce").fillna(
         pd.to_numeric(out["peso_kg"], errors="coerce")
     )
@@ -382,11 +375,7 @@ def _normalizar_itens(df_itens_m6_2: pd.DataFrame) -> pd.DataFrame:
     out = out[(out["manifesto_id"] != "") & (out["id_linha_pipeline"] != "")].copy()
 
     if out["id_linha_pipeline"].duplicated().any():
-        duplicados = (
-            out.loc[out["id_linha_pipeline"].duplicated(), "id_linha_pipeline"]
-            .astype(str)
-            .tolist()[:20]
-        )
+        duplicados = out.loc[out["id_linha_pipeline"].duplicated(), "id_linha_pipeline"].astype(str).tolist()[:20]
         raise Exception(
             f"M7 recebeu id_linha_pipeline duplicado em df_itens_manifestos_m6_2: {duplicados}"
         )
@@ -431,7 +420,7 @@ def _preparar_coordenadas_contrato(df_itens: pd.DataFrame) -> Tuple[pd.DataFrame
 
 
 # =========================================================================================
-# AGREGAÇÃO DE PARADAS / CIDADES
+# AGREGAÇÃO DE PARADAS
 # =========================================================================================
 def _agrupar_paradas(
     grupo: pd.DataFrame,
@@ -439,348 +428,14 @@ def _agrupar_paradas(
 ) -> pd.DataFrame:
     registros: List[Dict[str, Any]] = []
 
-    for chave_parada, gpar in grupo.groupby("chave_parada_seq_m7", dropna=False):
-        score = _calcular_score_parada(gpar)
-        lat_ref = pd.to_numeric(gpar["latitude_dest_m7"], errors="coerce").mean()
-        lon_ref = pd.to_numeric(gpar["longitude_dest_m7"], errors="coerce").mean()
-
-        dist_origem_ref = pd.to_numeric(gpar["distancia_rodoviaria_est_km"], errors="coerce").min()
-        if pd.isna(dist_origem_ref):
-            lat_o = pd.to_numeric(gpar["latitude_filial_m7"], errors="coerce").dropna()
-            lon_o = pd.to_numeric(gpar["longitude_filial_m7"], errors="coerce").dropna()
-            if len(lat_o) > 0 and len(lon_o) > 0 and pd.notna(lat_ref) and pd.notna(lon_ref):
-                dist_origem_ref = _distancia_operacional_km(
-                    float(lat_o.iloc[0]),
-                    float(lon_o.iloc[0]),
-                    float(lat_ref),
-                    float(lon_ref),
-                    fator_km_rodoviario_m7,
-                )
-            else:
-                dist_origem_ref = 999999.0
-
-        registros.append(
-            {
-                "chave_parada_seq_m7": chave_parada,
-                "destinatario_ref_m7": _safe_text(gpar["destinatario"].dropna().iloc[0] if len(gpar["destinatario"].dropna()) > 0 else ""),
-                "cidade_ref_m7": _safe_text(gpar["cidade"].dropna().iloc[0] if len(gpar["cidade"].dropna()) > 0 else ""),
-                "uf_ref_m7": _safe_text(gpar["uf"].dropna().iloc[0] if len(gpar["uf"].dropna()) > 0 else ""),
-                "lat_ref_m7": lat_ref,
-                "lon_ref_m7": lon_ref,
-                "bucket_prioridade_m7": score["bucket_prioridade"],
-                "folga_min_m7": score["folga_min"],
-                "peso_total_m7": score["peso_total"],
-                "qtd_docs_parada_m7": int(len(gpar)),
-                "distancia_origem_ref_m7": float(dist_origem_ref),
-            }
+    lat_o = pd.to_numeric(grupo["latitude_filial_m7"], errors="coerce").dropna()
+    lon_o = pd.to_numeric(grupo["longitude_filial_m7"], errors="coerce").dropna()
+    if len(lat_o) == 0 or len(lon_o) == 0:
+        raise Exception(
+            f"Manifesto {grupo['manifesto_id'].iloc[0]} sem coordenada de filial no contrato."
         )
 
-    df_paradas = pd.DataFrame(registros).reset_index(drop=True)
-
-    if df_paradas.empty:
-        return df_paradas
-
-    df_paradas["cidade_bloco_m7"] = (
-        df_paradas["cidade_ref_m7"].fillna("").astype(str).str.strip()
-        + "|"
-        + df_paradas["uf_ref_m7"].fillna("").astype(str).str.strip()
-    )
-
-    return df_paradas.reset_index(drop=True)
-
-
-def _agrupar_cidades(df_paradas: pd.DataFrame) -> pd.DataFrame:
-    registros: List[Dict[str, Any]] = []
-
-    for cidade_bloco, g in df_paradas.groupby("cidade_bloco_m7", dropna=False):
-        registros.append(
-            {
-                "cidade_bloco_m7": cidade_bloco,
-                "cidade_ref_m7": _safe_text(g["cidade_ref_m7"].dropna().iloc[0] if len(g["cidade_ref_m7"].dropna()) > 0 else ""),
-                "uf_ref_m7": _safe_text(g["uf_ref_m7"].dropna().iloc[0] if len(g["uf_ref_m7"].dropna()) > 0 else ""),
-                "lat_centro_m7": pd.to_numeric(g["lat_ref_m7"], errors="coerce").mean(),
-                "lon_centro_m7": pd.to_numeric(g["lon_ref_m7"], errors="coerce").mean(),
-                "peso_total_cidade_m7": float(pd.to_numeric(g["peso_total_m7"], errors="coerce").fillna(0).sum()),
-                "bucket_min_cidade_m7": int(pd.to_numeric(g["bucket_prioridade_m7"], errors="coerce").fillna(9).min()),
-                "folga_min_cidade_m7": float(pd.to_numeric(g["folga_min_m7"], errors="coerce").fillna(9999).min()),
-                "qtd_paradas_cidade_m7": int(len(g)),
-                "distancia_origem_min_cidade_m7": float(pd.to_numeric(g["distancia_origem_ref_m7"], errors="coerce").min()),
-            }
-        )
-
-    return pd.DataFrame(registros).reset_index(drop=True)
-
-
-# =========================================================================================
-# HEURÍSTICA HIERÁRQUICA
-# =========================================================================================
-def _distancia_entre_pontos_km(
-    ponto_a: Tuple[float, float],
-    ponto_b: Tuple[float, float],
-    fator_km_rodoviario_m7: float,
-) -> float:
-    return _distancia_operacional_km(
-        ponto_a[0], ponto_a[1], ponto_b[0], ponto_b[1], fator_km_rodoviario_m7
-    )
-
-
-def _ordenar_cidades_hierarquico(
-    df_cidades: pd.DataFrame,
-    df_paradas: pd.DataFrame,
-    origem: Tuple[float, float],
-    fator_km_rodoviario_m7: float,
-) -> List[str]:
-    if df_cidades.empty:
-        return []
-
-    restantes = set(df_cidades["cidade_bloco_m7"].astype(str).tolist())
-    ordem_cidades: List[str] = []
-    ponto_atual = origem
-
-    while restantes:
-        melhor_cidade = None
-        melhor_chave = None
-
-        for cidade_bloco in restantes:
-            stops_city = df_paradas.loc[df_paradas["cidade_bloco_m7"] == cidade_bloco].copy()
-            if stops_city.empty:
-                continue
-
-            dist_min = 999999.0
-            for _, row in stops_city.iterrows():
-                d = _distancia_entre_pontos_km(
-                    ponto_atual,
-                    (float(row["lat_ref_m7"]), float(row["lon_ref_m7"])),
-                    fator_km_rodoviario_m7,
-                )
-                if d < dist_min:
-                    dist_min = d
-
-            row_city = df_cidades.loc[df_cidades["cidade_bloco_m7"] == cidade_bloco].iloc[0]
-
-            chave = (
-                round(float(dist_min), 6),
-                -round(float(row_city["peso_total_cidade_m7"]), 6),
-                int(row_city["bucket_min_cidade_m7"]),
-                round(float(row_city["folga_min_cidade_m7"]), 6),
-                str(cidade_bloco),
-            )
-
-            if melhor_chave is None or chave < melhor_chave:
-                melhor_chave = chave
-                melhor_cidade = cidade_bloco
-
-        if melhor_cidade is None:
-            break
-
-        ordem_cidades.append(str(melhor_cidade))
-        restantes.remove(melhor_cidade)
-
-        row_city_sel = df_cidades.loc[df_cidades["cidade_bloco_m7"] == melhor_cidade].iloc[0]
-        ponto_atual = (
-            float(row_city_sel["lat_centro_m7"]),
-            float(row_city_sel["lon_centro_m7"]),
-        )
-
-    return ordem_cidades
-
-
-def _ordenar_paradas_dentro_cidade(
-    df_paradas_cidade: pd.DataFrame,
-    ponto_inicio: Tuple[float, float],
-    fator_km_rodoviario_m7: float,
-) -> List[str]:
-    restantes = df_paradas_cidade.copy().reset_index(drop=True)
-    ordem: List[str] = []
-    ponto_atual = ponto_inicio
-
-    while not restantes.empty:
-        chaves: List[Tuple[Any, ...]] = []
-
-        for idx, row in restantes.iterrows():
-            dist = _distancia_entre_pontos_km(
-                ponto_atual,
-                (float(row["lat_ref_m7"]), float(row["lon_ref_m7"])),
-                fator_km_rodoviario_m7,
-            )
-
-            chave = (
-                round(float(dist), 6),
-                -round(float(row["peso_total_m7"]), 6),
-                int(row["bucket_prioridade_m7"]),
-                round(float(row["folga_min_m7"]), 6),
-                round(float(row["distancia_origem_ref_m7"]), 6),
-                str(row["chave_parada_seq_m7"]),
-            )
-            chaves.append((idx, chave))
-
-        idx_escolhido = sorted(chaves, key=lambda x: x[1])[0][0]
-        row_sel = restantes.loc[idx_escolhido]
-
-        ordem.append(str(row_sel["chave_parada_seq_m7"]))
-        ponto_atual = (float(row_sel["lat_ref_m7"]), float(row_sel["lon_ref_m7"]))
-
-        restantes = restantes.drop(index=idx_escolhido).reset_index(drop=True)
-
-    return ordem
-
-
-def _montar_ordem_inicial_paradas(
-    df_paradas: pd.DataFrame,
-    origem: Tuple[float, float],
-    fator_km_rodoviario_m7: float,
-) -> List[str]:
-    if df_paradas.empty:
-        return []
-
-    df_cidades = _agrupar_cidades(df_paradas)
-    ordem_cidades = _ordenar_cidades_hierarquico(
-        df_cidades=df_cidades,
-        df_paradas=df_paradas,
-        origem=origem,
-        fator_km_rodoviario_m7=fator_km_rodoviario_m7,
-    )
-
-    ordem_final: List[str] = []
-    ponto_atual = origem
-
-    for cidade_bloco in ordem_cidades:
-        df_city = df_paradas.loc[df_paradas["cidade_bloco_m7"] == cidade_bloco].copy().reset_index(drop=True)
-        ordem_city = _ordenar_paradas_dentro_cidade(
-            df_paradas_cidade=df_city,
-            ponto_inicio=ponto_atual,
-            fator_km_rodoviario_m7=fator_km_rodoviario_m7,
-        )
-        ordem_final.extend(ordem_city)
-
-        if ordem_city:
-            ultima = df_city.loc[df_city["chave_parada_seq_m7"] == ordem_city[-1]].iloc[0]
-            ponto_atual = (float(ultima["lat_ref_m7"]), float(ultima["lon_ref_m7"]))
-
-    return ordem_final
-
-
-# =========================================================================================
-# VALIDAÇÃO DE FRONTEIRA
-# -----------------------------------------------------------------------------------------
-# Compara sequência atual vs sequência trocada localmente:
-# atual:   A -> B -> C -> D
-# troca:   A -> C -> B -> D
-# Aceita a troca se o custo total cair.
-# =========================================================================================
-def _custo_trecho_local_trocado(
-    prev_coords: Tuple[float, float],
-    a_coords: Tuple[float, float],
-    b_coords: Tuple[float, float],
-    next_coords: Optional[Tuple[float, float]],
-    fator_km_rodoviario_m7: float,
-) -> float:
-    custo = _distancia_entre_pontos_km(prev_coords, b_coords, fator_km_rodoviario_m7)
-    custo += _distancia_entre_pontos_km(b_coords, a_coords, fator_km_rodoviario_m7)
-    if next_coords is not None:
-        custo += _distancia_entre_pontos_km(a_coords, next_coords, fator_km_rodoviario_m7)
-    return custo
-
-
-def _custo_trecho_local_atual(
-    prev_coords: Tuple[float, float],
-    a_coords: Tuple[float, float],
-    b_coords: Tuple[float, float],
-    next_coords: Optional[Tuple[float, float]],
-    fator_km_rodoviario_m7: float,
-) -> float:
-    custo = _distancia_entre_pontos_km(prev_coords, a_coords, fator_km_rodoviario_m7)
-    custo += _distancia_entre_pontos_km(a_coords, b_coords, fator_km_rodoviario_m7)
-    if next_coords is not None:
-        custo += _distancia_entre_pontos_km(b_coords, next_coords, fator_km_rodoviario_m7)
-    return custo
-
-
-def _aplicar_validacao_local_fronteira(
-    ordem_paradas: List[str],
-    df_paradas: pd.DataFrame,
-    origem: Tuple[float, float],
-    fator_km_rodoviario_m7: float,
-) -> Tuple[List[str], int]:
-    if len(ordem_paradas) <= 2:
-        return ordem_paradas, 0
-
-    mapa = {
-        str(row["chave_parada_seq_m7"]): row
-        for _, row in df_paradas.iterrows()
-    }
-
-    ordem = ordem_paradas.copy()
-    trocas_aceitas = 0
-    houve_mudanca = True
-    limite_passadas = max(3, len(ordem) * 2)
-    passada = 0
-
-    while houve_mudanca and passada < limite_passadas:
-        houve_mudanca = False
-        passada += 1
-
-        for i in range(len(ordem) - 1):
-            chave_a = ordem[i]
-            chave_b = ordem[i + 1]
-
-            row_a = mapa[chave_a]
-            row_b = mapa[chave_b]
-
-            cidade_a = _txt_norm(row_a["cidade_ref_m7"])
-            cidade_b = _txt_norm(row_b["cidade_ref_m7"])
-
-            if cidade_a == cidade_b:
-                continue
-
-            if i == 0:
-                prev_coords = origem
-            else:
-                row_prev = mapa[ordem[i - 1]]
-                prev_coords = (float(row_prev["lat_ref_m7"]), float(row_prev["lon_ref_m7"]))
-
-            if i + 2 < len(ordem):
-                row_next = mapa[ordem[i + 2]]
-                next_coords = (float(row_next["lat_ref_m7"]), float(row_next["lon_ref_m7"]))
-            else:
-                next_coords = None
-
-            a_coords = (float(row_a["lat_ref_m7"]), float(row_a["lon_ref_m7"]))
-            b_coords = (float(row_b["lat_ref_m7"]), float(row_b["lon_ref_m7"]))
-
-            custo_atual = _custo_trecho_local_atual(
-                prev_coords=prev_coords,
-                a_coords=a_coords,
-                b_coords=b_coords,
-                next_coords=next_coords,
-                fator_km_rodoviario_m7=fator_km_rodoviario_m7,
-            )
-            custo_trocado = _custo_trecho_local_trocado(
-                prev_coords=prev_coords,
-                a_coords=a_coords,
-                b_coords=b_coords,
-                next_coords=next_coords,
-                fator_km_rodoviario_m7=fator_km_rodoviario_m7,
-            )
-
-            if custo_trocado + 1e-9 < custo_atual:
-                ordem[i], ordem[i + 1] = ordem[i + 1], ordem[i]
-                trocas_aceitas += 1
-                houve_mudanca = True
-
-    return ordem, trocas_aceitas
-
-
-# =========================================================================================
-# ORDEM DAS PARADAS
-# =========================================================================================
-def _ordenar_paradas_hierarquico_com_fronteira(
-    df_manifesto: pd.DataFrame,
-    col_manifesto: str,
-    col_doc: str,
-    fator_km_rodoviario_m7: float,
-) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
-    grupo = df_manifesto.copy().reset_index(drop=True)
+    origem = (float(lat_o.iloc[0]), float(lon_o.iloc[0]))
 
     grupo["chave_parada_seq_m7"] = (
         grupo["destinatario"].fillna("").astype(str).str.strip()
@@ -790,12 +445,193 @@ def _ordenar_paradas_hierarquico_com_fronteira(
         + grupo["uf"].fillna("").astype(str).str.strip()
     )
 
+    for chave_parada, gpar in grupo.groupby("chave_parada_seq_m7", dropna=False):
+        score = _calcular_score_parada(gpar)
+        lat_ref = pd.to_numeric(gpar["latitude_dest_m7"], errors="coerce").mean()
+        lon_ref = pd.to_numeric(gpar["longitude_dest_m7"], errors="coerce").mean()
+
+        if pd.isna(lat_ref) or pd.isna(lon_ref):
+            raise Exception(
+                f"Manifesto {grupo['manifesto_id'].iloc[0]} possui parada sem coordenada de destino."
+            )
+
+        dist_origem = _distancia_operacional_km(
+            origem[0], origem[1], float(lat_ref), float(lon_ref), fator_km_rodoviario_m7
+        )
+
+        registros.append(
+            {
+                "chave_parada_seq_m7": chave_parada,
+                "destinatario_ref_m7": _safe_text(gpar["destinatario"].iloc[0]),
+                "cidade_ref_m7": _safe_text(gpar["cidade"].iloc[0]),
+                "uf_ref_m7": _safe_text(gpar["uf"].iloc[0]),
+                "lat_ref_m7": float(lat_ref),
+                "lon_ref_m7": float(lon_ref),
+                "bucket_prioridade_m7": score["bucket_prioridade"],
+                "folga_min_m7": score["folga_min"],
+                "peso_total_m7": score["peso_total"],
+                "qtd_docs_parada_m7": int(len(gpar)),
+                "distancia_origem_parada_km_m7": float(dist_origem),
+            }
+        )
+
+    return pd.DataFrame(registros).reset_index(drop=True)
+
+
+# =========================================================================================
+# SEQUENCIAMENTO: ORIGEM -> VIZINHO MAIS PRÓXIMO
+# =========================================================================================
+def _ordenar_paradas_por_vizinho_mais_proximo(
+    df_paradas: pd.DataFrame,
+    origem: Tuple[float, float],
+    fator_km_rodoviario_m7: float,
+) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
+    if df_paradas.empty:
+        return df_paradas.copy(), []
+
+    work = df_paradas.copy().reset_index(drop=True)
+
+    restantes = set(work["chave_parada_seq_m7"].astype(str).tolist())
+    mapa = {
+        str(row["chave_parada_seq_m7"]): row
+        for _, row in work.iterrows()
+    }
+
+    ordem: List[str] = []
+    trilha_auditoria: List[Dict[str, Any]] = []
+
+    # 1) Primeira parada: menor distância da origem
+    candidatos_primeira: List[Tuple[Any, str]] = []
+    for chave in restantes:
+        row = mapa[chave]
+        chave_ord = (
+            round(_safe_float(row["distancia_origem_parada_km_m7"], 999999.0), 6),
+            -round(_safe_float(row["peso_total_m7"], 0.0), 6),
+            _safe_int(row["bucket_prioridade_m7"], 9),
+            round(_safe_float(row["folga_min_m7"], 9999.0), 6),
+            str(chave),
+        )
+        candidatos_primeira.append((chave_ord, chave))
+
+    _, primeira = sorted(candidatos_primeira, key=lambda x: x[0])[0]
+    ordem.append(primeira)
+    restantes.remove(primeira)
+
+    row_primeira = mapa[primeira]
+    trilha_auditoria.append(
+        {
+            "ordem_entrega_parada_m7": 1,
+            "chave_parada_seq_m7": primeira,
+            "chave_no_anterior_m7": "ORIGEM",
+            "distancia_no_anterior_km_m7": _safe_float(row_primeira["distancia_origem_parada_km_m7"], 999999.0),
+            "criterio_escolha_m7": "menor_distancia_da_origem",
+        }
+    )
+
+    # 2) Próximas: menor distância a partir do nó atual
+    while restantes:
+        chave_atual = ordem[-1]
+        row_atual = mapa[chave_atual]
+        ponto_atual = (float(row_atual["lat_ref_m7"]), float(row_atual["lon_ref_m7"]))
+
+        candidatos: List[Tuple[Any, str, float]] = []
+        for chave in restantes:
+            row = mapa[chave]
+            ponto_cand = (float(row["lat_ref_m7"]), float(row["lon_ref_m7"]))
+            dist_entre_nos = _distancia_operacional_km(
+                ponto_atual[0],
+                ponto_atual[1],
+                ponto_cand[0],
+                ponto_cand[1],
+                fator_km_rodoviario_m7,
+            )
+
+            chave_ord = (
+                round(float(dist_entre_nos), 6),
+                -round(_safe_float(row["peso_total_m7"], 0.0), 6),
+                _safe_int(row["bucket_prioridade_m7"], 9),
+                round(_safe_float(row["folga_min_m7"], 9999.0), 6),
+                str(chave),
+            )
+            candidatos.append((chave_ord, chave, dist_entre_nos))
+
+        _, escolhido, dist_escolhido = sorted(candidatos, key=lambda x: x[0])[0]
+        ordem.append(escolhido)
+        restantes.remove(escolhido)
+
+        trilha_auditoria.append(
+            {
+                "ordem_entrega_parada_m7": len(ordem),
+                "chave_parada_seq_m7": escolhido,
+                "chave_no_anterior_m7": chave_atual,
+                "distancia_no_anterior_km_m7": float(dist_escolhido),
+                "criterio_escolha_m7": "vizinho_mais_proximo",
+            }
+        )
+
+    df_aud = pd.DataFrame(trilha_auditoria)
+
+    work = work.merge(df_aud, on="chave_parada_seq_m7", how="left")
+    work["ordem_entrega_parada_m7"] = pd.to_numeric(work["ordem_entrega_parada_m7"], errors="coerce").astype(int)
+    work["metodo_sequenciamento_parada_m7"] = np.where(
+        work["ordem_entrega_parada_m7"] == 1,
+        "origem_mais_proxima",
+        "vizinho_mais_proximo",
+    )
+
+    # distância até o próximo nó
+    ordem_map = {ch: i + 1 for i, ch in enumerate(ordem)}
+    proximo_map: Dict[str, str] = {}
+    dist_proximo_map: Dict[str, float] = {}
+
+    for i, chave in enumerate(ordem):
+        if i == len(ordem) - 1:
+            proximo_map[chave] = ""
+            dist_proximo_map[chave] = np.nan
+            continue
+
+        prox = ordem[i + 1]
+        row_a = mapa[chave]
+        row_b = mapa[prox]
+        dist_ab = _distancia_operacional_km(
+            float(row_a["lat_ref_m7"]),
+            float(row_a["lon_ref_m7"]),
+            float(row_b["lat_ref_m7"]),
+            float(row_b["lon_ref_m7"]),
+            fator_km_rodoviario_m7,
+        )
+        proximo_map[chave] = prox
+        dist_proximo_map[chave] = float(dist_ab)
+
+    work["chave_proximo_no_m7"] = work["chave_parada_seq_m7"].map(proximo_map)
+    work["distancia_proximo_no_km_m7"] = work["chave_parada_seq_m7"].map(dist_proximo_map)
+    work["ordem_visual_m7"] = work["chave_parada_seq_m7"].map(ordem_map)
+
+    work = work.sort_values(
+        by=["ordem_entrega_parada_m7", "chave_parada_seq_m7"],
+        ascending=[True, True],
+        kind="mergesort",
+    ).reset_index(drop=True)
+
+    return work, trilha_auditoria
+
+
+# =========================================================================================
+# ORDENAÇÃO FINAL DO MANIFESTO
+# =========================================================================================
+def _sequenciar_manifesto(
+    df_manifesto: pd.DataFrame,
+    col_doc: str,
+    fator_km_rodoviario_m7: float,
+) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
+    grupo = df_manifesto.copy().reset_index(drop=True)
+
     lat_origem = pd.to_numeric(grupo["latitude_filial_m7"], errors="coerce").dropna()
     lon_origem = pd.to_numeric(grupo["longitude_filial_m7"], errors="coerce").dropna()
 
     if len(lat_origem) == 0 or len(lon_origem) == 0:
         raise Exception(
-            f"Manifesto {grupo[col_manifesto].iloc[0]} sem coordenada de filial no contrato."
+            f"Manifesto {grupo['manifesto_id'].iloc[0]} sem coordenada de filial no contrato."
         )
 
     origem = (float(lat_origem.iloc[0]), float(lon_origem.iloc[0]))
@@ -805,41 +641,37 @@ def _ordenar_paradas_hierarquico_com_fronteira(
         fator_km_rodoviario_m7=fator_km_rodoviario_m7,
     )
 
-    if df_paradas.empty:
-        raise Exception(f"Manifesto {grupo[col_manifesto].iloc[0]} sem paradas válidas para sequenciamento.")
-
-    if df_paradas["lat_ref_m7"].isna().any() or df_paradas["lon_ref_m7"].isna().any():
-        raise Exception(
-            f"Manifesto {grupo[col_manifesto].iloc[0]} possui parada sem coordenada de destino no contrato."
-        )
-
     if len(df_paradas) == 1:
         df_paradas["ordem_entrega_parada_m7"] = 1
+        df_paradas["chave_no_anterior_m7"] = "ORIGEM"
+        df_paradas["distancia_no_anterior_km_m7"] = df_paradas["distancia_origem_parada_km_m7"]
+        df_paradas["chave_proximo_no_m7"] = ""
+        df_paradas["distancia_proximo_no_km_m7"] = np.nan
+        df_paradas["criterio_escolha_m7"] = "parada_unica"
         df_paradas["metodo_sequenciamento_parada_m7"] = "parada_unica"
-        df_paradas["ajuste_fronteira_m7"] = False
-        df_paradas["trocas_fronteira_m7"] = 0
-        ordem_inicial = df_paradas["chave_parada_seq_m7"].astype(str).tolist()
-        ordem_final = ordem_inicial.copy()
-        trocas_fronteira = 0
+        trilha_auditoria = [
+            {
+                "ordem_entrega_parada_m7": 1,
+                "chave_parada_seq_m7": str(df_paradas.iloc[0]["chave_parada_seq_m7"]),
+                "chave_no_anterior_m7": "ORIGEM",
+                "distancia_no_anterior_km_m7": float(df_paradas.iloc[0]["distancia_origem_parada_km_m7"]),
+                "criterio_escolha_m7": "parada_unica",
+            }
+        ]
     else:
-        ordem_inicial = _montar_ordem_inicial_paradas(
+        df_paradas, trilha_auditoria = _ordenar_paradas_por_vizinho_mais_proximo(
             df_paradas=df_paradas,
             origem=origem,
             fator_km_rodoviario_m7=fator_km_rodoviario_m7,
         )
 
-        ordem_final, trocas_fronteira = _aplicar_validacao_local_fronteira(
-            ordem_paradas=ordem_inicial,
-            df_paradas=df_paradas,
-            origem=origem,
-            fator_km_rodoviario_m7=fator_km_rodoviario_m7,
-        )
-
-        mapa_ordem = {chave: pos + 1 for pos, chave in enumerate(ordem_final)}
-        df_paradas["ordem_entrega_parada_m7"] = df_paradas["chave_parada_seq_m7"].map(mapa_ordem).astype(int)
-        df_paradas["metodo_sequenciamento_parada_m7"] = "heuristica_hierarquica_fronteira"
-        df_paradas["ajuste_fronteira_m7"] = trocas_fronteira > 0
-        df_paradas["trocas_fronteira_m7"] = int(trocas_fronteira)
+    grupo["chave_parada_seq_m7"] = (
+        grupo["destinatario"].fillna("").astype(str).str.strip()
+        + "|"
+        + grupo["cidade"].fillna("").astype(str).str.strip()
+        + "|"
+        + grupo["uf"].fillna("").astype(str).str.strip()
+    )
 
     grupo = grupo.merge(
         df_paradas[
@@ -849,10 +681,15 @@ def _ordenar_paradas_hierarquico_com_fronteira(
                 "bucket_prioridade_m7",
                 "folga_min_m7",
                 "peso_total_m7",
-                "cidade_ref_m7",
+                "distancia_origem_parada_km_m7",
+                "chave_no_anterior_m7",
+                "distancia_no_anterior_km_m7",
+                "chave_proximo_no_m7",
+                "distancia_proximo_no_km_m7",
+                "criterio_escolha_m7",
                 "metodo_sequenciamento_parada_m7",
-                "ajuste_fronteira_m7",
-                "trocas_fronteira_m7",
+                "lat_ref_m7",
+                "lon_ref_m7",
             ]
         ],
         on="chave_parada_seq_m7",
@@ -886,21 +723,22 @@ def _ordenar_paradas_hierarquico_com_fronteira(
         lambda row: (
             f"Parada={int(_safe_int(row.get('ordem_entrega_parada_m7'), 0))}; "
             f"metodo_parada={_safe_text(row.get('metodo_sequenciamento_parada_m7'))}; "
+            f"criterio_escolha={_safe_text(row.get('criterio_escolha_m7'))}; "
+            f"dist_origem_parada_km={_safe_float(row.get('distancia_origem_parada_km_m7'), 999999.0):.2f}; "
+            f"dist_no_anterior_km={_safe_float(row.get('distancia_no_anterior_km_m7'), 999999.0):.2f}; "
             f"prioridade_parada_bucket={_safe_int(row.get('bucket_prioridade_m7'), 9)}; "
             f"folga_min_parada={_safe_float(row.get('folga_min_m7'), 9999.0):.2f}; "
             f"peso_total_parada={_safe_float(row.get('peso_total_m7'), 0.0):.2f}; "
-            f"cidade_parada={_safe_text(row.get('cidade_ref_m7'))}; "
-            f"ajuste_fronteira={str(bool(row.get('ajuste_fronteira_m7', False))).lower()}; "
-            f"trocas_fronteira={_safe_int(row.get('trocas_fronteira_m7'), 0)}; "
             f"criterio_doc={_montar_justificativa_doc(row)}"
         ),
         axis=1,
     )
 
+    km_total_sequencia = float(pd.to_numeric(df_paradas["distancia_no_anterior_km_m7"], errors="coerce").fillna(0).sum())
+
     auditoria_local = {
-        "ordem_inicial_paradas_m7": ordem_inicial,
-        "ordem_final_paradas_m7": ordem_final,
-        "trocas_fronteira_m7": int(trocas_fronteira),
+        "trilha_sequenciamento_paradas_m7": trilha_auditoria,
+        "km_total_sequencia_paradas_m7": km_total_sequencia,
     }
 
     return grupo.reset_index(drop=True), df_paradas.reset_index(drop=True), auditoria_local
@@ -922,7 +760,7 @@ def executar_m7_sequenciamento_entregas(
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, Any]]:
     del df_geo_tratado
     del df_geo_raw
-    del time_limit_seconds  # M7 novo é determinístico e não usa solver com timeout
+    del time_limit_seconds  # novo M7 não usa solver nem timeout
 
     if not isinstance(df_manifestos_m6_2, pd.DataFrame) or df_manifestos_m6_2.empty:
         raise Exception("M7 recebeu df_manifestos_m6_2 vazio.")
@@ -957,14 +795,13 @@ def executar_m7_sequenciamento_entregas(
                     f"Manifesto {manifesto_id} ainda possui coordenada de filial nula no contrato recebido."
                 )
 
-            fator_real_manifesto = _inferir_fator_rodoviario_do_manifesto(
+            fator_real_manifesto = _inferir_fator_rodoviario_real_manifesto(
                 df_manifesto=grupo,
                 fallback=fator_km_rodoviario_m7,
             )
 
-            grupo_seq, df_paradas_seq, auditoria_local = _ordenar_paradas_hierarquico_com_fronteira(
+            grupo_seq, df_paradas_seq, auditoria_local = _sequenciar_manifesto(
                 df_manifesto=grupo,
-                col_manifesto="manifesto_id",
                 col_doc="id_linha_pipeline",
                 fator_km_rodoviario_m7=float(fator_real_manifesto),
             )
@@ -988,7 +825,7 @@ def executar_m7_sequenciamento_entregas(
                         else "na"
                     ),
                     "fator_km_rodoviario_real_m7": float(fator_real_manifesto),
-                    "trocas_fronteira_m7": int(auditoria_local["trocas_fronteira_m7"]),
+                    "km_total_sequencia_paradas_m7": float(auditoria_local["km_total_sequencia_paradas_m7"]),
                 }
             )
 
@@ -999,7 +836,7 @@ def executar_m7_sequenciamento_entregas(
                     "motivo": "sequenciamento_realizado",
                     "qtd_docs": int(len(grupo_seq)),
                     "qtd_paradas": int(df_paradas_seq.shape[0]),
-                    "trocas_fronteira_m7": int(auditoria_local["trocas_fronteira_m7"]),
+                    "km_total_sequencia_paradas_m7": float(auditoria_local["km_total_sequencia_paradas_m7"]),
                 }
             )
 
@@ -1071,7 +908,7 @@ def executar_m7_sequenciamento_entregas(
                     "status_sequenciamento_m7": "fallback",
                     "metodo_predominante_m7": "fallback_regra",
                     "fator_km_rodoviario_real_m7": None,
-                    "trocas_fronteira_m7": 0,
+                    "km_total_sequencia_paradas_m7": None,
                 }
             )
 
@@ -1082,7 +919,7 @@ def executar_m7_sequenciamento_entregas(
                     "motivo": str(e),
                     "qtd_docs": int(len(grupo_fallback)),
                     "qtd_paradas": int(grupo_fallback["chave_parada_seq_m7"].nunique()),
-                    "trocas_fronteira_m7": 0,
+                    "km_total_sequencia_paradas_m7": None,
                 }
             )
 
@@ -1112,7 +949,7 @@ def executar_m7_sequenciamento_entregas(
         ),
         "tipo_roteirizacao": tipo_roteirizacao,
         "fonte_geo_m7": "contrato_itens_e_filial",
-        "metodo_m7": "heuristica_hierarquica_cidades_com_validacao_local_fronteira",
+        "metodo_m7": "origem_mais_proxima_e_vizinho_mais_proximo",
         "fator_km_rodoviario_param_m7": float(fator_km_rodoviario_m7),
         "manifestos_entrada_m7": int(df_manifestos["manifesto_id"].nunique()),
         "itens_entrada_m7": int(len(df_itens)),
@@ -1129,9 +966,6 @@ def executar_m7_sequenciamento_entregas(
         "linhas_destino_nula_m7": int(
             (df_itens_manifestos_sequenciados_m7["status_coord_dest_m7"] != "ok").sum()
         ) if not df_itens_manifestos_sequenciados_m7.empty else 0,
-        "total_trocas_fronteira_m7": int(df_manifestos_sequenciamento_resumo_m7["trocas_fronteira_m7"].fillna(0).sum())
-        if not df_manifestos_sequenciamento_resumo_m7.empty and "trocas_fronteira_m7" in df_manifestos_sequenciamento_resumo_m7.columns
-        else 0,
         "caminhos_pipeline": caminhos_pipeline or {},
     }
 
