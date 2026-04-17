@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
 import math
@@ -478,179 +479,182 @@ def _agrupar_paradas(
 
 
 # =========================================================================================
-# LOOKAHEAD DE 1 PASSO
+# BUSCA GLOBAL DA MELHOR SEQUÊNCIA A PARTIR DA PRÓXIMA PARADA
 # =========================================================================================
-def _dist_entre_paradas(
-    row_a: pd.Series,
-    row_b: pd.Series,
-    fator_km_rodoviario_m7: float,
-) -> float:
-    return _distancia_operacional_km(
-        float(row_a["lat_ref_m7"]),
-        float(row_a["lon_ref_m7"]),
-        float(row_b["lat_ref_m7"]),
-        float(row_b["lon_ref_m7"]),
-        fator_km_rodoviario_m7,
-    )
-
-
-def _melhor_saida_possivel(
-    row_candidato: pd.Series,
-    df_restantes: pd.DataFrame,
-    fator_km_rodoviario_m7: float,
-) -> float:
-    if df_restantes.empty:
-        return 0.0
-
-    menores: List[float] = []
-    for _, row_rest in df_restantes.iterrows():
-        dist = _dist_entre_paradas(row_candidato, row_rest, fator_km_rodoviario_m7)
-        menores.append(float(dist))
-
-    if not menores:
-        return 0.0
-
-    return float(min(menores))
-
-
-def _ordenar_paradas_origem_mais_proxima_lookahead(
+def _construir_matriz_distancias(
     df_paradas: pd.DataFrame,
-    origem: Tuple[float, float],
     fator_km_rodoviario_m7: float,
-) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
+) -> Tuple[List[str], Dict[str, int], np.ndarray]:
+    chaves = df_paradas["chave_parada_seq_m7"].astype(str).tolist()
+    idx_map = {ch: i for i, ch in enumerate(chaves)}
+    n = len(chaves)
+    dist = np.zeros((n, n), dtype=float)
+
+    for i in range(n):
+        row_i = df_paradas.iloc[i]
+        for j in range(n):
+            if i == j:
+                dist[i, j] = 0.0
+            else:
+                row_j = df_paradas.iloc[j]
+                dist[i, j] = _distancia_operacional_km(
+                    float(row_i["lat_ref_m7"]),
+                    float(row_i["lon_ref_m7"]),
+                    float(row_j["lat_ref_m7"]),
+                    float(row_j["lon_ref_m7"]),
+                    fator_km_rodoviario_m7,
+                )
+
+    return chaves, idx_map, dist
+
+
+def _resolver_ordem_global_apos_primeira(
+    df_paradas: pd.DataFrame,
+    fator_km_rodoviario_m7: float,
+) -> Tuple[pd.DataFrame, List[Dict[str, Any]], float]:
     if df_paradas.empty:
-        return df_paradas.copy(), []
+        return df_paradas.copy(), [], 0.0
 
     work = df_paradas.copy().reset_index(drop=True)
-    mapa = {
-        str(row["chave_parada_seq_m7"]): row
-        for _, row in work.iterrows()
-    }
+    chaves, idx_map, dist = _construir_matriz_distancias(work, fator_km_rodoviario_m7)
+    n = len(chaves)
 
-    restantes = set(work["chave_parada_seq_m7"].astype(str).tolist())
-    ordem: List[str] = []
-    trilha_auditoria: List[Dict[str, Any]] = []
-
-    # 1ª parada = menor distância da origem
-    candidatos_primeira: List[Tuple[Any, str]] = []
-    for chave in restantes:
-        row = mapa[chave]
+    # primeira parada = menor distância da origem
+    candidatos_primeira: List[Tuple[Any, int]] = []
+    for i in range(n):
+        row = work.iloc[i]
         chave_ord = (
             round(_safe_float(row["distancia_origem_parada_km_m7"], 999999.0), 6),
             -round(_safe_float(row["peso_total_m7"], 0.0), 6),
             _safe_int(row["bucket_prioridade_m7"], 9),
             round(_safe_float(row["folga_min_m7"], 9999.0), 6),
-            str(chave),
+            str(row["chave_parada_seq_m7"]),
         )
-        candidatos_primeira.append((chave_ord, chave))
+        candidatos_primeira.append((chave_ord, i))
 
-    _, primeira = sorted(candidatos_primeira, key=lambda x: x[0])[0]
-    ordem.append(primeira)
-    restantes.remove(primeira)
+    idx_primeira = sorted(candidatos_primeira, key=lambda x: x[0])[0][1]
 
-    row_primeira = mapa[primeira]
+    # máscara de restantes sem a primeira
+    mask_inicial = 0
+    for i in range(n):
+        if i != idx_primeira:
+            mask_inicial |= (1 << i)
+
+    @lru_cache(maxsize=None)
+    def _melhor_custo(idx_atual: int, mask_restante: int) -> float:
+        if mask_restante == 0:
+            return 0.0
+
+        melhor = float("inf")
+
+        for j in range(n):
+            if not (mask_restante & (1 << j)):
+                continue
+
+            custo = float(dist[idx_atual, j]) + _melhor_custo(j, mask_restante ^ (1 << j))
+            if custo < melhor:
+                melhor = custo
+            elif abs(custo - melhor) <= 1e-9:
+                row_j = work.iloc[j]
+                # desempate determinístico
+                # maior peso, menor bucket, menor folga, menor chave
+                pass
+
+        return melhor
+
+    def _escolher_proximo(idx_atual: int, mask_restante: int) -> Tuple[Optional[int], float, float]:
+        if mask_restante == 0:
+            return None, 0.0, 0.0
+
+        candidatos: List[Tuple[Any, int, float, float]] = []
+
+        for j in range(n):
+            if not (mask_restante & (1 << j)):
+                continue
+
+            custo_ate_j = float(dist[idx_atual, j])
+            custo_futuro = _melhor_custo(j, mask_restante ^ (1 << j))
+            custo_total = custo_ate_j + custo_futuro
+
+            row_j = work.iloc[j]
+            chave_ord = (
+                round(custo_total, 6),
+                round(custo_ate_j, 6),
+                -round(_safe_float(row_j["peso_total_m7"], 0.0), 6),
+                _safe_int(row_j["bucket_prioridade_m7"], 9),
+                round(_safe_float(row_j["folga_min_m7"], 9999.0), 6),
+                str(row_j["chave_parada_seq_m7"]),
+            )
+            candidatos.append((chave_ord, j, custo_ate_j, custo_futuro))
+
+        _, idx_escolhido, custo_ate_j, custo_futuro = sorted(candidatos, key=lambda x: x[0])[0]
+        return idx_escolhido, float(custo_ate_j), float(custo_futuro)
+
+    ordem_idx: List[int] = [idx_primeira]
+    trilha_auditoria: List[Dict[str, Any]] = []
+
+    custo_futuro_primeira = _melhor_custo(idx_primeira, mask_inicial)
+
     trilha_auditoria.append(
         {
             "ordem_entrega_parada_m7": 1,
-            "chave_parada_seq_m7": primeira,
+            "chave_parada_seq_m7": chaves[idx_primeira],
             "chave_no_anterior_m7": "ORIGEM",
-            "distancia_no_anterior_km_m7": _safe_float(row_primeira["distancia_origem_parada_km_m7"], 999999.0),
-            "distancia_melhor_proximo_possivel_km_m7": (
-                _melhor_saida_possivel(
-                    row_primeira,
-                    work.loc[work["chave_parada_seq_m7"].isin(list(restantes))].copy(),
-                    fator_km_rodoviario_m7,
-                ) if restantes else 0.0
-            ),
-            "score_escolha_parada_m7": _safe_float(row_primeira["distancia_origem_parada_km_m7"], 999999.0),
+            "distancia_no_anterior_km_m7": float(work.iloc[idx_primeira]["distancia_origem_parada_km_m7"]),
+            "custo_futuro_otimo_restante_km_m7": float(custo_futuro_primeira),
+            "score_total_projetado_km_m7": float(work.iloc[idx_primeira]["distancia_origem_parada_km_m7"]) + float(custo_futuro_primeira),
             "criterio_escolha_m7": "menor_distancia_da_origem",
         }
     )
 
-    # Demais paradas = distância atual + menor próxima possível
-    while restantes:
-        chave_atual = ordem[-1]
-        row_atual = mapa[chave_atual]
+    idx_atual = idx_primeira
+    mask_restante = mask_inicial
 
-        candidatos_scores: List[Tuple[Any, str, float, float, float]] = []
+    while mask_restante != 0:
+        idx_prox, custo_ate_j, custo_futuro = _escolher_proximo(idx_atual, mask_restante)
+        if idx_prox is None:
+            break
 
-        for chave in restantes:
-            row_cand = mapa[chave]
-            dist_atual_cand = _dist_entre_paradas(row_atual, row_cand, fator_km_rodoviario_m7)
-
-            restantes_sem_cand = [x for x in restantes if x != chave]
-            df_restantes_sem_cand = work.loc[
-                work["chave_parada_seq_m7"].isin(restantes_sem_cand)
-            ].copy()
-
-            melhor_saida = _melhor_saida_possivel(
-                row_candidato=row_cand,
-                df_restantes=df_restantes_sem_cand,
-                fator_km_rodoviario_m7=fator_km_rodoviario_m7,
-            )
-
-            score_total = float(dist_atual_cand) + float(melhor_saida)
-
-            chave_ord = (
-                round(float(score_total), 6),
-                round(float(dist_atual_cand), 6),
-                -round(_safe_float(row_cand["peso_total_m7"], 0.0), 6),
-                _safe_int(row_cand["bucket_prioridade_m7"], 9),
-                round(_safe_float(row_cand["folga_min_m7"], 9999.0), 6),
-                str(chave),
-            )
-            candidatos_scores.append(
-                (chave_ord, chave, float(dist_atual_cand), float(melhor_saida), float(score_total))
-            )
-
-        _, escolhido, dist_escolhido, melhor_saida_escolhido, score_escolhido = sorted(
-            candidatos_scores, key=lambda x: x[0]
-        )[0]
-
-        ordem.append(escolhido)
-        restantes.remove(escolhido)
+        ordem_idx.append(idx_prox)
 
         trilha_auditoria.append(
             {
-                "ordem_entrega_parada_m7": len(ordem),
-                "chave_parada_seq_m7": escolhido,
-                "chave_no_anterior_m7": chave_atual,
-                "distancia_no_anterior_km_m7": float(dist_escolhido),
-                "distancia_melhor_proximo_possivel_km_m7": float(melhor_saida_escolhido),
-                "score_escolha_parada_m7": float(score_escolhido),
-                "criterio_escolha_m7": "distancia_atual_mais_melhor_saida",
+                "ordem_entrega_parada_m7": len(ordem_idx),
+                "chave_parada_seq_m7": chaves[idx_prox],
+                "chave_no_anterior_m7": chaves[idx_atual],
+                "distancia_no_anterior_km_m7": float(custo_ate_j),
+                "custo_futuro_otimo_restante_km_m7": float(custo_futuro),
+                "score_total_projetado_km_m7": float(custo_ate_j) + float(custo_futuro),
+                "criterio_escolha_m7": "menor_custo_total_ate_o_fim",
             }
         )
 
-    df_aud = pd.DataFrame(trilha_auditoria)
-    work = work.merge(df_aud, on="chave_parada_seq_m7", how="left")
-    work["ordem_entrega_parada_m7"] = pd.to_numeric(
-        work["ordem_entrega_parada_m7"], errors="coerce"
-    ).astype(int)
+        mask_restante ^= (1 << idx_prox)
+        idx_atual = idx_prox
 
-    work["metodo_sequenciamento_parada_m7"] = np.where(
-        work["ordem_entrega_parada_m7"] == 1,
-        "origem_mais_proxima",
-        "lookahead_1_passo",
-    )
-
-    # Próximo nó e distância para o próximo
+    ordem_map = {chaves[idx]: pos + 1 for pos, idx in enumerate(ordem_idx)}
     proximo_map: Dict[str, str] = {}
     dist_proximo_map: Dict[str, float] = {}
 
-    for i, chave in enumerate(ordem):
-        if i == len(ordem) - 1:
+    for pos, idx in enumerate(ordem_idx):
+        chave = chaves[idx]
+        if pos == len(ordem_idx) - 1:
             proximo_map[chave] = ""
             dist_proximo_map[chave] = np.nan
-            continue
+        else:
+            idx_prox = ordem_idx[pos + 1]
+            proximo_map[chave] = chaves[idx_prox]
+            dist_proximo_map[chave] = float(dist[idx, idx_prox])
 
-        prox = ordem[i + 1]
-        row_a = mapa[chave]
-        row_b = mapa[prox]
-        dist_ab = _dist_entre_paradas(row_a, row_b, fator_km_rodoviario_m7)
-        proximo_map[chave] = prox
-        dist_proximo_map[chave] = float(dist_ab)
+    df_aud = pd.DataFrame(trilha_auditoria)
 
+    work = work.merge(df_aud, on="chave_parada_seq_m7", how="left")
+    work["ordem_entrega_parada_m7"] = pd.to_numeric(work["ordem_entrega_parada_m7"], errors="coerce").astype(int)
+    work["metodo_sequenciamento_parada_m7"] = np.where(
+        work["ordem_entrega_parada_m7"] == 1,
+        "origem_mais_proxima",
+        "custo_total_ate_o_fim",
+    )
     work["chave_proximo_no_m7"] = work["chave_parada_seq_m7"].map(proximo_map)
     work["distancia_proximo_no_km_m7"] = work["chave_parada_seq_m7"].map(dist_proximo_map)
 
@@ -660,7 +664,9 @@ def _ordenar_paradas_origem_mais_proxima_lookahead(
         kind="mergesort",
     ).reset_index(drop=True)
 
-    return work, trilha_auditoria
+    km_total = float(pd.to_numeric(work["distancia_no_anterior_km_m7"], errors="coerce").fillna(0).sum())
+
+    return work, trilha_auditoria, km_total
 
 
 # =========================================================================================
@@ -681,8 +687,6 @@ def _sequenciar_manifesto(
             f"Manifesto {grupo['manifesto_id'].iloc[0]} sem coordenada de filial no contrato."
         )
 
-    origem = (float(lat_origem.iloc[0]), float(lon_origem.iloc[0]))
-
     df_paradas = _agrupar_paradas(
         grupo=grupo,
         fator_km_rodoviario_m7=fator_km_rodoviario_m7,
@@ -692,8 +696,8 @@ def _sequenciar_manifesto(
         df_paradas["ordem_entrega_parada_m7"] = 1
         df_paradas["chave_no_anterior_m7"] = "ORIGEM"
         df_paradas["distancia_no_anterior_km_m7"] = df_paradas["distancia_origem_parada_km_m7"]
-        df_paradas["distancia_melhor_proximo_possivel_km_m7"] = 0.0
-        df_paradas["score_escolha_parada_m7"] = df_paradas["distancia_origem_parada_km_m7"]
+        df_paradas["custo_futuro_otimo_restante_km_m7"] = 0.0
+        df_paradas["score_total_projetado_km_m7"] = df_paradas["distancia_origem_parada_km_m7"]
         df_paradas["chave_proximo_no_m7"] = ""
         df_paradas["distancia_proximo_no_km_m7"] = np.nan
         df_paradas["criterio_escolha_m7"] = "parada_unica"
@@ -705,15 +709,15 @@ def _sequenciar_manifesto(
                 "chave_parada_seq_m7": str(df_paradas.iloc[0]["chave_parada_seq_m7"]),
                 "chave_no_anterior_m7": "ORIGEM",
                 "distancia_no_anterior_km_m7": float(df_paradas.iloc[0]["distancia_origem_parada_km_m7"]),
-                "distancia_melhor_proximo_possivel_km_m7": 0.0,
-                "score_escolha_parada_m7": float(df_paradas.iloc[0]["distancia_origem_parada_km_m7"]),
+                "custo_futuro_otimo_restante_km_m7": 0.0,
+                "score_total_projetado_km_m7": float(df_paradas.iloc[0]["distancia_origem_parada_km_m7"]),
                 "criterio_escolha_m7": "parada_unica",
             }
         ]
+        km_total = float(df_paradas.iloc[0]["distancia_origem_parada_km_m7"])
     else:
-        df_paradas, trilha_auditoria = _ordenar_paradas_origem_mais_proxima_lookahead(
+        df_paradas, trilha_auditoria, km_total = _resolver_ordem_global_apos_primeira(
             df_paradas=df_paradas,
-            origem=origem,
             fator_km_rodoviario_m7=fator_km_rodoviario_m7,
         )
 
@@ -736,8 +740,8 @@ def _sequenciar_manifesto(
                 "distancia_origem_parada_km_m7",
                 "chave_no_anterior_m7",
                 "distancia_no_anterior_km_m7",
-                "distancia_melhor_proximo_possivel_km_m7",
-                "score_escolha_parada_m7",
+                "custo_futuro_otimo_restante_km_m7",
+                "score_total_projetado_km_m7",
                 "chave_proximo_no_m7",
                 "distancia_proximo_no_km_m7",
                 "criterio_escolha_m7",
@@ -780,8 +784,8 @@ def _sequenciar_manifesto(
             f"criterio_escolha={_safe_text(row.get('criterio_escolha_m7'))}; "
             f"dist_origem_parada_km={_safe_float(row.get('distancia_origem_parada_km_m7'), 999999.0):.2f}; "
             f"dist_no_anterior_km={_safe_float(row.get('distancia_no_anterior_km_m7'), 999999.0):.2f}; "
-            f"dist_melhor_proximo_possivel_km={_safe_float(row.get('distancia_melhor_proximo_possivel_km_m7'), 0.0):.2f}; "
-            f"score_escolha={_safe_float(row.get('score_escolha_parada_m7'), 999999.0):.2f}; "
+            f"custo_futuro_otimo_restante_km={_safe_float(row.get('custo_futuro_otimo_restante_km_m7'), 0.0):.2f}; "
+            f"score_total_projetado_km={_safe_float(row.get('score_total_projetado_km_m7'), 999999.0):.2f}; "
             f"prioridade_parada_bucket={_safe_int(row.get('bucket_prioridade_m7'), 9)}; "
             f"folga_min_parada={_safe_float(row.get('folga_min_m7'), 9999.0):.2f}; "
             f"peso_total_parada={_safe_float(row.get('peso_total_m7'), 0.0):.2f}; "
@@ -790,13 +794,9 @@ def _sequenciar_manifesto(
         axis=1,
     )
 
-    km_total_sequencia = float(
-        pd.to_numeric(df_paradas["distancia_no_anterior_km_m7"], errors="coerce").fillna(0).sum()
-    )
-
     auditoria_local = {
         "trilha_sequenciamento_paradas_m7": trilha_auditoria,
-        "km_total_sequencia_paradas_m7": km_total_sequencia,
+        "km_total_sequencia_paradas_m7": float(km_total),
     }
 
     return grupo.reset_index(drop=True), df_paradas.reset_index(drop=True), auditoria_local
@@ -1007,7 +1007,7 @@ def executar_m7_sequenciamento_entregas(
         ),
         "tipo_roteirizacao": tipo_roteirizacao,
         "fonte_geo_m7": "contrato_itens_e_filial",
-        "metodo_m7": "origem_mais_proxima_e_lookahead_1_passo",
+        "metodo_m7": "origem_mais_proxima_e_custo_total_ate_o_fim",
         "fator_km_rodoviario_param_m7": float(fator_km_rodoviario_m7),
         "manifestos_entrada_m7": int(df_manifestos["manifesto_id"].nunique()),
         "itens_entrada_m7": int(len(df_itens)),
