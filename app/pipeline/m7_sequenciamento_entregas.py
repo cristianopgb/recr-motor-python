@@ -253,14 +253,8 @@ def _ordenar_docs_por_prioridade(df_docs: pd.DataFrame, col_doc: str) -> pd.Data
         kind="mergesort",
     ).reset_index(drop=True)
 
-    return dfp.drop(
-        columns=[
-            "bucket_prioridade_doc_m7",
-            "folga_prioridade_doc_m7",
-            "peso_prioridade_doc_m7",
-        ],
-        errors="ignore",
-    )
+    # IMPORTANTE: manter as colunas auxiliares, porque o restante do M7 usa elas
+    return dfp
 
 
 # =========================================================================================
@@ -656,7 +650,6 @@ def _sequenciar_cidades(
         ]
         return work.reset_index(drop=True), trilha, float(dist)
 
-    # Extremo A = cidade mais distante da origem
     work["dist_origem_tmp_m7"] = work.apply(
         lambda r: _distancia_operacional_km(
             origem_lat,
@@ -681,7 +674,6 @@ def _sequenciar_cidades(
 
     extremo_a = work.iloc[0]
 
-    # Extremo B = cidade mais distante do extremo A
     work["dist_extremo_a_tmp_m7"] = work.apply(
         lambda r: _distancia_operacional_km(
             float(extremo_a["lat_ref_cidade_m7"]),
@@ -711,7 +703,6 @@ def _sequenciar_cidades(
     lat_b = float(extremo_b["lat_ref_cidade_m7"])
     lon_b = float(extremo_b["lon_ref_cidade_m7"])
 
-    # Projeção no eixo A -> B
     base = df_cidades.copy().reset_index(drop=True)
     base["projecao_eixo_ab_m7"] = base.apply(
         lambda r: _projecao_no_eixo(
@@ -725,7 +716,6 @@ def _sequenciar_cidades(
         axis=1,
     )
 
-    # Cenário 1: A -> B
     c1 = base.sort_values(
         by=[
             "projecao_eixo_ab_m7",
@@ -746,7 +736,6 @@ def _sequenciar_cidades(
         fator_km_rodoviario_m7=fator_km_rodoviario_m7,
     )
 
-    # Cenário 2: B -> A
     c2 = base.sort_values(
         by=[
             "projecao_eixo_ab_m7",
@@ -858,7 +847,6 @@ def _ordenar_docs_dentro_cidade(
     trilha: List[Dict[str, Any]] = []
     km_total_interno = 0.0
 
-    # Primeira entrega = mais próxima do ponto de entrada
     candidatos = work.loc[[idx_por_chave[ch] for ch in restantes]].copy().reset_index(drop=True)
     candidatos["dist_entrada_tmp_m7"] = candidatos.apply(
         lambda r: _distancia_operacional_km(
@@ -899,7 +887,6 @@ def _ordenar_docs_dentro_cidade(
         }
     )
 
-    # Reserva última entrega se existir próxima cidade
     chave_ultima_reservada: Optional[str] = None
     if saida_lat is not None and saida_lon is not None and len(restantes) >= 1:
         candidatos_saida = work.loc[[idx_por_chave[ch] for ch in restantes]].copy().reset_index(drop=True)
@@ -1212,6 +1199,16 @@ def _sequenciar_manifesto(
         "km_total_sequencia_paradas_m7": float(km_total_docs),
     }
 
+    # limpar colunas auxiliares antes de devolver
+    grupo_seq = grupo_seq.drop(
+        columns=[
+            "bucket_prioridade_doc_m7",
+            "folga_prioridade_doc_m7",
+            "peso_prioridade_doc_m7",
+        ],
+        errors="ignore",
+    )
+
     return grupo_seq.reset_index(drop=True), df_paradas_final, df_cidades_seq.reset_index(drop=True), auditoria_local
 
 
@@ -1342,7 +1339,14 @@ def executar_m7_sequenciamento_entregas(
 
             grupo_fallback = _ordenar_docs_por_prioridade(grupo_fallback, "id_linha_pipeline")
             grupo_fallback = grupo_fallback.sort_values(
-                by=["cidade", "uf", "bucket_prioridade_doc_m7", "folga_prioridade_doc_m7", "peso_prioridade_doc_m7", "id_linha_pipeline"],
+                by=[
+                    "cidade",
+                    "uf",
+                    "bucket_prioridade_doc_m7",
+                    "folga_prioridade_doc_m7",
+                    "peso_prioridade_doc_m7",
+                    "id_linha_pipeline",
+                ],
                 ascending=[True, True, True, True, False, True],
                 kind="mergesort",
             ).reset_index(drop=True)
@@ -1359,6 +1363,15 @@ def executar_m7_sequenciamento_entregas(
             grupo_fallback["justificativa_ordem_entrega_m7"] = grupo_fallback.apply(
                 lambda row: f"Fallback por exceção; criterio_doc={_montar_justificativa_doc(row)}; motivo={str(e)}",
                 axis=1,
+            )
+
+            grupo_fallback = grupo_fallback.drop(
+                columns=[
+                    "bucket_prioridade_doc_m7",
+                    "folga_prioridade_doc_m7",
+                    "peso_prioridade_doc_m7",
+                ],
+                errors="ignore",
             )
 
             resultados.append(grupo_fallback)
