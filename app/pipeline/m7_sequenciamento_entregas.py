@@ -610,11 +610,53 @@ def _calcular_km_ordem_cidades(
     return trilha, float(km_total)
 
 
+def _inferir_cidade_uf_filial_manifesto(grupo: pd.DataFrame) -> Tuple[str, str]:
+    candidatos_cidade = [
+        "origem_cidade",
+        "filial_cidade",
+        "cidade_filial",
+        "filial_origem_cidade",
+        "cidade_origem",
+        "filial_roteirizacao_cidade",
+    ]
+    candidatos_uf = [
+        "origem_uf",
+        "filial_uf",
+        "uf_filial",
+        "filial_origem_uf",
+        "uf_origem",
+        "filial_roteirizacao_uf",
+    ]
+
+    filial_cidade = ""
+    filial_uf = ""
+
+    for col in candidatos_cidade:
+        if col in grupo.columns:
+            serie = grupo[col].dropna().astype(str).str.strip()
+            serie = serie[serie != ""]
+            if not serie.empty:
+                filial_cidade = str(serie.iloc[0]).strip()
+                break
+
+    for col in candidatos_uf:
+        if col in grupo.columns:
+            serie = grupo[col].dropna().astype(str).str.strip()
+            serie = serie[serie != ""]
+            if not serie.empty:
+                filial_uf = str(serie.iloc[0]).strip()
+                break
+
+    return filial_cidade, filial_uf
+
+
 def _sequenciar_cidades(
     df_cidades: pd.DataFrame,
     origem_lat: float,
     origem_lon: float,
     fator_km_rodoviario_m7: float,
+    filial_cidade: str = "",
+    filial_uf: str = "",
 ) -> Tuple[pd.DataFrame, List[Dict[str, Any]], float]:
     if df_cidades.empty:
         return df_cidades.copy(), [], 0.0
@@ -632,13 +674,22 @@ def _sequenciar_cidades(
         axis=1,
     )
 
-    tolerancia_origem_km = 0.50
-    work["cidade_origem_flag_m7"] = work["dist_origem_tmp_m7"] <= tolerancia_origem_km
+    filial_cidade_norm = _safe_text(filial_cidade).upper()
+    filial_uf_norm = _safe_text(filial_uf).upper()
+
+    if filial_cidade_norm != "" and filial_uf_norm != "":
+        work["cidade_origem_flag_m7"] = (
+            work["cidade_ref_m7"].fillna("").astype(str).str.strip().str.upper().eq(filial_cidade_norm)
+            & work["uf_ref_m7"].fillna("").astype(str).str.strip().str.upper().eq(filial_uf_norm)
+        )
+    else:
+        tolerancia_origem_km = 0.50
+        work["cidade_origem_flag_m7"] = work["dist_origem_tmp_m7"] <= tolerancia_origem_km
 
     if len(work) == 1:
         row = work.iloc[0]
         dist = float(row["dist_origem_tmp_m7"])
-        criterio = "cidade_unica_origem" if bool(row["cidade_origem_flag_m7"]) else "cidade_unica"
+        criterio = "cidade_unica_filial" if bool(row["cidade_origem_flag_m7"]) else "cidade_unica"
 
         work["ordem_cidade_m7"] = 1
         work["origem_anterior_cidade_m7"] = "ORIGEM"
@@ -714,11 +765,11 @@ def _sequenciar_cidades(
         out["chave_proxima_cidade_m7"] = out["chave_cidade_seq_m7"].map(proximo_map)
         out["distancia_proxima_cidade_km_m7"] = out["chave_cidade_seq_m7"].map(dist_proximo_map)
         out["metodo_sequenciamento_cidade_m7"] = "varredura_origem_local"
-        out["criterio_escolha_cidade_m7"] = "todas_as_cidades_sao_origem"
+        out["criterio_escolha_cidade_m7"] = "todas_as_cidades_sao_filial"
 
         df_trilha = pd.DataFrame(trilha_escolhida)
         if not df_trilha.empty:
-            df_trilha["criterio_escolha_cidade_m7"] = "todas_as_cidades_sao_origem"
+            df_trilha["criterio_escolha_cidade_m7"] = "todas_as_cidades_sao_filial"
 
         out = out.merge(
             df_trilha[
@@ -832,12 +883,16 @@ def _sequenciar_cidades(
         kind="mergesort",
     )["chave_cidade_seq_m7"].astype(str).tolist()
 
-    candidatos_ordem: List[Tuple[List[str], str]] = [
-        (ordem_origem + ordem_macro_c1, "origem_no_inicio__varredura_eixo_extremos_a_para_b"),
-        (ordem_macro_c1 + ordem_origem, "origem_no_fim__varredura_eixo_extremos_a_para_b"),
-        (ordem_origem + ordem_macro_c2, "origem_no_inicio__varredura_eixo_extremos_b_para_a"),
-        (ordem_macro_c2 + ordem_origem, "origem_no_fim__varredura_eixo_extremos_b_para_a"),
-    ]
+    if ordem_origem:
+        candidatos_ordem: List[Tuple[List[str], str]] = [
+            (ordem_origem + ordem_macro_c1, "filial_primeira__varredura_eixo_extremos_a_para_b"),
+            (ordem_origem + ordem_macro_c2, "filial_primeira__varredura_eixo_extremos_b_para_a"),
+        ]
+    else:
+        candidatos_ordem = [
+            (ordem_macro_c1, "varredura_eixo_extremos_a_para_b"),
+            (ordem_macro_c2, "varredura_eixo_extremos_b_para_a"),
+        ]
 
     base_total = work.copy().reset_index(drop=True)
 
@@ -1125,11 +1180,15 @@ def _sequenciar_manifesto(
     if df_cidades.empty:
         raise Exception(f"Manifesto {grupo['manifesto_id'].iloc[0]} sem cidades para sequenciar.")
 
+    filial_cidade_manifesto, filial_uf_manifesto = _inferir_cidade_uf_filial_manifesto(grupo)
+
     df_cidades_seq, trilha_cidades, km_total_cidades = _sequenciar_cidades(
         df_cidades=df_cidades,
         origem_lat=origem_lat,
         origem_lon=origem_lon,
         fator_km_rodoviario_m7=fator_km_rodoviario_m7,
+        filial_cidade=filial_cidade_manifesto,
+        filial_uf=filial_uf_manifesto,
     )
 
     partes: List[pd.DataFrame] = []
