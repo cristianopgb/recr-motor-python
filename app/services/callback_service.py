@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
-import urllib.request
 import urllib.error
-from typing import Any, Dict, Optional
+import urllib.request
+from typing import Any, Dict
 
 from app.config import settings
 
@@ -22,12 +22,8 @@ def get_callback_url(payload_dict: Dict[str, Any]) -> str:
     return callback_url_payload or callback_url_env
 
 
-def get_callback_secret(payload_dict: Dict[str, Any]) -> str:
-    parametros = payload_dict.get("parametros", {}) if isinstance(payload_dict, dict) else {}
-    callback_secret_payload = _safe_text(parametros.get("callback_secret"))
-    callback_secret_env = _safe_text(settings.callback_secret)
-
-    return callback_secret_payload or callback_secret_env
+def get_callback_secret() -> str:
+    return _safe_text(settings.callback_secret)
 
 
 def should_send_callback(payload_dict: Dict[str, Any]) -> bool:
@@ -40,7 +36,7 @@ def should_send_callback(payload_dict: Dict[str, Any]) -> bool:
 
 def send_callback(payload_dict: Dict[str, Any], contrato_m8: Dict[str, Any]) -> Dict[str, Any]:
     callback_url = get_callback_url(payload_dict)
-    callback_secret = get_callback_secret(payload_dict)
+    callback_secret = get_callback_secret()
 
     if not callback_url:
         return {
@@ -83,6 +79,7 @@ def send_callback(payload_dict: Dict[str, Any], contrato_m8: Dict[str, Any]) -> 
             error_body = e.read().decode("utf-8", errors="ignore")
         except Exception:
             error_body = str(e)
+
         return {
             "callback_enviado": False,
             "callback_status": "http_error",
