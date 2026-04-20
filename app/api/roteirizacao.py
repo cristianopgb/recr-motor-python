@@ -12,6 +12,8 @@ from fastapi.responses import JSONResponse
 from app.schemas import RoteirizacaoRequest
 from app.services.pipeline_service import executar_pipeline
 from app.services.validation_service import validar_payload
+from app.services.m8_contract_service import build_m8_contract
+from app.services.callback_service import should_send_callback, send_callback
 
 router = APIRouter()
 
@@ -117,7 +119,6 @@ def _resposta_erro(
 
 @router.post("/roteirizar")
 def roteirizar(payload: RoteirizacaoRequest):
-    # 1) validação do contrato de entrada
     try:
         validar_payload(payload)
     except Exception as e:
@@ -128,7 +129,6 @@ def roteirizar(payload: RoteirizacaoRequest):
             traceback_texto=traceback.format_exc(),
         )
 
-    # 2) execução/orquestração do pipeline
     try:
         resultado_pipeline = executar_pipeline(payload)
     except Exception as e:
@@ -139,19 +139,33 @@ def roteirizar(payload: RoteirizacaoRequest):
             traceback_texto=traceback.format_exc(),
         )
 
-    # 3) sanitização para JSON
     try:
-        resultado_pipeline = _sanitize_for_json(resultado_pipeline)
+        payload_dict = payload.model_dump(mode="python")
+        contrato_m8 = build_m8_contract(resultado_pipeline)
+
+        callback_resultado = {
+            "callback_enviado": False,
+            "callback_status": "desabilitado",
+            "callback_http_status": None,
+            "callback_url": "",
+            "callback_mensagem": "Callback desabilitado.",
+        }
+
+        if should_send_callback(payload_dict):
+            callback_resultado = send_callback(payload_dict, contrato_m8)
+
+        contrato_m8["callback_resultado"] = callback_resultado
+        contrato_m8 = _sanitize_for_json(contrato_m8)
+
     except Exception as e:
         return _resposta_erro(
-            mensagem=f"ERRO_SANITIZACAO: {str(e)}",
-            tipo_erro="ERRO_SANITIZACAO",
+            mensagem=f"ERRO_M8_CALLBACK: {str(e)}",
+            tipo_erro="ERRO_M8_CALLBACK",
             detalhe_tecnico=type(e).__name__,
             traceback_texto=traceback.format_exc(),
         )
 
-    # 4) devolve resultado bruto estruturado
     return JSONResponse(
         status_code=200,
-        content=resultado_pipeline,
+        content=contrato_m8,
     )
