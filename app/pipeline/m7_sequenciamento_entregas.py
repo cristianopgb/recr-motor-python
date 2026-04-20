@@ -10,7 +10,7 @@ import pandas as pd
 
 TIME_LIMIT_SECONDS_PADRAO = 5
 FATOR_KM_RODOVIARIO_M7_PADRAO = 1.20
-print("🔥🔥🔥 M7 NOVO EXECUTANDO 🔥🔥🔥")
+
 
 # =========================================================================================
 # HELPERS
@@ -1445,7 +1445,7 @@ def executar_m7_sequenciamento_entregas(
                     "primeira_cidade_m7": grupo_seq.sort_values("ordem_entrega_doc_m7")["chave_cidade_seq_m7"].iloc[0],
                     "ultima_cidade_m7": grupo_seq.sort_values("ordem_entrega_doc_m7")["chave_cidade_seq_m7"].iloc[-1],
                     "status_sequenciamento_m7": "ok",
-                    "metodo_predominante_m7": "varredura_extremos_por_cidade_mais_entregas_internas",
+                    "metodo_predominante_m7": "varredura_extremos_por_cidade_mais_entregas_internas- nova versão",
                     "fator_km_rodoviario_real_m7": float(fator_real_manifesto),
                     "km_total_sequencia_paradas_m7": float(auditoria_local["km_total_sequencia_paradas_m7"]),
                     "km_total_sequencia_cidades_m7": float(auditoria_local["km_total_sequencia_cidades_m7"]),
