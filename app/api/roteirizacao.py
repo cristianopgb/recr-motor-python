@@ -78,38 +78,189 @@ def _sanitize_for_json(value: Any) -> Any:
     return value
 
 
-def _resposta_erro(
+def _build_m8_error_response(
     *,
+    payload: RoteirizacaoRequest | None,
     mensagem: str,
     tipo_erro: str,
+    pipeline_real_ate: str,
     detalhe_tecnico: str | None = None,
     traceback_texto: str | None = None,
-) -> JSONResponse:
-    conteudo_erro = {
+) -> dict[str, Any]:
+    resumo_execucao: dict[str, Any] = {
+        "rodada_id": "",
+        "upload_id": "",
+        "filial_id": "",
+        "usuario_id": "",
+        "data_execucao": None,
+        "origem_sistema": None,
+        "tipo_roteirizacao": None,
+        "modelo_roteirizacao": None,
+        "versao_motor": None,
+        "tempos_ms": {
+            "tempo_total_pipeline_ms": None,
+            "tempo_leitura_ms": None,
+            "tempo_geocodificacao_ms": None,
+            "tempo_otimizacao_ms": None,
+            "tempo_montagem_ms": None,
+        },
+    }
+
+    contexto_rodada: dict[str, Any] = {
+        "rodada_id": None,
+        "upload_id": None,
+        "filial_id": None,
+        "usuario_id": None,
+        "data_base_roteirizacao": None,
+        "tipo_roteirizacao": None,
+        "filtros_aplicados": None,
+        "configuracao_frota": None,
+    }
+
+    if payload is not None:
+        try:
+            payload_dict = payload.model_dump(mode="python")
+
+            resumo_execucao.update(
+                {
+                    "rodada_id": str(payload_dict.get("rodada_id") or ""),
+                    "upload_id": str(payload_dict.get("upload_id") or ""),
+                    "filial_id": str(payload_dict.get("filial_id") or ""),
+                    "usuario_id": str(payload_dict.get("usuario_id") or ""),
+                    "data_execucao": None,
+                    "origem_sistema": (
+                        (payload_dict.get("parametros") or {}).get("origem_sistema")
+                        if isinstance(payload_dict.get("parametros"), dict)
+                        else None
+                    ),
+                    "tipo_roteirizacao": payload_dict.get("tipo_roteirizacao"),
+                    "modelo_roteirizacao": (
+                        (payload_dict.get("parametros") or {}).get("modelo_roteirizacao")
+                        if isinstance(payload_dict.get("parametros"), dict)
+                        else None
+                    ),
+                }
+            )
+
+            contexto_rodada.update(
+                {
+                    "rodada_id": payload_dict.get("rodada_id"),
+                    "upload_id": payload_dict.get("upload_id"),
+                    "filial_id": payload_dict.get("filial_id"),
+                    "usuario_id": payload_dict.get("usuario_id"),
+                    "data_base_roteirizacao": payload_dict.get("data_base_roteirizacao"),
+                    "tipo_roteirizacao": payload_dict.get("tipo_roteirizacao"),
+                    "filtros_aplicados": (
+                        (payload_dict.get("parametros") or {}).get("filtros_aplicados")
+                        if isinstance(payload_dict.get("parametros"), dict)
+                        else None
+                    ),
+                    "configuracao_frota": payload_dict.get("configuracao_frota"),
+                }
+            )
+        except Exception:
+            pass
+
+    contrato_erro = {
         "status": "erro",
         "mensagem": mensagem,
-        "tipo_erro": tipo_erro,
-        "detalhe_tecnico": detalhe_tecnico,
-        "traceback": traceback_texto,
-        "resumo": {
-            "total_manifestos": 0,
-            "total_manifestos_fechados": 0,
-            "total_manifestos_compostos": 0,
-            "total_nao_roteirizados": 0,
-        },
-        "manifestos_fechados": [],
-        "manifestos_compostos": [],
-        "nao_roteirizados": [],
-        "logs": [
+        "pipeline_real_ate": pipeline_real_ate,
+        "modo_resposta": "contrato_retorno_sistema_1_m8",
+        "resumo_execucao": resumo_execucao,
+        "contexto_rodada": contexto_rodada,
+        "status_modulos": [
             {
-                "modulo": "api_roteirizacao",
+                "modulo": pipeline_real_ate,
                 "status": "erro",
                 "mensagem": mensagem,
+                "tempo_ms": None,
                 "quantidade_entrada": None,
                 "quantidade_saida": None,
             }
         ],
+        "estatisticas_roteirizacao": {
+            "carteira": {
+                "total_carteira": 0,
+                "total_roteirizavel": 0,
+                "total_agendamento_futuro": 0,
+                "total_agendas_vencidas": 0,
+                "total_excecoes": 0,
+                "total_sem_agenda": 0,
+            },
+            "cargas": {
+                "total_manifestos_m7": 0,
+                "total_itens_m7": 0,
+                "cargas_fechadas_m4": 0,
+                "cargas_compostas_m5": 0,
+                "remanescente_m6_2": 0,
+                "km_total_m7": 0.0,
+                "km_medio_manifesto_m7": 0.0,
+                "ocupacao_media_manifesto_m7": 0.0,
+                "qtd_media_itens_por_manifesto": 0.0,
+            },
+            "por_veiculo": {
+                "cargas_por_perfil": [],
+                "ocupacao_por_perfil": [],
+                "km_por_perfil": [],
+            },
+            "por_cidade": [],
+            "por_leadtime_agenda": [],
+        },
+        "resultados": {
+            "manifestos": [],
+            "itens_manifestos": [],
+            "tentativas_m7": [],
+        },
+        "auditoria": {
+            "auditoria_m7": {},
+            "logs": [
+                {
+                    "modulo": pipeline_real_ate,
+                    "status": "erro",
+                    "mensagem": mensagem,
+                    "tempo_ms": None,
+                    "quantidade_entrada": None,
+                    "quantidade_saida": None,
+                }
+            ],
+        },
+        "motor_response_raw": {
+            "status": "erro",
+            "mensagem": mensagem,
+            "tipo_erro": tipo_erro,
+            "pipeline_real_ate": pipeline_real_ate,
+            "detalhe_tecnico": detalhe_tecnico,
+            "traceback": traceback_texto,
+        },
+        "callback_resultado": {
+            "callback_enviado": False,
+            "callback_status": "nao_aplicavel",
+            "callback_http_status": None,
+            "callback_url": "",
+            "callback_mensagem": "Callback não executado porque a requisição falhou antes do retorno final.",
+        },
     }
+
+    return contrato_erro
+
+
+def _resposta_erro(
+    *,
+    payload: RoteirizacaoRequest | None,
+    mensagem: str,
+    tipo_erro: str,
+    pipeline_real_ate: str,
+    detalhe_tecnico: str | None = None,
+    traceback_texto: str | None = None,
+) -> JSONResponse:
+    conteudo_erro = _build_m8_error_response(
+        payload=payload,
+        mensagem=mensagem,
+        tipo_erro=tipo_erro,
+        pipeline_real_ate=pipeline_real_ate,
+        detalhe_tecnico=detalhe_tecnico,
+        traceback_texto=traceback_texto,
+    )
 
     return JSONResponse(
         status_code=200,
@@ -123,8 +274,10 @@ def roteirizar(payload: RoteirizacaoRequest):
         validar_payload(payload)
     except Exception as e:
         return _resposta_erro(
+            payload=payload,
             mensagem=f"VALIDACAO_CONTRATO: {str(e)}",
             tipo_erro="VALIDACAO_CONTRATO",
+            pipeline_real_ate="VALIDACAO_CONTRATO",
             detalhe_tecnico=type(e).__name__,
             traceback_texto=traceback.format_exc(),
         )
@@ -133,8 +286,10 @@ def roteirizar(payload: RoteirizacaoRequest):
         resultado_pipeline = executar_pipeline(payload)
     except Exception as e:
         return _resposta_erro(
+            payload=payload,
             mensagem=f"ERRO_PIPELINE: {str(e)}",
             tipo_erro="ERRO_PIPELINE",
+            pipeline_real_ate="ERRO_PIPELINE",
             detalhe_tecnico=type(e).__name__,
             traceback_texto=traceback.format_exc(),
         )
@@ -159,8 +314,10 @@ def roteirizar(payload: RoteirizacaoRequest):
 
     except Exception as e:
         return _resposta_erro(
+            payload=payload,
             mensagem=f"ERRO_M8_CALLBACK: {str(e)}",
             tipo_erro="ERRO_M8_CALLBACK",
+            pipeline_real_ate="ERRO_M8_CALLBACK",
             detalhe_tecnico=type(e).__name__,
             traceback_texto=traceback.format_exc(),
         )
