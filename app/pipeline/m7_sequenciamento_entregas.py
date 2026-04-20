@@ -10,7 +10,7 @@ import pandas as pd
 
 TIME_LIMIT_SECONDS_PADRAO = 5
 FATOR_KM_RODOVIARIO_M7_PADRAO = 1.20
-
+print("🔥🔥🔥 M7 NOVO EXECUTANDO 🔥🔥🔥")
 
 # =========================================================================================
 # HELPERS
