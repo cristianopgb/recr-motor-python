@@ -12,6 +12,12 @@ def _safe_get(d: Dict[str, Any], *keys: str, default=None):
     return cur if cur is not None else default
 
 
+def _safe_str(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
 def _sum_field(records: List[Dict[str, Any]], field: str) -> float:
     total = 0.0
     for row in records or []:
@@ -61,11 +67,69 @@ def _group_sum(records: List[Dict[str, Any]], group_field: str, sum_field: str, 
     ]
 
 
+def _build_resumo_execucao(resultado_pipeline: Dict[str, Any], contexto_rodada: Dict[str, Any]) -> Dict[str, Any]:
+    resumo_execucao = resultado_pipeline.get("resumo_execucao", {}) or {}
+
+    tempos_ms = resumo_execucao.get("tempos_ms", {}) if isinstance(resumo_execucao, dict) else {}
+
+    return {
+        "rodada_id": _safe_str(
+            resumo_execucao.get("rodada_id")
+            or contexto_rodada.get("rodada_id")
+        ),
+        "upload_id": _safe_str(
+            resumo_execucao.get("upload_id")
+            or contexto_rodada.get("upload_id")
+        ),
+        "filial_id": _safe_str(
+            resumo_execucao.get("filial_id")
+            or contexto_rodada.get("filial_id")
+        ),
+        "usuario_id": _safe_str(
+            resumo_execucao.get("usuario_id")
+            or contexto_rodada.get("usuario_id")
+        ),
+        "data_execucao": resumo_execucao.get("data_execucao"),
+        "origem_sistema": resumo_execucao.get("origem_sistema"),
+        "tipo_roteirizacao": resumo_execucao.get("tipo_roteirizacao") or contexto_rodada.get("tipo_roteirizacao"),
+        "modelo_roteirizacao": resumo_execucao.get("modelo_roteirizacao"),
+        "versao_motor": resumo_execucao.get("versao_motor"),
+        "tempos_ms": {
+            "tempo_total_pipeline_ms": tempos_ms.get("tempo_total_pipeline_ms"),
+            "tempo_leitura_ms": tempos_ms.get("tempo_leitura_ms"),
+            "tempo_geocodificacao_ms": tempos_ms.get("tempo_geocodificacao_ms"),
+            "tempo_otimizacao_ms": tempos_ms.get("tempo_otimizacao_ms"),
+            "tempo_montagem_ms": tempos_ms.get("tempo_montagem_ms"),
+        },
+    }
+
+
+def _build_contexto_rodada(contexto_rodada: Dict[str, Any]) -> Dict[str, Any]:
+    parametros_rodada = contexto_rodada.get("parametros_rodada", {}) if isinstance(contexto_rodada, dict) else {}
+    filial = contexto_rodada.get("filial", {}) if isinstance(contexto_rodada, dict) else {}
+
+    return {
+        "rodada_id": contexto_rodada.get("rodada_id"),
+        "upload_id": contexto_rodada.get("upload_id"),
+        "filial_id": contexto_rodada.get("filial_id"),
+        "usuario_id": contexto_rodada.get("usuario_id"),
+        "data_base_roteirizacao": contexto_rodada.get("data_base_roteirizacao"),
+        "tipo_roteirizacao": contexto_rodada.get("tipo_roteirizacao"),
+        "filtros_aplicados": (
+            parametros_rodada.get("filtros_aplicados")
+            if isinstance(parametros_rodada, dict)
+            else None
+        ),
+        "configuracao_frota": contexto_rodada.get("configuracao_frota"),
+        "filial": filial if isinstance(filial, dict) else {},
+        "parametros_rodada": parametros_rodada if isinstance(parametros_rodada, dict) else {},
+    }
+
+
 def build_m8_contract(resultado_pipeline: Dict[str, Any]) -> Dict[str, Any]:
-    resumo_execucao = resultado_pipeline.get("resumo_execucao", {})
-    resumo_negocio = resultado_pipeline.get("resumo_negocio", {})
-    contexto_rodada = resultado_pipeline.get("contexto_rodada", {})
-    logs = resultado_pipeline.get("logs", [])
+    resumo_negocio = resultado_pipeline.get("resumo_negocio", {}) or {}
+    contexto_rodada = resultado_pipeline.get("contexto_rodada", {}) or {}
+    logs = resultado_pipeline.get("logs", []) or []
 
     manifestos_m7 = resultado_pipeline.get("manifestos_m7", []) or []
     itens_m7 = resultado_pipeline.get("itens_manifestos_sequenciados_m7", []) or []
@@ -75,22 +139,43 @@ def build_m8_contract(resultado_pipeline: Dict[str, Any]) -> Dict[str, Any]:
     total_itens = len(itens_m7)
 
     cargas_por_veiculo = _group_count(manifestos_m7, "veiculo_perfil")
-    ocupacao_por_veiculo = _group_sum(manifestos_m7, "veiculo_perfil", "ocupacao_final_m6_2", "ocupacao_total")
-    km_por_veiculo = _group_sum(manifestos_m7, "veiculo_perfil", "km_total_sequencia_paradas_m7", "km_total")
+    ocupacao_por_veiculo = _group_sum(
+        manifestos_m7,
+        "veiculo_perfil",
+        "ocupacao_final_m6_2",
+        "ocupacao_total",
+    )
+    km_por_veiculo = _group_sum(
+        manifestos_m7,
+        "veiculo_perfil",
+        "km_total_sequencia_paradas_m7",
+        "km_total",
+    )
 
     estatisticas_cidade = []
     cidade_qtd = _group_count(itens_m7, "cidade")
-    cidade_peso = {x["chave"]: x["peso_total"] for x in _group_sum(itens_m7, "cidade", "peso_seq_m7", "peso_total")}
+    cidade_peso = {
+        x["chave"]: x["peso_total"]
+        for x in _group_sum(itens_m7, "cidade", "peso_seq_m7", "peso_total")
+    }
     for item in cidade_qtd:
-        estatisticas_cidade.append({
-            "cidade": item["chave"],
-            "quantidade_entregas": item["quantidade"],
-            "peso_total": cidade_peso.get(item["chave"], 0.0),
-        })
+        estatisticas_cidade.append(
+            {
+                "cidade": item["chave"],
+                "quantidade_entregas": item["quantidade"],
+                "peso_total": cidade_peso.get(item["chave"], 0.0),
+            }
+        )
 
     leadtime_stats = []
-    for faixa in ["Agendada com folga vencida/zero", "Agendada com folga de 1 dia", "Agendada com folga acima de 1 dia",
-                  "Não agendada urgente", "Não agendada com folga de 1 dia", "Não agendada normal"]:
+    for faixa in [
+        "Agendada com folga vencida/zero",
+        "Agendada com folga de 1 dia",
+        "Agendada com folga acima de 1 dia",
+        "Não agendada urgente",
+        "Não agendada com folga de 1 dia",
+        "Não agendada normal",
+    ]:
         qtd = 0
         for row in itens_m7:
             txt = str(row.get("justificativa_ordem_entrega_m7") or "")
@@ -100,22 +185,24 @@ def build_m8_contract(resultado_pipeline: Dict[str, Any]) -> Dict[str, Any]:
 
     modulos_status = []
     for row in logs:
-        modulos_status.append({
-            "modulo": row.get("modulo"),
-            "status": row.get("status"),
-            "mensagem": row.get("mensagem"),
-            "tempo_ms": row.get("tempo_ms"),
-            "quantidade_entrada": row.get("quantidade_entrada"),
-            "quantidade_saida": row.get("quantidade_saida"),
-        })
+        modulos_status.append(
+            {
+                "modulo": row.get("modulo"),
+                "status": row.get("status"),
+                "mensagem": row.get("mensagem"),
+                "tempo_ms": row.get("tempo_ms"),
+                "quantidade_entrada": row.get("quantidade_entrada"),
+                "quantidade_saida": row.get("quantidade_saida"),
+            }
+        )
 
     contrato = {
         "status": resultado_pipeline.get("status", "erro"),
         "mensagem": resultado_pipeline.get("mensagem", ""),
         "pipeline_real_ate": resultado_pipeline.get("pipeline_real_ate", "M7"),
         "modo_resposta": "contrato_retorno_sistema_1_m8",
-        "resumo_execucao": resumo_execucao,
-        "contexto_rodada": contexto_rodada,
+        "resumo_execucao": _build_resumo_execucao(resultado_pipeline, contexto_rodada),
+        "contexto_rodada": _build_contexto_rodada(contexto_rodada),
         "status_modulos": modulos_status,
         "estatisticas_roteirizacao": {
             "carteira": {
@@ -123,7 +210,12 @@ def build_m8_contract(resultado_pipeline: Dict[str, Any]) -> Dict[str, Any]:
                 "total_roteirizavel": resumo_negocio.get("total_roteirizavel_m3", 0),
                 "total_agendamento_futuro": resumo_negocio.get("total_agendamento_futuro_m3", 0),
                 "total_agendas_vencidas": resumo_negocio.get("total_agendas_vencidas_m3", 0),
-                "total_excecoes": _safe_get(resumo_negocio, "resumo_m3", "carteira_excecoes_triagem", default=0),
+                "total_excecoes": _safe_get(
+                    resumo_negocio,
+                    "resumo_m3",
+                    "carteira_excecoes_triagem",
+                    default=0,
+                ),
                 "total_sem_agenda": 0,
             },
             "cargas": {
