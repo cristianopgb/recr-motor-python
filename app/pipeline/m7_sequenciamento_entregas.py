@@ -726,8 +726,9 @@ def _sequenciar_cidades(
     cidades_origem = work.loc[work["cidade_origem_flag_m7"]].copy().reset_index(drop=True)
     cidades_macro = work.loc[~work["cidade_origem_flag_m7"]].copy().reset_index(drop=True)
 
+    # Se todas as cidades do manifesto são da própria filial, mantém só ordenação local
     if cidades_macro.empty:
-        base = work.sort_values(
+        base = cidades_origem.sort_values(
             by=[
                 "bucket_prioridade_cidade_m7",
                 "folga_min_cidade_m7",
@@ -800,6 +801,200 @@ def _sequenciar_cidades(
         out = out.sort_values(by=["ordem_cidade_m7"], ascending=[True], kind="mergesort").reset_index(drop=True)
         return out, df_trilha.to_dict(orient="records"), float(km_total)
 
+    # Quando existe cidade da filial no manifesto, ela vira obrigatoriamente a primeira cidade.
+    # O restante é sequenciado a partir dela, sem excluir as entregas dessa cidade.
+    if criterio_base == "cidade_da_filial_primeira":
+        cidade_filial = cidades_origem.sort_values(
+            by=[
+                "bucket_prioridade_cidade_m7",
+                "folga_min_cidade_m7",
+                "dist_origem_tmp_m7",
+                "cidade_ref_m7",
+                "uf_ref_m7",
+            ],
+            ascending=[True, True, True, True, True],
+            kind="mergesort",
+        ).reset_index(drop=True)
+
+        ancora_row = cidade_filial.iloc[0]
+        ancora_chave = str(ancora_row["chave_cidade_seq_m7"])
+        ancora_lat = float(ancora_row["lat_ref_cidade_m7"])
+        ancora_lon = float(ancora_row["lon_ref_cidade_m7"])
+
+        cidades_macro = cidades_macro.copy().reset_index(drop=True)
+        cidades_macro["dist_ancora_tmp_m7"] = cidades_macro.apply(
+            lambda r: _distancia_operacional_km(
+                ancora_lat,
+                ancora_lon,
+                float(r["lat_ref_cidade_m7"]),
+                float(r["lon_ref_cidade_m7"]),
+                fator_km_rodoviario_m7,
+            ),
+            axis=1,
+        )
+
+        if len(cidades_macro) == 1:
+            ordem_macro = cidades_macro["chave_cidade_seq_m7"].astype(str).tolist()
+            candidatos_ordem: List[Tuple[List[str], str]] = [
+                ([ancora_chave] + ordem_macro, "cidade_da_filial_primeira__restante_unico"),
+            ]
+        else:
+            cidades_macro = cidades_macro.sort_values(
+                by=[
+                    "dist_ancora_tmp_m7",
+                    "bucket_prioridade_cidade_m7",
+                    "folga_min_cidade_m7",
+                    "cidade_ref_m7",
+                    "uf_ref_m7",
+                ],
+                ascending=[False, True, True, True, True],
+                kind="mergesort",
+            ).reset_index(drop=True)
+
+            extremo_a = cidades_macro.iloc[0]
+            cidades_macro["dist_extremo_a_tmp_m7"] = cidades_macro.apply(
+                lambda r: _distancia_operacional_km(
+                    float(extremo_a["lat_ref_cidade_m7"]),
+                    float(extremo_a["lon_ref_cidade_m7"]),
+                    float(r["lat_ref_cidade_m7"]),
+                    float(r["lon_ref_cidade_m7"]),
+                    fator_km_rodoviario_m7,
+                ),
+                axis=1,
+            )
+            cidades_macro = cidades_macro.sort_values(
+                by=[
+                    "dist_extremo_a_tmp_m7",
+                    "bucket_prioridade_cidade_m7",
+                    "folga_min_cidade_m7",
+                    "cidade_ref_m7",
+                    "uf_ref_m7",
+                ],
+                ascending=[False, True, True, True, True],
+                kind="mergesort",
+            ).reset_index(drop=True)
+            extremo_b = cidades_macro.iloc[0]
+
+            lat_a = float(extremo_a["lat_ref_cidade_m7"])
+            lon_a = float(extremo_a["lon_ref_cidade_m7"])
+            lat_b = float(extremo_b["lat_ref_cidade_m7"])
+            lon_b = float(extremo_b["lon_ref_cidade_m7"])
+
+            base_macro = cidades_macro.copy().reset_index(drop=True)
+            base_macro["projecao_eixo_ab_m7"] = base_macro.apply(
+                lambda r: _projecao_no_eixo(
+                    lat_a,
+                    lon_a,
+                    lat_b,
+                    lon_b,
+                    float(r["lat_ref_cidade_m7"]),
+                    float(r["lon_ref_cidade_m7"]),
+                ),
+                axis=1,
+            )
+
+            c1 = base_macro.sort_values(
+                by=[
+                    "projecao_eixo_ab_m7",
+                    "bucket_prioridade_cidade_m7",
+                    "folga_min_cidade_m7",
+                    "cidade_ref_m7",
+                    "uf_ref_m7",
+                ],
+                ascending=[False, True, True, True, True],
+                kind="mergesort",
+            ).reset_index(drop=True)
+            c2 = base_macro.sort_values(
+                by=[
+                    "projecao_eixo_ab_m7",
+                    "bucket_prioridade_cidade_m7",
+                    "folga_min_cidade_m7",
+                    "cidade_ref_m7",
+                    "uf_ref_m7",
+                ],
+                ascending=[True, True, True, True, True],
+                kind="mergesort",
+            ).reset_index(drop=True)
+
+            ordem_macro_c1 = c1["chave_cidade_seq_m7"].astype(str).tolist()
+            ordem_macro_c2 = c2["chave_cidade_seq_m7"].astype(str).tolist()
+            candidatos_ordem = [
+                ([ancora_chave] + ordem_macro_c1, "cidade_da_filial_primeira__varredura_eixo_extremos_a_para_b"),
+                ([ancora_chave] + ordem_macro_c2, "cidade_da_filial_primeira__varredura_eixo_extremos_b_para_a"),
+            ]
+
+        base_total = pd.concat([cidade_filial, cidades_macro], ignore_index=True)
+        melhor_ordem: List[str] = []
+        melhor_trilha: List[Dict[str, Any]] = []
+        melhor_km: Optional[float] = None
+        melhor_criterio = ""
+
+        for ordem_teste, criterio_teste in candidatos_ordem:
+            trilha_teste, km_teste = _calcular_km_ordem_cidades(
+                df_cidades=base_total,
+                ordem_chaves=ordem_teste,
+                origem_lat=origem_lat,
+                origem_lon=origem_lon,
+                fator_km_rodoviario_m7=fator_km_rodoviario_m7,
+            )
+            if melhor_km is None or float(km_teste) < float(melhor_km):
+                melhor_ordem = ordem_teste
+                melhor_trilha = trilha_teste
+                melhor_km = float(km_teste)
+                melhor_criterio = criterio_teste
+
+        ordem_map = {ch: i + 1 for i, ch in enumerate(melhor_ordem)}
+        proximo_map: Dict[str, str] = {}
+        dist_proximo_map: Dict[str, float] = {}
+        idx_por_chave = {str(row["chave_cidade_seq_m7"]): i for i, row in base_total.iterrows()}
+
+        for pos, chave in enumerate(melhor_ordem):
+            if pos == len(melhor_ordem) - 1:
+                proximo_map[chave] = ""
+                dist_proximo_map[chave] = np.nan
+            else:
+                prox = melhor_ordem[pos + 1]
+                row_a2 = base_total.iloc[idx_por_chave[chave]]
+                row_b2 = base_total.iloc[idx_por_chave[prox]]
+                dist_ab = _distancia_operacional_km(
+                    float(row_a2["lat_ref_cidade_m7"]),
+                    float(row_a2["lon_ref_cidade_m7"]),
+                    float(row_b2["lat_ref_cidade_m7"]),
+                    float(row_b2["lon_ref_cidade_m7"]),
+                    fator_km_rodoviario_m7,
+                )
+                proximo_map[chave] = prox
+                dist_proximo_map[chave] = float(dist_ab)
+
+        out = base_total.copy()
+        out["ordem_cidade_m7"] = out["chave_cidade_seq_m7"].map(ordem_map)
+        out["chave_proxima_cidade_m7"] = out["chave_cidade_seq_m7"].map(proximo_map)
+        out["distancia_proxima_cidade_km_m7"] = out["chave_cidade_seq_m7"].map(dist_proximo_map)
+        out["metodo_sequenciamento_cidade_m7"] = "varredura_extremos_por_cidade_mais_entregas_internas- nova versão"
+
+        df_trilha = pd.DataFrame(melhor_trilha)
+        if not df_trilha.empty:
+            df_trilha["criterio_escolha_cidade_m7"] = melhor_criterio
+
+        out = out.merge(
+            df_trilha[
+                [
+                    "chave_cidade_seq_m7",
+                    "cidade_ref_m7",
+                    "uf_ref_m7",
+                    "origem_anterior_cidade_m7",
+                    "distancia_no_anterior_km_m7",
+                    "criterio_escolha_cidade_m7",
+                ]
+            ],
+            on=["chave_cidade_seq_m7", "cidade_ref_m7", "uf_ref_m7"],
+            how="left",
+        )
+
+        out = out.sort_values(by=["ordem_cidade_m7"], ascending=[True], kind="mergesort").reset_index(drop=True)
+        return out, df_trilha.to_dict(orient="records"), float(melhor_km if melhor_km is not None else 0.0)
+
+    # fallback legado por proximidade/origem
     cidades_macro = cidades_macro.sort_values(
         by=[
             "dist_origem_tmp_m7",
@@ -813,7 +1008,6 @@ def _sequenciar_cidades(
     ).reset_index(drop=True)
 
     extremo_a = cidades_macro.iloc[0]
-
     cidades_macro["dist_extremo_a_tmp_m7"] = cidades_macro.apply(
         lambda r: _distancia_operacional_km(
             float(extremo_a["lat_ref_cidade_m7"]),
@@ -835,7 +1029,6 @@ def _sequenciar_cidades(
         ascending=[False, True, True, True, True],
         kind="mergesort",
     ).reset_index(drop=True)
-
     extremo_b = cidades_macro.iloc[0]
 
     lat_a = float(extremo_a["lat_ref_cidade_m7"])
@@ -881,7 +1074,6 @@ def _sequenciar_cidades(
 
     ordem_macro_c1 = c1["chave_cidade_seq_m7"].astype(str).tolist()
     ordem_macro_c2 = c2["chave_cidade_seq_m7"].astype(str).tolist()
-
     ordem_origem = cidades_origem.sort_values(
         by=[
             "bucket_prioridade_cidade_m7",
@@ -894,21 +1086,14 @@ def _sequenciar_cidades(
         kind="mergesort",
     )["chave_cidade_seq_m7"].astype(str).tolist()
 
-    if criterio_base == "cidade_da_filial_primeira":
-        candidatos_ordem: List[Tuple[List[str], str]] = [
-            (ordem_origem + ordem_macro_c1, "cidade_da_filial_primeira__varredura_eixo_extremos_a_para_b"),
-            (ordem_origem + ordem_macro_c2, "cidade_da_filial_primeira__varredura_eixo_extremos_b_para_a"),
-        ]
-    else:
-        candidatos_ordem = [
-            (ordem_origem + ordem_macro_c1, "origem_no_inicio__varredura_eixo_extremos_a_para_b"),
-            (ordem_macro_c1 + ordem_origem, "origem_no_fim__varredura_eixo_extremos_a_para_b"),
-            (ordem_origem + ordem_macro_c2, "origem_no_inicio__varredura_eixo_extremos_b_para_a"),
-            (ordem_macro_c2 + ordem_origem, "origem_no_fim__varredura_eixo_extremos_b_para_a"),
-        ]
+    candidatos_ordem: List[Tuple[List[str], str]] = [
+        (ordem_origem + ordem_macro_c1, "origem_no_inicio__varredura_eixo_extremos_a_para_b"),
+        (ordem_macro_c1 + ordem_origem, "origem_no_fim__varredura_eixo_extremos_a_para_b"),
+        (ordem_origem + ordem_macro_c2, "origem_no_inicio__varredura_eixo_extremos_b_para_a"),
+        (ordem_macro_c2 + ordem_origem, "origem_no_fim__varredura_eixo_extremos_b_para_a"),
+    ]
 
     base_total = work.copy().reset_index(drop=True)
-
     melhor_ordem: List[str] = []
     melhor_trilha: List[Dict[str, Any]] = []
     melhor_km: Optional[float] = None
@@ -977,7 +1162,6 @@ def _sequenciar_cidades(
     )
 
     out = out.sort_values(by=["ordem_cidade_m7"], ascending=[True], kind="mergesort").reset_index(drop=True)
-
     return out, df_trilha.to_dict(orient="records"), float(melhor_km if melhor_km is not None else 0.0)
 
 
@@ -1408,6 +1592,40 @@ def executar_m7_sequenciamento_entregas(
 
     df_itens, df_diagnostico_recuperacao_coordenadas_m7 = _preparar_coordenadas_contrato(df_itens)
 
+    filial_cidade_global: Optional[str] = None
+    filial_uf_global: Optional[str] = None
+
+    candidatos_cidade_filial = [
+        "origem_cidade",
+        "filial_cidade",
+        "cidade_origem",
+        "cidade_filial",
+    ]
+    candidatos_uf_filial = [
+        "origem_uf",
+        "filial_uf",
+        "uf_origem",
+        "uf_filial",
+    ]
+
+    for col in candidatos_cidade_filial:
+        if col in df_itens.columns:
+            serie = df_itens[col].dropna().astype(str).str.strip()
+            if not serie.empty:
+                valor = serie.iloc[0]
+                if valor:
+                    filial_cidade_global = valor
+                    break
+
+    for col in candidatos_uf_filial:
+        if col in df_itens.columns:
+            serie = df_itens[col].dropna().astype(str).str.strip()
+            if not serie.empty:
+                valor = serie.iloc[0]
+                if valor:
+                    filial_uf_global = valor
+                    break
+
     resultados: List[pd.DataFrame] = []
     resumos_manifestos: List[Dict[str, Any]] = []
     tentativas: List[Dict[str, Any]] = []
@@ -1437,8 +1655,8 @@ def executar_m7_sequenciamento_entregas(
                 df_manifesto=grupo,
                 col_doc="id_linha_pipeline",
                 fator_km_rodoviario_m7=float(fator_real_manifesto),
-                filial_cidade=_safe_text(grupo.get("origem_cidade", pd.Series([""])).iloc[0]) if "origem_cidade" in grupo.columns else None,
-                filial_uf=_safe_text(grupo.get("origem_uf", pd.Series([""])).iloc[0]) if "origem_uf" in grupo.columns else None,
+                filial_cidade=filial_cidade_global,
+                filial_uf=filial_uf_global,
             )
 
             grupo_seq["status_sequenciamento_m7"] = "ok"
