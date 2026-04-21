@@ -204,9 +204,6 @@ def executar_m2_enriquecimento(
     carteira["subregiao"] = carteira["subregiao"].apply(_limpar_vazio)
     carteira["mesorregiao"] = carteira["mesorregiao"].apply(_limpar_vazio)
 
-    carteira["_cidade_norm"] = carteira["cidade"].apply(_normalizar_texto)
-    carteira["_uf_norm"] = carteira["uf"].apply(_normalizar_texto)
-
     geo = geo.copy()
 
     if "nome" in geo.columns:
@@ -216,15 +213,25 @@ def executar_m2_enriquecimento(
     else:
         raise Exception("A base de regionalidades não possui coluna 'nome' nem 'cidade'.")
 
-    geo["_cidade_norm"] = geo["cidade_fallback"].apply(_normalizar_texto)
-    geo["_uf_norm"] = geo["uf"].apply(_normalizar_texto)
-
     for c in ["mesorregiao", "microrregiao"]:
         if c not in geo.columns:
             geo[c] = np.nan
 
     geo["mesorregiao"] = geo["mesorregiao"].apply(_limpar_vazio)
     geo["microrregiao"] = geo["microrregiao"].apply(_limpar_vazio)
+
+    # ============================================================
+    # CHAVES DE MERGE BLINDADAS
+    # - sempre texto
+    # - nunca float64
+    # - mesma normalização nos dois lados
+    # ============================================================
+
+    carteira["_cidade_norm"] = _serie_chave_merge_texto(carteira["cidade"])
+    carteira["_uf_norm"] = _serie_chave_merge_texto(carteira["uf"])
+
+    geo["_cidade_norm"] = _serie_chave_merge_texto(geo["cidade_fallback"])
+    geo["_uf_norm"] = _serie_chave_merge_texto(geo["uf"])
 
     geo["_score_geo"] = (
         geo["mesorregiao"].notna().astype(int) * 2
@@ -246,6 +253,12 @@ def executar_m2_enriquecimento(
         )
         .copy()
     )
+
+    # segurança extra para garantir dtypes idênticos antes do merge
+    geo_chaves["_cidade_norm"] = geo_chaves["_cidade_norm"].astype(str)
+    geo_chaves["_uf_norm"] = geo_chaves["_uf_norm"].astype(str)
+    carteira["_cidade_norm"] = carteira["_cidade_norm"].astype(str)
+    carteira["_uf_norm"] = carteira["_uf_norm"].astype(str)
 
     carteira = carteira.merge(
         geo_chaves,
@@ -719,6 +732,44 @@ def _normalizar_texto(valor: Any) -> Any:
     valor = _remover_acentos(valor)
     valor = re.sub(r"\s+", " ", valor)
     return valor.upper()
+
+
+def _normalizar_chave_merge_texto(valor: Any) -> str:
+    """
+    Chave técnica de merge:
+    - nunca retorna NaN
+    - sempre retorna string
+    - limpa placeholders textuais comuns
+    """
+    if valor is None:
+        return ""
+
+    try:
+        resultado_isna = pd.isna(valor)
+        if isinstance(resultado_isna, (bool, np.bool_)) and bool(resultado_isna):
+            return ""
+    except Exception:
+        pass
+
+    texto = str(valor).strip()
+    if texto == "":
+        return ""
+
+    if texto.lower() in {"nan", "none", "null", "<na>"}:
+        return ""
+
+    texto = _remover_acentos(texto)
+    if pd.isna(texto):
+        return ""
+
+    texto = str(texto).strip()
+    texto = re.sub(r"\s+", " ", texto)
+
+    return texto.upper()
+
+
+def _serie_chave_merge_texto(serie: pd.Series) -> pd.Series:
+    return serie.apply(_normalizar_chave_merge_texto).astype(str)
 
 
 def _limpar_vazio(valor: Any) -> Any:
