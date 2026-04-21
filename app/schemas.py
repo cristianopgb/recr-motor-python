@@ -115,7 +115,7 @@ class CarteiraItem(BaseModel):
     UF: Optional[Any] = None
     NF_Serie: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("NF / Serie"),
+        validation_alias=AliasChoices("NF / Serie", "NF/Ser"),
     )
     Tipo_Ca: Optional[Any] = Field(
         default=None,
@@ -172,11 +172,11 @@ class CarteiraItem(BaseModel):
     )
     Ultima_Ocorrencia: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("Última Ocorrência", "Última"),
+        validation_alias=AliasChoices("Última Ocorrência", "Última", "Última Ocorrê"),
     )
     Status_R: Optional[Any] = Field(
         default=None,
-        validation_alias=AliasChoices("Status R", "Status"),
+        validation_alias=AliasChoices("Status R", "Status", "Status Rom. O"),
     )
 
     # ============================================================
@@ -282,27 +282,32 @@ class ParametrosRoteirizacao(BaseModel):
     """
     Contexto operacional da execução.
 
-    Observação:
-    - o contrato oficial do motor mantém configuracao_frota no TOPO do payload
-    - aqui ficam apenas metadados/contexto da execução
+    Contrato atual:
+    - IDs principais ficam no TOPO do payload
+    - configuracao_frota fica no TOPO do payload
+    - este bloco guarda apenas contexto adicional
+    - extra="allow" preserva compatibilidade com payloads antigos
     """
     model_config = ConfigDict(
         populate_by_name=True,
         extra="allow",
     )
 
-    usuario_id: str
-    usuario_nome: str
-    filial_id: str
-    filial_nome: str
-    upload_id: str
-    rodada_id: str
-    data_execucao: str
-    data_base_roteirizacao: str
-    origem_sistema: str
-    modelo_roteirizacao: str
-    tipo_roteirizacao: Literal["carteira", "frota"]
+    usuario_nome: Optional[str] = None
+    filial_nome: Optional[str] = None
+    origem_sistema: Optional[str] = "sistema_1"
+    modelo_roteirizacao: Optional[str] = "padrao"
     filtros_aplicados: dict = Field(default_factory=dict)
+    callback_url: Optional[str] = None
+
+    # Compatibilidade legada opcional
+    usuario_id: Optional[str] = None
+    filial_id: Optional[str] = None
+    upload_id: Optional[str] = None
+    rodada_id: Optional[str] = None
+    data_execucao: Optional[str] = None
+    data_base_roteirizacao: Optional[str] = None
+    tipo_roteirizacao: Optional[Literal["carteira", "frota"]] = None
 
 
 class RoteirizacaoRequest(BaseModel):
@@ -324,5 +329,5 @@ class RoteirizacaoRequest(BaseModel):
     veiculos: List[Veiculo] = Field(default_factory=list)
     regionalidades: List[Regionalidade] = Field(default_factory=list)
 
-    parametros: ParametrosRoteirizacao
+    parametros: ParametrosRoteirizacao = Field(default_factory=ParametrosRoteirizacao)
     configuracao_frota: List[ConfiguracaoFrotaItem] = Field(default_factory=list)
