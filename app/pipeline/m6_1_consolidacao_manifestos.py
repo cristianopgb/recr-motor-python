@@ -5,6 +5,129 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 
+MANIFESTOS_BASE_M6_COLS = [
+    "manifesto_id",
+    "origem_manifesto_modulo",
+    "origem_manifesto_tipo",
+    "veiculo_tipo",
+    "veiculo_perfil",
+    "veiculo_exclusivo_flag",
+    "texto_exclusivo_detectado_m6",
+    "peso_base_antes_m6",
+    "km_base_antes_m6",
+    "ocupacao_base_antes_m6",
+    "capacidade_peso_kg_veiculo",
+    "max_km_distancia_veiculo",
+    "max_paradas_veiculo",
+    "qtd_itens_base_antes_m6",
+    "qtd_ctes_base_antes_m6",
+    "qtd_paradas_base_antes_m6",
+    "veiculo_exclusivo_recomposto_m4",
+    "veiculo_exclusivo_flag_itens_m4",
+    "origem_etapa_4b1_exclusivo_m4",
+]
+
+ITENS_MANIFESTOS_BASE_M6_COLS = [
+    "manifesto_id",
+    "origem_manifesto_modulo",
+    "origem_manifesto_tipo",
+    "id_linha_pipeline",
+    "nro_documento",
+    "destinatario",
+    "cidade",
+    "uf",
+    "subregiao",
+    "mesorregiao",
+    "distancia_rodoviaria_est_km",
+    "peso_calculado",
+    "peso_kg",
+    "vol_m3",
+    "restricao_veiculo",
+    "veiculo_exclusivo_flag",
+    "origem_etapa",
+    "latitude_filial",
+    "longitude_filial",
+    "origem_latitude",
+    "origem_longitude",
+    "latitude_destinatario",
+    "longitude_destinatario",
+    "latitude",
+    "longitude",
+]
+
+ESTATISTICAS_MANIFESTOS_ANTES_M6_COLS = [
+    "manifesto_id",
+    "origem_manifesto_modulo",
+    "origem_manifesto_tipo",
+    "veiculo_tipo",
+    "veiculo_perfil",
+    "veiculo_exclusivo_flag",
+    "texto_exclusivo_detectado_m6",
+    "peso_base_antes_m6",
+    "km_base_antes_m6",
+    "ocupacao_base_antes_m6",
+    "capacidade_peso_kg_veiculo",
+    "max_km_distancia_veiculo",
+    "max_paradas_veiculo",
+    "qtd_itens_base_antes_m6",
+    "qtd_ctes_base_antes_m6",
+    "qtd_paradas_base_antes_m6",
+    "veiculo_exclusivo_recomposto_m4",
+    "veiculo_exclusivo_flag_itens_m4",
+    "origem_etapa_4b1_exclusivo_m4",
+    "mesorregiao_manifesto_m6",
+    "peso_itens_antes_m6",
+    "peso_auditoria_itens_antes_m6",
+    "vol_itens_antes_m6",
+    "km_itens_antes_m6",
+    "qtd_itens_recalculada_antes_m6",
+    "qtd_ctes_recalculada_antes_m6",
+    "qtd_paradas_recalculada_antes_m6",
+    "ocupacao_recalculada_antes_m6",
+    "delta_peso_base_vs_itens_antes_m6",
+    "delta_km_base_vs_itens_antes_m6",
+]
+
+PARES_ELEGIVEIS_OTIMIZACAO_M6_COLS = [
+    "mesorregiao_manifesto_m6",
+    "manifesto_id_a",
+    "manifesto_id_b",
+    "origem_manifesto_modulo_a",
+    "origem_manifesto_modulo_b",
+    "veiculo_tipo_a",
+    "veiculo_tipo_b",
+    "veiculo_perfil_a",
+    "veiculo_perfil_b",
+    "veiculo_exclusivo_flag_a",
+    "veiculo_exclusivo_flag_b",
+    "ocupacao_antes_a",
+    "ocupacao_antes_b",
+    "km_antes_a",
+    "km_antes_b",
+    "peso_antes_a",
+    "peso_antes_b",
+    "score_criticidade_a",
+    "score_criticidade_b",
+    "score_par_criticidade_m6",
+    "motivo_elegibilidade_m6",
+]
+
+def _empty_df(colunas: List[str]) -> pd.DataFrame:
+    return pd.DataFrame(columns=colunas)
+
+def _empty_manifestos_base_m6_df() -> pd.DataFrame:
+    return _empty_df(MANIFESTOS_BASE_M6_COLS)
+
+def _empty_itens_manifestos_base_m6_df() -> pd.DataFrame:
+    return _empty_df(ITENS_MANIFESTOS_BASE_M6_COLS)
+
+def _empty_estatisticas_manifestos_antes_m6_df() -> pd.DataFrame:
+    return _empty_df(ESTATISTICAS_MANIFESTOS_ANTES_M6_COLS)
+
+def _empty_pares_elegiveis_otimizacao_m6_df() -> pd.DataFrame:
+    return _empty_df(PARES_ELEGIVEIS_OTIMIZACAO_M6_COLS)
+
+
 # =========================================================================================
 # M6.1 - CONSOLIDAÇÃO E PREPARAÇÃO DA OTIMIZAÇÃO
 # =========================================================================================
@@ -233,7 +356,7 @@ def _padronizar_manifestos(
     tipo_manifesto_origem: str,
 ) -> pd.DataFrame:
     if df_manifestos is None or df_manifestos.empty:
-        return pd.DataFrame()
+        return _empty_manifestos_base_m6_df()
 
     df = _normalizar_datetime_para_str(df_manifestos.copy())
 
@@ -323,7 +446,7 @@ def _padronizar_itens_manifestados(
     tipo_manifesto_origem: str,
 ) -> pd.DataFrame:
     if df_itens is None or df_itens.empty:
-        return pd.DataFrame()
+        return _empty_itens_manifestos_base_m6_df()
 
     df = _normalizar_datetime_para_str(df_itens.copy())
 
@@ -473,7 +596,7 @@ def _estatisticas_manifestos_antes(
     df_itens_base: pd.DataFrame,
 ) -> pd.DataFrame:
     if df_manifestos_base.empty:
-        return pd.DataFrame()
+        return _empty_estatisticas_manifestos_antes_m6_df()
 
     if df_itens_base.empty:
         out = df_manifestos_base.copy()
@@ -544,7 +667,12 @@ def _aplicar_score_criticidade_por_mesorregiao(
     df_estatisticas_manifestos_antes_m6: pd.DataFrame,
 ) -> pd.DataFrame:
     if df_estatisticas_manifestos_antes_m6 is None or df_estatisticas_manifestos_antes_m6.empty:
-        return pd.DataFrame()
+        out = _empty_estatisticas_manifestos_antes_m6_df()
+        out["score_ocupacao_ruim_m6"] = pd.Series(dtype="float64")
+        out["score_km_ruim_m6"] = pd.Series(dtype="float64")
+        out["score_criticidade_m6"] = pd.Series(dtype="float64")
+        out["ranking_criticidade_m6"] = pd.Series(dtype="int64")
+        return out
 
     df = df_estatisticas_manifestos_antes_m6.copy()
 
@@ -643,7 +771,7 @@ def _par_elegivel_por_faixa(r1: pd.Series, r2: pd.Series) -> Tuple[bool, str]:
 
 def _gerar_pares_elegiveis_otimizacao(df_manifestos_scored_m6: pd.DataFrame) -> pd.DataFrame:
     if df_manifestos_scored_m6 is None or df_manifestos_scored_m6.empty:
-        return pd.DataFrame()
+        return _empty_pares_elegiveis_otimizacao_m6_df()
 
     registros: List[Dict[str, Any]] = []
 
@@ -760,13 +888,13 @@ def executar_m6_1_consolidacao_manifestos(
     df_manifestos_base_m6 = (
         pd.concat([df for df in blocos_manifestos if df is not None and not df.empty], ignore_index=True)
         if any(df is not None and not df.empty for df in blocos_manifestos)
-        else pd.DataFrame()
+        else _empty_manifestos_base_m6_df()
     )
 
     df_itens_manifestos_base_m6 = (
         pd.concat([df for df in blocos_itens if df is not None and not df.empty], ignore_index=True)
         if any(df is not None and not df.empty for df in blocos_itens)
-        else pd.DataFrame()
+        else _empty_itens_manifestos_base_m6_df()
     )
 
     if not df_manifestos_base_m6.empty:
