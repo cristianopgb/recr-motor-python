@@ -156,6 +156,126 @@ def _safe_dict(valor: Any) -> Dict[str, Any]:
     return valor if isinstance(valor, dict) else {}
 
 
+def _valor_primeira_coluna_existente(row: pd.Series, colunas: List[str]) -> Any:
+    for col in colunas:
+        if col in row.index:
+            valor = row[col]
+            if pd.notna(valor):
+                return valor
+    return None
+
+
+def _normalizar_texto(valor: Any) -> str | None:
+    if valor is None or pd.isna(valor):
+        return None
+    txt = str(valor).strip()
+    return txt if txt != "" else None
+
+
+def _normalizar_float(valor: Any) -> float | None:
+    try:
+        if valor is None or pd.isna(valor):
+            return None
+        return float(valor)
+    except Exception:
+        return None
+
+
+def _normalizar_int(valor: Any) -> int | None:
+    try:
+        if valor is None or pd.isna(valor):
+            return None
+        return int(float(valor))
+    except Exception:
+        return None
+
+
+def _montar_remanescentes_nao_roteirizaveis_m3(df_carteira_triagem: pd.DataFrame | None) -> List[Dict[str, Any]]:
+    if df_carteira_triagem is None or df_carteira_triagem.empty:
+        return []
+
+    if "status_triagem" not in df_carteira_triagem.columns:
+        return []
+
+    base = df_carteira_triagem.loc[
+        df_carteira_triagem["status_triagem"].astype(str) != "roteirizavel"
+    ].copy()
+
+    if base.empty:
+        return []
+
+    registros: List[Dict[str, Any]] = []
+
+    for _, row in base.iterrows():
+        status_triagem = _normalizar_texto(row.get("status_triagem"))
+        motivo_triagem = _normalizar_texto(row.get("motivo_triagem"))
+
+        registro = {
+            "id_linha_pipeline": _normalizar_texto(row.get("id_linha_pipeline")),
+            "nro_documento": _valor_primeira_coluna_existente(row, ["nro_documento", "Nro Doc.", "nro_doc"]),
+            "destinatario": _valor_primeira_coluna_existente(row, ["destinatario", "Destin", "Destina"]),
+            "cidade": _valor_primeira_coluna_existente(row, ["cidade", "Cidade Dest.", "Cida"]),
+            "uf": _valor_primeira_coluna_existente(row, ["uf", "UF"]),
+            "motivo": motivo_triagem or "Nao roteirizavel na triagem M3",
+            "status_triagem": status_triagem,
+            "grupo_remanescente": "nao_roteirizavel",
+            "etapa_origem": "m3_triagem",
+            "payload_apoio_json": {
+                "status_triagem": status_triagem,
+                "motivo_triagem": motivo_triagem,
+                "grupo_saida": _normalizar_texto(row.get("grupo_saida")),
+                "folga_dias": _normalizar_float(row.get("folga_dias")),
+                "data_agenda": _normalizar_texto(row.get("data_agenda")),
+                "data_leadtime": _normalizar_texto(row.get("data_leadtime")),
+                "prioridade_label": _normalizar_texto(row.get("prioridade_label")),
+            },
+        }
+        registros.append(registro)
+
+    return registros
+
+
+def _montar_saldo_final_roteirizacao(df_remanescente_m6_2: pd.DataFrame | None) -> List[Dict[str, Any]]:
+    if df_remanescente_m6_2 is None or df_remanescente_m6_2.empty:
+        return []
+
+    registros: List[Dict[str, Any]] = []
+
+    for _, row in df_remanescente_m6_2.iterrows():
+        motivo = (
+            _normalizar_texto(_valor_primeira_coluna_existente(row, ["motivo_remanescente"]))
+            or _normalizar_texto(_valor_primeira_coluna_existente(row, ["ultima_ocorrencia", "Última Ocorrência"]))
+            or _normalizar_texto(_valor_primeira_coluna_existente(row, ["agenda", "Agenda"]))
+            or _normalizar_texto(_valor_primeira_coluna_existente(row, ["status_r", "Status R"]))
+            or "Saldo final da roteirizacao"
+        )
+
+        registro = {
+            "id_linha_pipeline": _normalizar_texto(row.get("id_linha_pipeline")),
+            "nro_documento": _valor_primeira_coluna_existente(row, ["nro_documento", "Nro Doc.", "nro_doc"]),
+            "destinatario": _valor_primeira_coluna_existente(row, ["destinatario", "Destin", "Destina"]),
+            "cidade": _valor_primeira_coluna_existente(row, ["cidade", "Cidade Dest.", "Cida"]),
+            "uf": _valor_primeira_coluna_existente(row, ["uf", "UF"]),
+            "motivo": motivo,
+            "grupo_remanescente": "saldo_roteirizacao",
+            "etapa_origem": "saldo_final_roteirizacao",
+            "payload_apoio_json": {
+                "subregiao": _normalizar_texto(row.get("subregiao")),
+                "mesorregiao": _normalizar_texto(row.get("mesorregiao")),
+                "distancia_rodoviaria_est_km": _normalizar_float(row.get("distancia_rodoviaria_est_km")),
+                "peso_calculado": _normalizar_float(row.get("peso_calculado")),
+                "peso_kg": _normalizar_float(row.get("peso_kg")),
+                "vol_m3": _normalizar_float(row.get("vol_m3")),
+                "agendada": bool(row.get("agendada", False)) if pd.notna(row.get("agendada", False)) else False,
+                "folga_dias": _normalizar_float(row.get("folga_dias")),
+                "restricao_veiculo": _normalizar_texto(row.get("restricao_veiculo")),
+            },
+        }
+        registros.append(registro)
+
+    return registros
+
+
 def _montar_resumo_negocio_parcial(
     *,
     contexto: PipelineContext | None,
@@ -888,6 +1008,9 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
         tentativas_sequenciamento_m7 = _serializar_dataframe_para_records(df_tentativas_sequenciamento_m7, limit=None)
         diagnostico_recuperacao_coordenadas_m7 = _serializar_dataframe_para_records(df_diagnostico_recuperacao_coordenadas_m7, limit=None)
 
+        remanescentes_nao_roteirizaveis_m3 = _montar_remanescentes_nao_roteirizaveis_m3(df_carteira_triagem)
+        saldo_final_roteirizacao = _montar_saldo_final_roteirizacao(df_remanescente_m6_2)
+
         tempo_serializacao = _duracao_ms(t0)
         metricas_tempo["serializacao_resposta_ms"] = tempo_serializacao
 
@@ -961,6 +1084,10 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "manifestos_sequenciamento_resumo_m7": manifestos_sequenciamento_resumo_m7,
             "tentativas_sequenciamento_m7": tentativas_sequenciamento_m7,
             "diagnostico_recuperacao_coordenadas_m7": diagnostico_recuperacao_coordenadas_m7,
+            "remanescentes": {
+                "nao_roteirizaveis_m3": remanescentes_nao_roteirizaveis_m3,
+                "saldo_final_roteirizacao": saldo_final_roteirizacao,
+            },
             "auditoria_serializacao": {
                 "manifestos_m7_total": _safe_len(df_manifestos_m7),
                 "manifestos_m7_retornado": len(manifestos_m7),
@@ -972,6 +1099,8 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                 "tentativas_sequenciamento_m7_retornado": len(tentativas_sequenciamento_m7),
                 "diagnostico_recuperacao_coordenadas_m7_total": _safe_len(df_diagnostico_recuperacao_coordenadas_m7),
                 "diagnostico_recuperacao_coordenadas_m7_retornado": len(diagnostico_recuperacao_coordenadas_m7),
+                "nao_roteirizaveis_m3_total": len(remanescentes_nao_roteirizaveis_m3),
+                "saldo_final_roteirizacao_total": len(saldo_final_roteirizacao),
             },
             "auditoria_m7": auditoria_m7,
             "logs": logs,
@@ -997,6 +1126,8 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                         df_diagnostico_recuperacao_coordenadas_m7,
                         "df_diagnostico_recuperacao_coordenadas_m7",
                     ),
+                    "df_carteira_triagem": _snapshot_dataframe(df_carteira_triagem, "df_carteira_triagem"),
+                    "df_remanescente_m6_2": _snapshot_dataframe(df_remanescente_m6_2, "df_remanescente_m6_2"),
                 },
                 "resumos_dataframes": {
                     "df_manifestos_m7": _montar_resumo_dataframe(df_manifestos_m7, "df_manifestos_m7"),
@@ -1016,6 +1147,8 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                         df_diagnostico_recuperacao_coordenadas_m7,
                         "df_diagnostico_recuperacao_coordenadas_m7",
                     ),
+                    "df_carteira_triagem": _montar_resumo_dataframe(df_carteira_triagem, "df_carteira_triagem"),
+                    "df_remanescente_m6_2": _montar_resumo_dataframe(df_remanescente_m6_2, "df_remanescente_m6_2"),
                 },
             }
 
@@ -1042,6 +1175,9 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                 },
             )
         )
+
+        remanescentes_nao_roteirizaveis_m3 = _montar_remanescentes_nao_roteirizaveis_m3(df_carteira_triagem)
+        saldo_final_roteirizacao = _montar_saldo_final_roteirizacao(df_remanescente_m6_2)
 
         resposta_erro: Dict[str, Any] = {
             "status": "erro",
@@ -1110,6 +1246,19 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             "manifestos_sequenciamento_resumo_m7": _serializar_dataframe_para_records(df_manifestos_sequenciamento_resumo_m7, limit=None),
             "tentativas_sequenciamento_m7": _serializar_dataframe_para_records(df_tentativas_sequenciamento_m7, limit=None),
             "diagnostico_recuperacao_coordenadas_m7": _serializar_dataframe_para_records(df_diagnostico_recuperacao_coordenadas_m7, limit=None),
+            "remanescentes": {
+                "nao_roteirizaveis_m3": remanescentes_nao_roteirizaveis_m3,
+                "saldo_final_roteirizacao": saldo_final_roteirizacao,
+            },
+            "auditoria_serializacao": {
+                "manifestos_m7_total": _safe_len(df_manifestos_m7),
+                "itens_manifestos_sequenciados_m7_total": _safe_len(df_itens_manifestos_sequenciados_m7),
+                "manifestos_sequenciamento_resumo_m7_total": _safe_len(df_manifestos_sequenciamento_resumo_m7),
+                "tentativas_sequenciamento_m7_total": _safe_len(df_tentativas_sequenciamento_m7),
+                "diagnostico_recuperacao_coordenadas_m7_total": _safe_len(df_diagnostico_recuperacao_coordenadas_m7),
+                "nao_roteirizaveis_m3_total": len(remanescentes_nao_roteirizaveis_m3),
+                "saldo_final_roteirizacao_total": len(saldo_final_roteirizacao),
+            },
             "auditoria_m7": auditoria_m7,
             "logs": logs,
             "erro_tecnico": {
@@ -1139,6 +1288,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                     "df_remanescente_m5_4": _snapshot_dataframe(df_remanescente_m5_4, "df_remanescente_m5_4"),
                     "df_manifestos_m6_2": _snapshot_dataframe(df_manifestos_m6_2, "df_manifestos_m6_2"),
                     "df_itens_manifestos_m6_2": _snapshot_dataframe(df_itens_manifestos_m6_2, "df_itens_manifestos_m6_2"),
+                    "df_remanescente_m6_2": _snapshot_dataframe(df_remanescente_m6_2, "df_remanescente_m6_2"),
                 },
                 "resumos_dataframes": {
                     "df_carteira_enriquecida": _montar_resumo_dataframe(df_carteira_enriquecida, "df_carteira_enriquecida"),
@@ -1158,6 +1308,7 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
                     "df_remanescente_m5_4": _montar_resumo_dataframe(df_remanescente_m5_4, "df_remanescente_m5_4"),
                     "df_manifestos_m6_2": _montar_resumo_dataframe(df_manifestos_m6_2, "df_manifestos_m6_2"),
                     "df_itens_manifestos_m6_2": _montar_resumo_dataframe(df_itens_manifestos_m6_2, "df_itens_manifestos_m6_2"),
+                    "df_remanescente_m6_2": _montar_resumo_dataframe(df_remanescente_m6_2, "df_remanescente_m6_2"),
                 },
             }
 
