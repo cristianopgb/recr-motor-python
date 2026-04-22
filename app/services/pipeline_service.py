@@ -326,9 +326,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
     resumo_m7: Dict[str, Any] | None = None
 
     try:
-        # =====================================================================================
-        # PAYLOAD -> CONTEXTO
-        # =====================================================================================
         t0 = _agora()
         contexto = normalizar_payload_para_pipeline(payload)
         tempo_payload = _duracao_ms(t0)
@@ -351,9 +348,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             )
         )
 
-        # =====================================================================================
-        # M0
-        # =====================================================================================
         t0 = _agora()
         resultado_m0 = _executar_m0_adapter(contexto)
         tempo_m0 = _duracao_ms(t0)
@@ -375,9 +369,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             )
         )
 
-        # =====================================================================================
-        # M1
-        # =====================================================================================
         t0 = _agora()
         resultado_m1 = executar_m1_padronizacao(
             df_carteira_raw=resultado_m0["df_carteira_raw"],
@@ -412,9 +403,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             )
         )
 
-        # =====================================================================================
-        # M2
-        # =====================================================================================
         t0 = _agora()
         df_carteira_enriquecida, resumo_m2 = executar_m2_enriquecimento(
             df_carteira_tratada=df_carteira_tratada,
@@ -438,9 +426,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             )
         )
 
-        # =====================================================================================
-        # M3
-        # =====================================================================================
         t0 = _agora()
         df_carteira_triagem, meta_m3 = executar_m3_triagem(
             df_carteira_enriquecida=df_carteira_enriquecida,
@@ -469,9 +454,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             )
         )
 
-        # =====================================================================================
-        # M3.1
-        # =====================================================================================
         t0 = _agora()
         df_input_oficial_bloco_4, meta_m31 = executar_m3_1_validacao_fronteira(
             df_carteira_roteirizavel=df_carteira_roteirizavel,
@@ -495,9 +477,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             )
         )
 
-        # =====================================================================================
-        # M4
-        # =====================================================================================
         t0 = _agora()
         outputs_m4, meta_m4 = executar_m4_manifestos_fechados(
             df_input_oficial_bloco_4=df_input_oficial_bloco_4,
@@ -543,9 +522,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             )
         )
 
-        # =====================================================================================
-        # M5.1
-        # =====================================================================================
         t0 = _agora()
         outputs_m5_1, meta_m5_1 = executar_m5_1_triagem_cidades(
             df_remanescente_roteirizavel_bloco_4=df_remanescente_roteirizavel_bloco_4,
@@ -570,9 +546,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             )
         )
 
-        # =====================================================================================
-        # M5.2
-        # =====================================================================================
         t0 = _agora()
         outputs_m5_2, meta_m5_2 = executar_m5_2_composicao_cidades(
             df_saldo_elegivel_composicao_m5_1=df_saldo_elegivel_composicao_m5_1,
@@ -607,9 +580,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             )
         )
 
-        # =====================================================================================
-        # M5.3A
-        # =====================================================================================
         t0 = _agora()
         outputs_m5_3a, meta_m5_3a = executar_m5_3_triagem_subregioes(
             df_remanescente_m5_2=df_remanescente_m5_2,
@@ -641,9 +611,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             )
         )
 
-        # =====================================================================================
-        # M5.3B
-        # =====================================================================================
         t0 = _agora()
         outputs_m5_3b, meta_m5_3b = executar_m5_3_composicao_subregioes(
             df_saldo_elegivel_composicao_m5_3=df_saldo_elegivel_composicao_m5_3,
@@ -678,9 +645,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             )
         )
 
-        # =====================================================================================
-        # M5.4A
-        # =====================================================================================
         t0 = _agora()
         outputs_m5_4a, meta_m5_4a = executar_m5_4a_triagem_mesorregioes(
             df_remanescente_m5_3=df_remanescente_m5_3,
@@ -712,18 +676,52 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             )
         )
 
-        # =====================================================================================
-        # M5.4B
-        # =====================================================================================
         t0 = _agora()
-        outputs_m5_4b, meta_m5_4b = executar_m5_4b_composicao_mesorregioes(
-            df_saldo_elegivel_composicao_m5_4=df_saldo_elegivel_composicao_m5_4,
-            df_perfis_elegiveis_por_mesorregiao_m5_4=df_perfis_elegiveis_por_mesorregiao_m5_4,
-            rodada_id=contexto.rodada_id,
-            data_base_roteirizacao=contexto.data_base,
-            tipo_roteirizacao=contexto.tipo_roteirizacao,
-            caminhos_pipeline=contexto.caminhos_pipeline,
-        )
+
+        if df_saldo_elegivel_composicao_m5_4.empty or df_perfis_elegiveis_por_mesorregiao_m5_4.empty:
+            outputs_m5_4b = {
+                "df_premanifestos_m5_4": pd.DataFrame(),
+                "df_itens_premanifestos_m5_4": pd.DataFrame(),
+                "df_tentativas_m5_4": pd.DataFrame(),
+                "df_remanescente_m5_4": df_saldo_elegivel_composicao_m5_4.copy(),
+            }
+            meta_m5_4b = {
+                "resumo_m5_4b": {
+                    "modulo": "M5.4B",
+                    "data_base_roteirizacao": str(contexto.data_base) if contexto and contexto.data_base is not None else None,
+                    "tipo_roteirizacao": contexto.tipo_roteirizacao if contexto else None,
+                    "linhas_entrada_m5_4": _safe_len(df_saldo_elegivel_composicao_m5_4),
+                    "pre_manifestos_gerados_m5_4": 0,
+                    "itens_pre_manifestados_m5_4": 0,
+                    "remanescente_saida_m5_4": _safe_len(df_saldo_elegivel_composicao_m5_4),
+                    "mesorregioes_processadas_m5_4": 0,
+                    "estrategia_m5_4": [
+                        "mesorregiao_por_mesorregiao",
+                        "solver_guiado_com_poda",
+                        "filtro_previo_blocos_compativeis_por_perfil",
+                        "poda_de_raio_por_cliente",
+                        "maximiza_ocupacao_e_aproveitamento",
+                        "multiplos_fechamentos_na_mesma_mesorregiao",
+                        "SKIP_M5_4B_SEM_SALDO_OU_SEM_PERFIS",
+                    ],
+                    "caminhos_pipeline": contexto.caminhos_pipeline if contexto else {},
+                    "motivo_retorno_vazio": (
+                        "sem_saldo_elegivel_m5_4"
+                        if df_saldo_elegivel_composicao_m5_4.empty
+                        else "sem_perfis_elegiveis_m5_4"
+                    ),
+                }
+            }
+        else:
+            outputs_m5_4b, meta_m5_4b = executar_m5_4b_composicao_mesorregioes(
+                df_saldo_elegivel_composicao_m5_4=df_saldo_elegivel_composicao_m5_4,
+                df_perfis_elegiveis_por_mesorregiao_m5_4=df_perfis_elegiveis_por_mesorregiao_m5_4,
+                rodada_id=contexto.rodada_id,
+                data_base_roteirizacao=contexto.data_base,
+                tipo_roteirizacao=contexto.tipo_roteirizacao,
+                caminhos_pipeline=contexto.caminhos_pipeline,
+            )
+
         tempo_m5_4b = _duracao_ms(t0)
         metricas_tempo["m5_4b_composicao_mesorregioes_ms"] = tempo_m5_4b
 
@@ -737,7 +735,11 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             _log(
                 modulo="m5_4b_composicao_mesorregioes",
                 status="ok",
-                mensagem="M5.4B executado com sucesso",
+                mensagem=(
+                    "M5.4B executado com sucesso"
+                    if not df_saldo_elegivel_composicao_m5_4.empty and not df_perfis_elegiveis_por_mesorregiao_m5_4.empty
+                    else "M5.4B pulado sem erro por ausência de saldo/perfis elegíveis"
+                ),
                 quantidade_entrada=_safe_len(df_saldo_elegivel_composicao_m5_4),
                 quantidade_saida=_safe_len(df_itens_premanifestos_m5_4),
                 tempo_ms=tempo_m5_4b,
@@ -749,9 +751,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             )
         )
 
-        # =====================================================================================
-        # M6.1
-        # =====================================================================================
         t0 = _agora()
         outputs_m6_1, meta_m6_1 = executar_m6_1_consolidacao_manifestos(
             df_manifestos_m4=df_manifestos_m4,
@@ -797,9 +796,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             )
         )
 
-        # =====================================================================================
-        # M6.2
-        # =====================================================================================
         t0 = _agora()
         resultado_m6_2 = executar_m6_2_complemento_ocupacao(
             df_manifestos_base_m6=df_manifestos_base_m6,
@@ -843,9 +839,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             )
         )
 
-        # =====================================================================================
-        # M7
-        # =====================================================================================
         t0 = _agora()
         outputs_m7, meta_m7 = executar_m7_sequenciamento_entregas(
             df_manifestos_m6_2=df_manifestos_m6_2,
@@ -887,9 +880,6 @@ def executar_pipeline(payload: RoteirizacaoRequest) -> Dict[str, Any]:
             )
         )
 
-        # =====================================================================================
-        # SERIALIZAÇÃO FINAL - SOMENTE M7
-        # =====================================================================================
         t0 = _agora()
 
         manifestos_m7 = _serializar_dataframe_para_records(df_manifestos_m7, limit=None)
