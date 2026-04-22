@@ -676,9 +676,9 @@ def executar_m5_4b_composicao_mesorregioes(
         else pd.DataFrame()
     )
 
-    if perfis_elegiveis.empty:
-        raise ValueError("M5.4B exige df_perfis_elegiveis_por_mesorregiao_m5_4.")
-
+    # CORREÇÃO:
+    # Quando o M5.4A já concluiu que não há saldo elegível para composição,
+    # o M5.4B deve retornar vazio e seguir o pipeline, e não lançar erro técnico.
     if saldo.empty:
         outputs_vazio = {
             "df_premanifestos_m5_4": pd.DataFrame(),
@@ -706,6 +706,7 @@ def executar_m5_4b_composicao_mesorregioes(
                     "VERSAO_M5_4B_2026_04_14_FIX_RESTRICAO",
                 ],
                 "caminhos_pipeline": caminhos_pipeline or {},
+                "motivo_retorno_vazio": "sem_saldo_elegivel_m5_4",
             },
             "auditoria_m5_4b": {
                 "total_tentativas": 0,
@@ -716,6 +717,10 @@ def executar_m5_4b_composicao_mesorregioes(
             },
         }
         return outputs_vazio, meta_vazio
+
+    # Só deve exigir perfis se houver saldo elegível para compor.
+    if perfis_elegiveis.empty:
+        raise ValueError("M5.4B exige df_perfis_elegiveis_por_mesorregiao_m5_4.")
 
     saldo = precalcular_ordenacao_m5(saldo, suffix=suffix)
     saldo = ordenar_operacional_m5(saldo, suffix=suffix)
